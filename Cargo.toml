@@ -1,6 +1,12 @@
 [workspace]
 resolver = "2"
-members = ["crates/metadata", "crates/secrets", "crates/duckdb-engine", "crates/cli"]
+members = [
+    "crates/metadata",
+    "crates/secrets",
+    "crates/duckdb-engine",
+    "crates/cli",
+    "apps/desktop",
+]
 
 [workspace.package]
 version = "0.1.0"

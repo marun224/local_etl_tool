@@ -20,7 +20,9 @@ pub mod sql;
 use thiserror::Error;
 
 pub use context::{Context, ContextError, Contexts};
-pub use exec::{run, ExecError, RunOptions, RunReport, SkipReason, StageFailure, StageOutcome};
+pub use exec::{
+    preview, run, ExecError, Preview, RunOptions, RunReport, SkipReason, StageFailure, StageOutcome,
+};
 pub use params::{resolve, ParamError, ParamWarning, Resolved, Resolver};
 pub use plan::specs::{registry, Component, Registry};
 pub use plan::{

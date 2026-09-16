@@ -464,6 +464,44 @@ impl Plan {
             .collect()
     }
 
+    /// The stages needed to produce one node's relation, in execution order.
+    ///
+    /// Sinks are left out even when they are ancestors, because a preview must
+    /// not write anything. Looking at what a node holds is a read, and a read
+    /// that overwrites someone's output file would be a trap — the canvas calls
+    /// this while a person clicks around a half-built pipeline.
+    ///
+    /// `None` when the node is not in the plan.
+    pub fn upto(&self, node_id: &str) -> Option<Vec<&Stage>> {
+        self.stage(node_id)?;
+
+        // Walk back over inputs to find everything the node depends on, then
+        // keep plan order — which is already topological, so the result is
+        // runnable as it stands.
+        let mut needed: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let mut frontier = vec![node_id];
+
+        while let Some(current) = frontier.pop() {
+            if !needed.insert(current) {
+                continue;
+            }
+
+            if let Some(stage) = self.stage(current) {
+                for input in &stage.inputs {
+                    frontier.push(input.node_id.as_str());
+                }
+            }
+        }
+
+        Some(
+            self.stages
+                .iter()
+                .filter(|stage| needed.contains(stage.node_id.as_str()))
+                .filter(|stage| stage.kind != StageKind::Sink)
+                .collect(),
+        )
+    }
+
     /// Node ids in execution order — the useful form for tests and for the
     /// canvas's "step 3 of 7" display.
     pub fn order(&self) -> Vec<&str> {

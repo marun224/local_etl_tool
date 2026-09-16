@@ -3,19 +3,21 @@
 **State only.** Design lives in [PLAN_duckle_parity.md](PLAN_duckle_parity.md). Read this file
 first when picking the project back up.
 
-> ## ⏸ Paused 2026-09-16, after Phase 6b
+> ## ⏸ Paused 2026-09-16, after Phase 7a
 >
-> Stopped at a clean boundary — gate green, nothing mid-edit. **Phase 6b is complete.**
+> Stopped at a clean boundary — gate green, nothing mid-edit. **Phase 7a is complete.**
 >
 > Phases 0–5 are dated 2026-09-15 because that is when the work was done; the clock rolled
 > past midnight while pausing, which is the only reason those lines read a day later.
 >
-> **To resume:** read this file, then Phase 7 in the plan. Phase 7 is the desktop app and is
-> explicitly multi-sitting — split it at the sub-bullets, 7a first.
+> **To resume:** read this file, then Phase 7 in the plan, then start **7b** — the xyflow
+> canvas. The IPC surface it needs already exists and is tested; 7b is frontend work.
 >
 > ```powershell
 > cd D:\workspace\ETL_Local_Tool
-> cargo test --workspace                                            # expect 326 passing
+> cargo test --workspace                                            # expect 335 passing
+> npm --prefix frontend run typecheck                               # expect clean
+> npm --prefix frontend run build                                   # expect clean
 > .\target\debug\etl.exe components                                 # expect 54
 > .\target\debug\etl.exe run samples\pipelines\orders_enriched.json # expect 12/5/7/6/6
 > .\target\debug\etl.exe run samples\pipelines\orders_checked.json  # expect 12/10+2/9+1/9/2/1
@@ -52,8 +54,9 @@ first when picking the project back up.
 
 ## Where things stand
 
-- **Next phase:** Phase 7 — the desktop app (Tauri 2 + React 19 + xyflow). Multi-sitting; start
-  with 7a, the Tauri shell and its IPC commands.
+- **Next phase:** Phase 7b — the `@xyflow/react` canvas: palette from the manifest, drag-drop,
+  edge wiring with port validation, save/load to the same JSON. Everything it calls already
+  exists and is tested.
 - **In progress:** nothing
 - **Blocked on:** nothing.
 
@@ -68,10 +71,11 @@ pass), `ctl.throttle` (nothing to throttle until Phase 10 has a row cursor).
 
 ## What works today
 
-Phases 0–6 are complete, so there is a working CLI. From the repo root:
+Phases 0–6 are complete and 7a is done, so there is a working CLI **and a desktop shell**. From
+the repo root:
 
 ```powershell
-cargo test --workspace        # 326 tests: 247 engine, 44 end-to-end, 20 secrets, 15 metadata
+cargo test --workspace        # 335 tests: 247 engine, 44 e2e, 20 secrets, 15 metadata, 9 desktop
 .\target\debug\etl.exe run samples\pipelines\orders_enriched.json
 .\target\debug\etl.exe validate samples\pipelines\orders_enriched.json
 .\target\debug\etl.exe plan samples\pipelines\orders_enriched.json --script
@@ -137,6 +141,32 @@ partitioning rows and so have no reject port: `qa.row_count`, `qa.schema_match`.
 `ctl.branch`, `ctl.fail`, `ctl.log`, `ctl.sequence`, `ctl.wait`. Everything else in the six
 namespaces compiles to `UnsupportedComponent`, by design.
 
+**There is a desktop shell, and it is a thin caller.** `apps/desktop/` is a Tauri 2 window over
+five IPC commands — `list_components`, `compile_pipeline`, `validate_pipeline`, `run_pipeline`,
+`preview_node` — and holds no SQL, no DuckDB, and no component list of its own. The frontend
+holds none either: the palette and property panels are generated from the manifest the engine
+serves. That is what keeps the GUI and the CLI interchangeable on the same file rather than
+merely similar.
+
+```powershell
+npm --prefix frontend install       # once
+npm --prefix frontend run dev       # vite on :5173, in one terminal
+cargo run -p etl-desktop            # the window, in another
+```
+
+`npm --prefix frontend run tauri dev` does both once you want one command.
+
+**The Rust gate does not need the frontend.** `cargo test --workspace` builds the desktop crate
+without `frontend/dist` existing — verified by deleting it and rebuilding. Only an actual bundle
+needs the frontend built first.
+
+**Previewing is a read.** `preview_node` runs only the stages a node depends on and **drops the
+sinks**, so looking at what a node holds can never overwrite an output file. It returns at most
+500 rows and says whether there are more.
+
+**What 7a is not:** there is no canvas yet. The shell renders a JSON textarea and four buttons —
+scaffolding that exists to prove the five commands work end to end, and that 7b replaces.
+
 **Extensions are vendored**, not installed system-wide: `.\scripts\fetch-duckdb-extensions.ps1`
 puts them under `tools/duckdb/extensions/` and the executor points DuckDB at that directory. A
 component declares what it needs with `.requires_extension(...)`, and a plan emits a `LOAD`
@@ -179,8 +209,10 @@ extension, which sits badly with Phase 9's vendored set) and DuckLake (a catalog
 needs its own design pass rather than a thirteenth copy of the ATTACH shape). Both are listed
 under Phase 4 in the plan, so both need a decision recorded there rather than quietly dropping.
 
-**Not built yet:** the desktop app (Phase 7), the headless runner (Phase 8), and the three
-control components deferred out of 6b — see the top of this file.
+**Not built yet:** the canvas and everything on it (Phases 7b–7d), the headless runner
+(Phase 8), and the three control components deferred out of 6b — see the top of this file.
+i18next, Vega and lucide-react are in the plan's stack note and deliberately not installed until
+the thing that needs them exists.
 
 **Deferred out of 6a, on purpose:** `qa.row_count` and `qa.schema_match`. Both assert something
 about a whole relation rather than partitioning it — no reject rows, and the only outcome is to

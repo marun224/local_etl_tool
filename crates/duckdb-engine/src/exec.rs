@@ -83,6 +83,15 @@ pub enum ExecError {
     #[error("could not read DuckDB's output: {0}")]
     BadOutput(String),
 
+    #[error("there is no node '{node_id}' in this pipeline")]
+    NoSuchNode { node_id: String },
+
+    #[error(
+        "'{node_id}' is a sink, and a sink has no rows to look at. Preview the node feeding it \
+         instead."
+    )]
+    CannotPreview { node_id: String },
+
     #[error(transparent)]
     Session(#[from] SessionError),
 }
@@ -220,6 +229,139 @@ impl RunReport {
     pub fn total_rows_written(&self) -> Option<u64> {
         self.stages.iter().filter_map(|s| s.rows).next_back()
     }
+}
+
+/// Rows from one node, for looking at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Preview {
+    pub node_id: String,
+    /// Column names, in the order the query returned them. Taken from the first
+    /// row, so an empty result has no columns — which is honest: a preview
+    /// reads data, and with no data there is nothing to read a shape from.
+    pub columns: Vec<String>,
+    /// Rows as JSON objects, at most the requested limit.
+    pub rows: Vec<JsonValue>,
+    /// Whether more rows exist than were returned.
+    pub truncated: bool,
+}
+
+/// The most rows a preview will return however many are asked for.
+///
+/// A preview goes to a canvas, where it is a table someone glances at. Ten
+/// thousand rows down an IPC channel to render a grid nobody scrolls is a way
+/// to make the app feel broken.
+pub const PREVIEW_LIMIT_MAX: usize = 500;
+
+/// Read the rows one node produces, without running the rest of the pipeline.
+///
+/// Only the stages that node depends on are run, and sinks are dropped from
+/// them: previewing is a read, and a read that wrote someone's output file
+/// would be a trap. Nothing is written, and any `disk` spill is cleared up the
+/// same way a run clears it.
+pub fn preview(
+    plan: &Plan,
+    node_id: &str,
+    limit: usize,
+    options: &RunOptions,
+) -> Result<Preview, ExecError> {
+    let binary = locate_duckdb(options)?;
+
+    let stages = plan.upto(node_id).ok_or_else(|| ExecError::NoSuchNode {
+        node_id: node_id.to_string(),
+    })?;
+
+    if !stages.iter().any(|stage| stage.node_id == node_id) {
+        // The node is in the plan but was dropped from the preview, which can
+        // only mean it is a sink. Say so rather than returning nothing.
+        return Err(ExecError::CannotPreview {
+            node_id: node_id.to_string(),
+        });
+    }
+
+    let limit = limit.clamp(1, PREVIEW_LIMIT_MAX);
+
+    let mut script = String::new();
+
+    if let Some(directory) = locate_extension_dir(options) {
+        if !plan.extensions().is_empty() {
+            script.push_str(&format!(
+                "SET extension_directory={};\n",
+                quote_path(&directory.to_string_lossy())
+            ));
+        }
+    }
+
+    for extension in plan.extensions() {
+        script.push_str(&format!("LOAD {extension};\n"));
+    }
+
+    for stage in &stages {
+        script.push_str(&stage.sql);
+        script.push('\n');
+    }
+
+    // One more than asked for, so "there is more" is answered by the same query
+    // rather than by a second count over the same work.
+    script.push_str(&format!(
+        "SELECT * FROM {} LIMIT {};\n",
+        crate::sql::quote_identifier(node_id),
+        limit + 1
+    ));
+
+    let mut command = Command::new(&binary);
+    command.arg("-json").arg("-c").arg(&script);
+
+    if let Some(directory) = &options.working_dir {
+        command.current_dir(directory);
+    }
+
+    let output = command.output().map_err(|source| ExecError::Spawn {
+        path: binary.display().to_string(),
+        source,
+    })?;
+
+    // Spills belong to the stages that were run, so they are cleared here too.
+    let _ = clear_spills(plan, options);
+
+    if !output.status.success() {
+        return Err(ExecError::RunFailed {
+            message: redact(
+                String::from_utf8_lossy(&output.stderr).trim(),
+                &options.redact,
+            ),
+        });
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // The preview is the last result on stdout: the stages before it are views,
+    // which return nothing.
+    let last = serde_json::Deserializer::from_str(&stdout)
+        .into_iter::<JsonValue>()
+        .filter_map(Result::ok)
+        .last()
+        .unwrap_or(JsonValue::Array(Vec::new()));
+
+    let mut rows = match last {
+        JsonValue::Array(rows) => rows,
+        _ => Vec::new(),
+    };
+
+    let truncated = rows.len() > limit;
+    rows.truncate(limit);
+
+    let columns = rows
+        .first()
+        .and_then(JsonValue::as_object)
+        .map(|row| row.keys().cloned().collect())
+        .unwrap_or_default();
+
+    Ok(Preview {
+        node_id: node_id.to_string(),
+        columns,
+        rows,
+        truncated,
+    })
 }
 
 /// Compile-free execution: run an already-compiled plan.

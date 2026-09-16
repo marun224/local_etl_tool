@@ -703,3 +703,54 @@ Three things cost real time and are worth not rediscovering:
   pattern matched far below. `exec.rs` was restored from HEAD and the patches re-applied. Any
   scripted deletion that searches for its own end needs a sanity check on how much it is about
   to remove.
+
+## 2026-09-16 — Phase 7a: the desktop shell and its five commands
+
+Versions were checked before anything was written, because the plan names four of them and a
+stale plan is how you end up on an alpha:
+
+```powershell
+node --version; npm --version            # v24.18.0, 11.16.0
+cargo info tauri                         # 2.11.5  (latest is 3.0.0-alpha.1 - NOT that)
+npm view react version                   # 19.3.0
+npm view vite version                    # 8.3.0
+npm view typescript version              # 7.0.2
+npm view @xyflow/react version           # 12.11.6
+npm ping                                 # both registries reachable
+```
+
+WebView2 is already present on this machine, so nothing had to be installed for the window.
+
+Built, then the gate — which now has four parts rather than three:
+
+```powershell
+npm --prefix frontend install
+npm --prefix frontend run typecheck
+npm --prefix frontend run build
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace                   # 335 passing, up from 326
+```
+
+Launched for real rather than only compiled:
+
+```powershell
+npm --prefix frontend run dev            # vite on :5173
+cargo run -p etl-desktop                 # the window
+tasklist | Select-String "etl-desktop"   # alive, with WebView2 children
+```
+
+Four things worth remembering:
+
+- **The Rust gate must not need npm.** Adding a Tauri crate to the workspace risks making
+  `cargo test --workspace` depend on `frontend/dist`. Checked by deleting `dist`, touching
+  `build.rs` to force the build script to re-run, and rebuilding: it passes. Only a real bundle
+  needs the frontend built.
+- **Tauri needs `icons/icon.ico` on Windows or `build.rs` fails**, with a message that says so
+  plainly. The icon was generated with `struct` and `zlib` from the standard library rather than
+  adding Pillow to draw a 32px square.
+- **The `?` in `tsconfig` strictness costs one file.** `"types": []` means a side-effect CSS
+  import does not typecheck until `src/env.d.ts` declares it.
+- **`cargo fmt` reflows `pub use` lists**, so a scripted patch that matches one by its exact text
+  will silently miss after a format run. Two edits here failed that way; match on a shorter
+  anchor or re-read after formatting.

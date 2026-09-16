@@ -411,6 +411,38 @@ the saved JSON round-trips through the CLI unchanged.
 
 **Done.** GUI and CLI are interchangeable on the same file.
 
+**7a done 2026-09-16.** Versions were checked rather than assumed, and every one the plan named
+is available stable: Tauri 2.11.5, React 19.3, Vite 8.3, TypeScript 7.0.2, `@xyflow/react`
+12.11.6. (crates.io offers `tauri` 3.0.0-alpha.1 as latest — **not** that.)
+
+Built: `apps/desktop/` holding the five commands and nothing else, `frontend/` with a typed
+`src/ipc.ts` mirroring the wire structs, and `preview` added to the engine. `apps/desktop` is a
+workspace member, and the Rust gate does **not** depend on the frontend being built — checked by
+deleting `frontend/dist` and rebuilding, because a `cargo test` that needs `npm install` first
+would be a bad trade for a crate nobody's test touches.
+
+Three decisions worth keeping:
+
+- **The desktop crate holds no logic.** No SQL, no DuckDB, no component list — just the five
+  commands over the same engine the CLI calls. The GUI and CLI can only stay interchangeable if
+  they are two thin callers rather than two implementations that agree today.
+- **`validate` resolves rather than rejects for an invalid document.** A pipeline under
+  construction is invalid most of the time and the canvas re-validates on every edit; throwing
+  would make every keystroke between two valid states an exception to catch.
+- **`preview` drops sinks from the stages it runs.** Looking at what a node holds is a read, and
+  a read that overwrote someone's output file while they clicked around would be a trap.
+
+The IPC surface is tested without a window: `#[tauri::command]` leaves each function callable as
+an ordinary one, so all five are exercised against the real engine in `cargo test`. Nine tests.
+A GUI-only check would mean the contract 7b is written against is only verified by clicking.
+
+The app was launched and confirmed running (window process alive, WebView2 children spawned, no
+runtime errors) — not only compiled.
+
+**Not yet done in 7a:** i18next, Vega and lucide-react are listed in the stack note and are not
+installed. Each belongs with the thing that needs it — icons with the palette in 7b, charts with
+the preview in 7d — and installing them now would be three unused dependencies.
+
 ### Phase 8 — Headless runner: serve, scheduler, RBAC, incremental
 
 **Goal.** Production execution without the desktop app.
