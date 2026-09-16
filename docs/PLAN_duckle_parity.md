@@ -443,6 +443,41 @@ runtime errors) — not only compiled.
 installed. Each belongs with the thing that needs it — icons with the palette in 7b, charts with
 the preview in 7d — and installing them now would be three unused dependencies.
 
+**7b done 2026-09-16.** `@xyflow/react` 12.11.6 and lucide-react 1.46.0 added; vitest 5 added
+with it, because the wiring rules are logic and deserved tests rather than clicking.
+
+`frontend/src/document.ts` owns the document and the wiring rules; `PipelineCanvas` draws it and
+turns xyflow's events back into edits, holding no pipeline state of its own. One copy of the
+document, in `App`, is what makes the round-trip promise structural rather than remembered.
+
+**The round-trip promise needed correcting, and the correction is the finding.** "The saved JSON
+round-trips through the CLI unchanged" cannot mean byte-identical: `JSON.stringify` always
+expands arrays onto their own lines, so a hand-written `"values": ["a", "b"]` comes back
+reformatted no matter how carefully the data is preserved. Byte-identity would mean writing a
+format-preserving JSON editor, which is not worth it. What holds, and is tested against all five
+committed samples, is that **nothing is lost or altered** — every key, every value, every
+ordering, including fields this version does not understand — and that formatting normalises
+once on first save and never moves again. So opening and saving a canvas-written file produces
+no diff.
+
+Two further things the tests pin, both against the real samples rather than fixtures:
+
+- **The canvas and the engine agree about what is valid.** Every edge in every committed sample
+  is one the canvas would have allowed. A canvas that refuses something the engine accepts is as
+  wrong as the reverse, just less obviously — so the check is that the two agree, not merely that
+  each is self-consistent.
+- **Node ids are readable and never reserved.** An id becomes the relation name in the generated
+  SQL, which a person reads on the Plan tab, so `src.file.csv` becomes `csv` and then `csv_2`.
+  The `__rejected` suffix can never be produced, because the engine refuses a document using it.
+
+**Bundle:** lucide's barrel import pulled in all ~1500 of its icons and cost 600 KB. The 42 the
+registry actually uses are now imported by name in `src/icons.ts`, with a generic box for
+anything new, so a component with an unknown icon degrades rather than breaks. 1031 KB → 430 KB.
+That file carries the command to regenerate its list.
+
+**Not in 7b:** the property panel is 7c's — the inspector shows a node's values read-only until
+then — and the run view is 7d's. i18next and Vega remain uninstalled.
+
 ### Phase 8 — Headless runner: serve, scheduler, RBAC, incremental
 
 **Goal.** Production execution without the desktop app.

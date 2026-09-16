@@ -3,20 +3,23 @@
 **State only.** Design lives in [PLAN_duckle_parity.md](PLAN_duckle_parity.md). Read this file
 first when picking the project back up.
 
-> ## ⏸ Paused 2026-09-16, after Phase 7a
+> ## ⏸ Paused 2026-09-16, after Phase 7b
 >
-> Stopped at a clean boundary — gate green, nothing mid-edit. **Phase 7a is complete.**
+> Stopped at a clean boundary — gate green, nothing mid-edit. **Phase 7b is complete.**
 >
 > Phases 0–5 are dated 2026-09-15 because that is when the work was done; the clock rolled
 > past midnight while pausing, which is the only reason those lines read a day later.
 >
-> **To resume:** read this file, then Phase 7 in the plan, then start **7b** — the xyflow
-> canvas. The IPC surface it needs already exists and is tested; 7b is frontend work.
+> **To resume:** read this file, then Phase 7 in the plan, then start **7c** — the
+> manifest-driven property panel. The inspector is already in place and shows a node's values
+> read-only; 7c makes them editable, with forms generated from the property schema and no
+> per-component React.
 >
 > ```powershell
 > cd D:\workspace\ETL_Local_Tool
 > cargo test --workspace                                            # expect 335 passing
 > npm --prefix frontend run typecheck                               # expect clean
+> npm --prefix frontend run test                                    # expect 36 passing
 > npm --prefix frontend run build                                   # expect clean
 > .\target\debug\etl.exe components                                 # expect 54
 > .\target\debug\etl.exe run samples\pipelines\orders_enriched.json # expect 12/5/7/6/6
@@ -54,9 +57,10 @@ first when picking the project back up.
 
 ## Where things stand
 
-- **Next phase:** Phase 7b — the `@xyflow/react` canvas: palette from the manifest, drag-drop,
-  edge wiring with port validation, save/load to the same JSON. Everything it calls already
-  exists and is tested.
+- **Next phase:** Phase 7c — the manifest-driven property panel: forms generated from each
+  component's property schema, with no per-component React. `propertiesOf()` in
+  `frontend/src/document.ts` already returns the schema for a node; the inspector renders it
+  read-only today.
 - **In progress:** nothing
 - **Blocked on:** nothing.
 
@@ -71,8 +75,8 @@ pass), `ctl.throttle` (nothing to throttle until Phase 10 has a row cursor).
 
 ## What works today
 
-Phases 0–6 are complete and 7a is done, so there is a working CLI **and a desktop shell**. From
-the repo root:
+Phases 0–6 are complete and 7a–7b are done, so there is a working CLI **and a canvas you can
+build a pipeline on**. From the repo root:
 
 ```powershell
 cargo test --workspace        # 335 tests: 247 engine, 44 e2e, 20 secrets, 15 metadata, 9 desktop
@@ -164,8 +168,25 @@ needs the frontend built first.
 sinks**, so looking at what a node holds can never overwrite an output file. It returns at most
 500 rows and says whether there are more.
 
-**What 7a is not:** there is no canvas yet. The shell renders a JSON textarea and four buttons —
-scaffolding that exists to prove the five commands work end to end, and that 7b replaces.
+**There is a canvas.** Drag a component out of the palette, wire it up, open and save the same
+JSON the CLI reads. The palette is generated from the manifest and holds no component list of
+its own, so a component added to the registry appears in it with no frontend change at all —
+which is the property the whole registry design exists to buy.
+
+Wiring is refused *while the mouse is down*, with the reason, for everything the engine would
+have rejected later: a node feeding itself, a port a component does not have, a second edge into
+an occupied input, anything out of a sink or into a source, and any connection that would close
+a loop. A quality node's `rejected` output is drawn in amber and animated, because mistaking a
+dead-letter branch for the main flow is the sort of misreading that costs an afternoon.
+
+**Saving preserves content, not bytes.** `JSON.stringify` always expands arrays, so a
+hand-written `"values": ["a", "b"]` comes back on several lines. Nothing is lost or altered —
+every key, every value, every ordering, including fields this version does not understand — and
+formatting normalises once on first save and never moves again, so a canvas-written file
+re-saves with no diff. Tested against all five committed samples.
+
+**What 7b is not:** properties are read-only in the inspector until 7c, and the run view is
+7d's.
 
 **Extensions are vendored**, not installed system-wide: `.\scripts\fetch-duckdb-extensions.ps1`
 puts them under `tools/duckdb/extensions/` and the executor points DuckDB at that directory. A
@@ -209,10 +230,10 @@ extension, which sits badly with Phase 9's vendored set) and DuckLake (a catalog
 needs its own design pass rather than a thirteenth copy of the ATTACH shape). Both are listed
 under Phase 4 in the plan, so both need a decision recorded there rather than quietly dropping.
 
-**Not built yet:** the canvas and everything on it (Phases 7b–7d), the headless runner
-(Phase 8), and the three control components deferred out of 6b — see the top of this file.
-i18next, Vega and lucide-react are in the plan's stack note and deliberately not installed until
-the thing that needs them exists.
+**Not built yet:** the property panel (7c), the run view (7d), the headless runner (Phase 8),
+and the three control components deferred out of 6b — see the top of this file. i18next and Vega
+are in the plan's stack note and stay uninstalled until the thing that needs them exists;
+lucide-react arrived with the palette in 7b.
 
 **Deferred out of 6a, on purpose:** `qa.row_count` and `qa.schema_match`. Both assert something
 about a whole relation rather than partitioning it — no reject rows, and the only outcome is to

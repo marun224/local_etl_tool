@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "What the canvas window is allowed to do. Deliberately short: the only capability granted is asking the OS for a file path, and even then the reading and writing is done by this crate's own commands rather than by a filesystem plugin, so every touch of the disk goes through code in this repo.",
+  "windows": ["main"],
+  "permissions": ["core:default", "dialog:allow-open", "dialog:allow-save"]
+}

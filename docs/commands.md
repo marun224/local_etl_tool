@@ -754,3 +754,49 @@ Four things worth remembering:
 - **`cargo fmt` reflows `pub use` lists**, so a scripted patch that matches one by its exact text
   will silently miss after a format run. Two edits here failed that way; match on a shorter
   anchor or re-read after formatting.
+
+## 2026-09-16 — Phase 7b: the canvas
+
+```powershell
+npm view @xyflow/react version           # 12.11.6
+npm view lucide-react version            # 1.46.0
+cargo add tauri-plugin-dialog@2 -p etl-desktop --dry-run   # 3.0.0-alpha is latest; pin to 2
+npm --prefix frontend install @xyflow/react lucide-react @tauri-apps/plugin-dialog
+npm --prefix frontend install -D vitest @types/node
+```
+
+The gate has five parts now:
+
+```powershell
+npm --prefix frontend run typecheck
+npm --prefix frontend run test           # 36 passing
+npm --prefix frontend run build
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace                   # 335 passing
+```
+
+Run and looked at, not only built:
+
+```powershell
+npm --prefix frontend run dev
+cargo run -p etl-desktop
+# 54 components in the palette, grouped by namespace, "ext" badges on the ones
+# needing a DuckDB extension; canvas, inspector, and the Status/SQL/Data tabs.
+```
+
+Four things worth remembering:
+
+- **The round-trip promise had to be corrected, and the correction is the useful part.** Byte
+  identity is not achievable: `JSON.stringify` always expands arrays, so a hand-written
+  `"values": ["a", "b"]` reformats however carefully the data is kept. The promise that holds —
+  and that is tested against all five committed samples — is that nothing is lost or altered,
+  and that formatting settles after one save. Five failing tests said so before any of this was
+  written down, which is the argument for testing against the real files rather than a fixture.
+- **lucide's barrel import costs 600 KB.** `import { icons } from "lucide-react"` pulls in all
+  ~1500. Importing the 42 the registry uses by name took the bundle from 1031 KB to 430 KB.
+  `src/icons.ts` carries the command that regenerates its own list.
+- **`exactOptionalPropertyTypes` refuses `className: undefined`.** Absent and
+  present-but-undefined are different things to it; use a conditional spread.
+- **`it.each(files)` does not typecheck under this tsconfig.** A plain `for` loop around `it()`
+  does, and reads no worse.

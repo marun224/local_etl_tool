@@ -208,6 +208,16 @@ export function runPipeline(document: string, settings: Settings = {}): Promise<
   return call<RunResult>("run_pipeline", { document, settings });
 }
 
+/** Read a pipeline document off disk. The path comes from the dialog plugin. */
+export function readPipeline(path: string): Promise<string> {
+  return call<string>("read_pipeline", { path });
+}
+
+/** Write a pipeline document to disk. Refuses anything that will not load back. */
+export function writePipeline(path: string, document: string): Promise<void> {
+  return call<void>("write_pipeline", { path, document });
+}
+
 /** Read the rows one node produces, without running the rest or writing anything. */
 export function previewNode(
   document: string,

@@ -25,7 +25,7 @@ use etl_duckdb_engine::{
 use etl_metadata::PipelineDoc;
 use etl_secrets::SecretStore;
 use serde::Serialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // What crosses the wire
@@ -338,6 +338,45 @@ fn run_pipeline(document: String, settings: Settings) -> IpcResult<RunResult> {
     })
 }
 
+/// Read a pipeline document off disk.
+///
+/// The picking is done by the dialog plugin; the reading is done here. That
+/// split is deliberate — granting a filesystem plugin a path scope would put
+/// disk access behind a permission list, whereas this way every touch of the
+/// disk is a function in this repo that can be read.
+#[tauri::command]
+fn read_pipeline(path: String) -> IpcResult<String> {
+    std::fs::read_to_string(&path)
+        .map_err(|error| IpcError::new("read", format!("could not read {path}: {error}")))
+}
+
+/// Write a pipeline document to disk.
+#[tauri::command]
+fn write_pipeline(path: String, document: String) -> IpcResult<()> {
+    // Parse before writing. A document that will not load is not one worth
+    // putting over a file someone already has.
+    PipelineDoc::from_json(&document).map_err(|error| {
+        IpcError::new(
+            "read",
+            format!("refusing to save something that will not load: {error}"),
+        )
+    })?;
+
+    if let Some(parent) = Path::new(&path).parent() {
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            std::fs::create_dir_all(parent).map_err(|error| {
+                IpcError::new(
+                    "read",
+                    format!("could not make {}: {error}", parent.display()),
+                )
+            })?;
+        }
+    }
+
+    std::fs::write(&path, document)
+        .map_err(|error| IpcError::new("read", format!("could not write {path}: {error}")))
+}
+
 /// Read the rows one node produces, without running the rest of the pipeline
 /// and without writing anything.
 #[tauri::command]
@@ -363,12 +402,15 @@ fn preview_node(
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             list_components,
             compile_pipeline,
             validate_pipeline,
             run_pipeline,
             preview_node,
+            read_pipeline,
+            write_pipeline,
         ])
         .run(tauri::generate_context!())
         .expect("the desktop shell failed to start");
@@ -389,7 +431,6 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
 
     /// The repo root, so the sample paths in the fixtures resolve.
     fn repo_root() -> PathBuf {

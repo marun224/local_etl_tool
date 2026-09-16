@@ -15,7 +15,9 @@
     "verbatimModuleSyntax": true,
     "skipLibCheck": true,
     "noEmit": true,
-    "types": []
+    // Node types are here for the test files, which read the repo's own
+    // sample pipelines off disk. Nothing in src/ that ships uses them.
+    "types": ["node"]
   },
   "include": ["src", "vite.config.ts"]
 }
