@@ -1,0 +1,15 @@
+[package]
+name = "etl-console"
+description = "A small read-mostly web console over a workspace's pipelines, runs and schedules."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+etl-secrets.workspace = true
+etl-state.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tiny_http = "0.12"

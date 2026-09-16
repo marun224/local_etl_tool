@@ -5,6 +5,7 @@ members = [
     "crates/secrets",
     "crates/state",
     "crates/scheduler",
+    "crates/console",
     "crates/duckdb-engine",
     "crates/cli",
     "apps/desktop",
@@ -22,6 +23,7 @@ etl-metadata = { path = "crates/metadata", version = "0.1.0" }
 etl-secrets = { path = "crates/secrets", version = "0.1.0" }
 etl-state = { path = "crates/state", version = "0.1.0" }
 etl-scheduler = { path = "crates/scheduler", version = "0.1.0" }
+etl-console = { path = "crates/console", version = "0.1.0" }
 etl-duckdb-engine = { path = "crates/duckdb-engine", version = "0.1.0" }
 
 # External

@@ -785,6 +785,81 @@ refused by name and pid while the first held the workspace, and succeeded once i
 killed. 508 Rust tests (254 engine, 113 scheduler, 51 e2e, 45 state, 20 secrets, 15 metadata,
 10 desktop) and 114 frontend, fmt and clippy clean.
 
+**8d done 2026-09-16. Phase 8 is complete.** The web console: `etl serve`, two roles, and a
+page. Settled decision 8 held — `tiny_http`, and five crates arrive with it (`tiny_http`,
+`ascii`, `chunked_transfer`, `httpdate`, `log`). That is the whole of Phase 8's dependency
+budget, as the split predicted when it said "net new dependencies for the whole phase: one".
+
+**Four layers, each testable without the one below it.** `auth` (roles and tokens), `routes`
+(every route as a pure function from a method, a path, a query and a token to a status and a
+body), `ui` (the page, as one string), `server` (the only part that knows what a socket is).
+Sixty-five tests, none of which bind a port: a route is a function, so being refused is as
+testable as being served.
+
+`Workspace` is the seam, the third time this shape has been used — the console does not depend
+on the engine and cannot compile SQL, exactly as the scheduler does not. The CLI implements it,
+where the engine and the resolver already live.
+
+**Security, because this is the first code in the project that parses untrusted input off a
+socket:**
+
+- **Loopback by default**, and binding anything else prints a warning that says what the actual
+  exposure is: no TLS, so the tokens cross the network in clear.
+- **Tokens are minted per process and printed once**, the way a local notebook server does.
+  Nothing is stored, so there is no token file to leak and a stopped console cannot be reached
+  with yesterday's link. A stable token comes from the **environment**, never a flag — an
+  argument is visible in the process list, which is the call this project already made for `etl
+  secret set`. A token that came from the environment is deliberately **not** printed: doing so
+  would put somebody's standing secret in the scrollback and the CI log of every run.
+- **Constant-time comparison, and both tokens are always compared.** Returning as soon as one
+  matched would make the operator check measurably faster than the viewer one.
+- **Both roles set to the same token is refused at startup**, because it silently promotes every
+  viewer to an operator — the one mistake in that file that looks like it is working.
+- **A `?token=` works on the page and nowhere else.** That is what stops a console link pasted
+  into a chat from being a usable API credential, and stops another site's form from posting one
+  for you. The page moves the token out of the address bar on load and sends a header from then
+  on.
+- **A pipeline name from the network is resolved by lookup, never joined onto a path.** A name
+  that is not in the workspace's own list finds nothing, so `../../etc/passwd` is a 404 rather
+  than a file read — verified against the running console, not only in a test.
+- **Everything the page renders goes through `textContent`.** A pipeline named `<img onerror=…>`
+  is a string, not markup, and a test asserts the page contains no `innerHTML`, `outerHTML`,
+  `insertAdjacentHTML` or `document.write` so it stays that way.
+- **Every response is hardened, including the refusals**: a content security policy of
+  `default-src 'none'` with `frame-ancestors` and `form-action` also `'none'`, `nosniff`,
+  `no-referrer`, and `no-store` because the page URL carries a token.
+- **`limit` is capped** at a thousand, so `?limit=100000000` cannot serialise a year of history
+  into memory to answer one request. Request bodies are bounded off the socket before routing.
+
+**The role is stated in a header** — `X-Etl-Role`, on every authenticated response including the
+refusals — so the page knows whether to draw a Run button. The first version had the page probe
+with a request it expected to fail and read the role out of the error text, which works until
+somebody rewords the error.
+
+**Two roles, not three.** Viewer reads; operator reads and starts runs. A third role able to do
+exactly what the second can is decoration rather than access control, and there is nothing else
+in the console to gate: secrets are not exposed over HTTP at all, and editing a pipeline is the
+canvas's job.
+
+**Runs are serialised by the workspace, not by the transport.** Requests are served from four
+threads so a twenty-second run does not stop everybody reading, and `Workspace::start` holds a
+mutex for the length of a run so two people clicking Run cannot race on a watermark. Running
+beside a *scheduler* is the same unguarded case a hand-run `etl run` is, and is documented in
+the same place.
+
+**Not in 8d, and why:** no TLS (a reverse proxy's job, and bundling one would mean certificates,
+renewal and a config file); no accounts or per-user tokens (two shared tokens is the right
+weight for a console somebody runs next to their work); no editing — the console reads and
+starts runs, and changing a pipeline is the canvas; no live log streaming, because a run is
+synchronous and the record it returns is the answer.
+
+**Verify.** Against the running console rather than only in tests: health answers without a
+token and says nothing else; every API route refuses without one; a token in the URL is refused
+on the API for both a GET and a POST; a viewer starting a run gets 403 and the run does not
+happen; an operator gets 200 and a record; a traversal attempt is a 404; the hardening headers
+and `X-Etl-Role` are present on the wire. 576 Rust tests (65 console, 3 new in secrets) and 114
+frontend, fmt and clippy clean.
+
 ### Phase 9 — Standalone binary export + air-gapped packaging
 
 **Goal.** "Build Pipeline" produces one self-contained executable, cross-OS.

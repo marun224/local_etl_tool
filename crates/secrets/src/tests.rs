@@ -348,3 +348,38 @@ fn hex_refuses_what_is_not_hex() {
     assert_eq!(from_hex("zz"), None, "not a hex digit");
     assert_eq!(from_hex("ab cd"), None, "spaces are not hex digits");
 }
+
+// ---------------------------------------------------------------------------
+// Random tokens
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_token_is_the_length_it_says_and_is_hex() {
+    let token = random_token(32);
+
+    assert_eq!(token.len(), 64, "32 bytes is 64 hex characters");
+    assert!(token.chars().all(|c| c.is_ascii_hexdigit()), "{token}");
+}
+
+#[test]
+fn two_tokens_are_not_the_same() {
+    // A token that repeats is not a token. This cannot prove the generator is
+    // sound, but it does catch the failure where it returns a constant.
+    let mut seen = std::collections::BTreeSet::new();
+
+    for _ in 0..100 {
+        assert!(seen.insert(random_token(32)), "a token repeated");
+    }
+}
+
+#[test]
+fn a_token_is_not_all_one_byte() {
+    // The other shape a broken generator takes: a buffer that was never
+    // filled, which comes back as all zeroes and reads as a valid token.
+    let token = random_token(32);
+
+    assert!(
+        token.chars().any(|c| c != '0'),
+        "the token was all zeroes, which means the buffer was not filled"
+    );
+}

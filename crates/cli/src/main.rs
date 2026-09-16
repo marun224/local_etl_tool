@@ -6,6 +6,7 @@
 //! GUI would then have to reimplement.
 
 use clap::{Args, Parser, Subcommand};
+use etl_console as console;
 use etl_duckdb_engine::{
     compile_with, lineage, params, registry, run, CompileOptions, Contexts, EngineError, ExecError,
     ParamWarning, Plan, Resolved, Resolver, RunOptions, RunReport, Warning,
@@ -220,6 +221,29 @@ enum Command {
         settings: Settings,
     },
 
+    /// Serve a web console over this workspace.
+    Serve {
+        /// The port to listen on.
+        #[arg(long, default_value_t = console::DEFAULT_PORT)]
+        port: u16,
+
+        /// The address to bind. Loopback by default: this console speaks no
+        /// TLS, so anything else needs saying out loud.
+        #[arg(long, value_name = "ADDRESS")]
+        bind: Option<String>,
+
+        /// DuckDB binary to use, as `run` takes it.
+        #[arg(long, value_name = "PATH")]
+        duckdb: Option<PathBuf>,
+
+        /// Skip per-stage row counts on runs the console starts.
+        #[arg(long)]
+        no_counts: bool,
+
+        #[command(flatten)]
+        settings: Settings,
+    },
+
     /// Run pipelines on a schedule.
     Schedule {
         #[command(subcommand)]
@@ -327,6 +351,14 @@ fn main() -> ExitCode {
             json,
             settings,
         } => command_run(&pipeline, duckdb, !no_counts, show_sql, json, &settings),
+
+        Command::Serve {
+            port,
+            bind,
+            duckdb,
+            no_counts,
+            settings,
+        } => command_serve(port, bind, duckdb, !no_counts, &settings),
 
         Command::Schedule { action, settings } => command_schedule(action, &settings),
 
@@ -662,6 +694,415 @@ Flow:"
             node.incremental_column.as_deref().unwrap_or_default()
         );
     }
+
+    exit::OK
+}
+
+// ---------------------------------------------------------------------------
+// The console
+// ---------------------------------------------------------------------------
+
+/// The workspace, as the console sees it.
+///
+/// The seam `etl-console` is built around: it knows HTTP, tokens and a page,
+/// and nothing about the engine. Everything it needs to answer comes through
+/// here, where the engine, the resolver and the secret store already are — the
+/// same arrangement the scheduler has, for the same reason.
+struct ConsoleWorkspace {
+    settings: Settings,
+    duckdb: Option<PathBuf>,
+    counts: bool,
+
+    /// Held for the length of a triggered run.
+    ///
+    /// Requests are served from several threads, so without this two people
+    /// clicking Run at the same moment would have two runs of the same
+    /// pipeline racing on its watermark. Sequential runs are the same posture
+    /// 8c took, and for the same reason: it keeps the state store's
+    /// single-writer assumption true rather than hoping about it.
+    running: std::sync::Mutex<()>,
+}
+
+impl ConsoleWorkspace {
+    /// Every pipeline file in the workspace, as `<workspace>/**/ *.json` that
+    /// parses as a pipeline document.
+    ///
+    /// Scanned rather than configured: the workspace is a folder of JSON, and
+    /// a console that needed a manifest listing its own pipelines would be a
+    /// second place to keep them in step.
+    fn documents(&self) -> Vec<(String, PathBuf, PipelineDoc)> {
+        let root = self.settings.workspace_root();
+        let mut found = Vec::new();
+
+        collect_pipelines(&root, 0, &mut found);
+        // By name, so the console's ordering does not depend on the order the
+        // filesystem happened to hand back.
+        found.sort_by(|left, right| left.0.cmp(&right.0));
+
+        found
+    }
+
+    /// Resolve a name from a request to a pipeline on disk.
+    ///
+    /// The one place a name from the network becomes a path, and it does so by
+    /// *lookup* rather than by joining: a name that is not in the workspace's
+    /// own list finds nothing, so `../../etc/passwd` is a 404 rather than a
+    /// file read.
+    fn locate(&self, name: &str) -> Result<PathBuf, console::Failure> {
+        self.documents()
+            .into_iter()
+            .find(|(known, _, _)| known == name)
+            .map(|(_, path, _)| path)
+            .ok_or_else(|| console::Failure::not_found(format!("no pipeline called '{name}'")))
+    }
+}
+
+impl console::Workspace for ConsoleWorkspace {
+    fn label(&self) -> String {
+        let root = self.settings.workspace_root();
+
+        root.file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| root.display().to_string())
+    }
+
+    fn pipelines(&self) -> Result<Vec<console::PipelineSummary>, console::Failure> {
+        let history = state::History::at(self.settings.workspace_root());
+        let mut summaries = Vec::new();
+
+        for (name, path, document) in self.documents() {
+            // Compiled so the console can say which pipelines will not run,
+            // which is the thing worth knowing before 3am. A failure here is a
+            // property of that one pipeline, not of the request.
+            let (stages, problem) = match load_and_compile_quietly(&path, &self.settings) {
+                Ok(loaded) => (Some(loaded.plan.stages.len()), None),
+                Err(message) => (None, Some(message)),
+            };
+
+            let key = state::key_for(document.name.as_deref(), &path);
+            let recent = history.recent(&key, 1).unwrap_or_default();
+            let last = recent.first();
+
+            summaries.push(console::PipelineSummary {
+                name,
+                path: relative_to(&self.settings.workspace_root(), &path),
+                stages,
+                problem,
+                last_outcome: last.map(|record| record.outcome.name().to_string()),
+                last_run: last.map(|record| record.started.clone()),
+            });
+        }
+
+        Ok(summaries)
+    }
+
+    fn lineage(&self, name: &str) -> Result<serde_json::Value, console::Failure> {
+        let path = self.locate(name)?;
+
+        let Loaded { plan, resolved, .. } =
+            load_and_compile_quietly(&path, &self.settings).map_err(console::Failure::invalid)?;
+
+        let found = lineage(&plan);
+
+        let text = serde_json::to_string(&found)
+            .map_err(|error| console::Failure::internal(error.to_string()))?;
+
+        // Redacted for the same reason `etl lineage --json` is: a resolved
+        // path can hold a secret, and this one crosses a socket.
+        serde_json::from_str(&resolved.redact(&text))
+            .map_err(|error| console::Failure::internal(error.to_string()))
+    }
+
+    fn runs(
+        &self,
+        pipeline: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<state::RunRecord>, console::Failure> {
+        let history = state::History::at(self.settings.workspace_root());
+
+        let keys = match pipeline {
+            Some(name) => {
+                let path = self.locate(name)?;
+                let document = read_document(&path).map_err(console::Failure::invalid)?;
+
+                vec![state::key_for(document.name.as_deref(), &path)]
+            }
+            None => history
+                .keys()
+                .map_err(|error| console::Failure::internal(error.to_string()))?,
+        };
+
+        let mut records = Vec::new();
+
+        for key in keys {
+            records.extend(history.recent(&key, limit).unwrap_or_default());
+        }
+
+        // Newest first across every pipeline. The timestamps are UTC and
+        // fixed-width, so a string sort is a chronological one — which is why
+        // `now_utc` writes them that way.
+        records.sort_by(|left, right| right.started.cmp(&left.started));
+        records.truncate(limit);
+
+        Ok(records)
+    }
+
+    fn run(&self, id: &str) -> Result<state::RunRecord, console::Failure> {
+        let history = state::History::at(self.settings.workspace_root());
+
+        history
+            .find(None, id)
+            .map_err(|error| console::Failure::internal(error.to_string()))?
+            .ok_or_else(|| console::Failure::not_found(format!("no run called '{id}'")))
+    }
+
+    fn schedules(&self) -> Result<Vec<console::ScheduleSummary>, console::Failure> {
+        let file = sched::ScheduleFile::load(&self.settings.schedules_path())
+            .map_err(|error| console::Failure::invalid(error.to_string()))?;
+
+        let scheduler = build_scheduler(file.schedules.iter().cloned(), &self.settings);
+
+        Ok(scheduler
+            .entries()
+            .iter()
+            .map(|entry| console::ScheduleSummary {
+                name: entry.schedule.name.clone(),
+                pipeline: entry.schedule.pipeline.display().to_string(),
+                trigger: entry.schedule.trigger.describe(),
+                enabled: entry.schedule.enabled,
+                next: entry.next.map(state::time::to_rfc3339),
+                last_run: entry.last_run.map(state::time::to_rfc3339),
+            })
+            .collect())
+    }
+
+    fn start(&self, name: &str) -> Result<state::RunRecord, console::Failure> {
+        let path = self.locate(name)?;
+
+        // One at a time, whatever the threads are doing. A poisoned lock means
+        // an earlier run panicked; the lock is still usable and refusing every
+        // subsequent run over it would be worse than carrying on.
+        let _one_at_a_time = self.running.lock().unwrap_or_else(|held| held.into_inner());
+
+        let performed = perform(
+            &path,
+            self.duckdb.clone(),
+            self.counts,
+            false,
+            &self.settings,
+            true,
+        )
+        .map_err(|_| {
+            console::Failure::invalid(format!("'{name}' could not be compiled or started"))
+        })?;
+
+        if let Some(report) = &performed.report {
+            if !report.failed() {
+                // The same rule every other path follows: state advances only
+                // on a run that fully succeeded.
+                let _ = save_watermarks(&self.settings, &performed.state_key, report, true);
+            }
+        }
+
+        // A failed run is a 200 carrying a record that says it failed, not an
+        // HTTP error: the request worked, and the record is the answer. The
+        // page colours it by outcome.
+        Ok(performed.record)
+    }
+}
+
+/// Every pipeline document under a directory, at most a few levels down.
+///
+/// Bounded rather than unbounded: a workspace is a folder somebody keeps
+/// pipelines in, and walking an arbitrarily deep tree on every page refresh is
+/// how a console becomes the slowest thing on the machine. `.etl/`, `target/`
+/// and dot-directories are skipped — none of them hold pipelines, and `.etl/`
+/// holds run history that would parse as nothing and cost a read each time.
+fn collect_pipelines(
+    directory: &Path,
+    depth: usize,
+    into: &mut Vec<(String, PathBuf, PipelineDoc)>,
+) {
+    const MAX_DEPTH: usize = 4;
+
+    if depth > MAX_DEPTH {
+        return;
+    }
+
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+
+        if path.is_dir() {
+            if name.starts_with('.') || name == "target" || name == "node_modules" {
+                continue;
+            }
+
+            collect_pipelines(&path, depth + 1, into);
+            continue;
+        }
+
+        if !name.ends_with(".json") {
+            continue;
+        }
+
+        // A document rather than a file: `contexts.json` and `schedules.json`
+        // are JSON and are not pipelines, and this is what tells them apart
+        // without keeping a list of names to exclude.
+        let Ok(document) = read_document(&path) else {
+            continue;
+        };
+
+        if document.nodes.is_empty() {
+            continue;
+        }
+
+        // The same key `state::key_for` uses, so a name shown here agrees with
+        // where that pipeline's run records were written.
+        let key = state::key_for(document.name.as_deref(), &path);
+
+        into.push((key, path, document));
+    }
+}
+
+fn read_document(path: &Path) -> Result<PipelineDoc, String> {
+    let text = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
+
+    PipelineDoc::from_json(&text).map_err(|error| error.to_string())
+}
+
+/// `load_and_compile`, with the message returned rather than printed.
+///
+/// The CLI's version writes to stderr, which is right for a command and wrong
+/// for a request: a console serving twelve pipelines would print twelve errors
+/// into the terminal on every page refresh.
+fn load_and_compile_quietly(pipeline: &Path, settings: &Settings) -> Result<Loaded, String> {
+    let document = read_document(pipeline)?;
+
+    let resolver = settings
+        .resolver()
+        .map_err(|_| "the workspace's contexts or secrets could not be read".to_string())?;
+
+    let resolved = params::resolve(&document, &resolver).map_err(|error| error.to_string())?;
+
+    let state_key = state::key_for(resolved.document.name.as_deref(), pipeline);
+    let store = state::Store::at(settings.workspace_root());
+
+    let stored = store.load(&state_key).map_err(|error| error.to_string())?;
+
+    let options = CompileOptions {
+        watermarks: watermarks_for(&resolved.document, &stored),
+    };
+
+    let plan = compile_with(&resolved.document, &options).map_err(|error| error.to_string())?;
+
+    Ok(Loaded {
+        plan,
+        resolved,
+        state_key,
+    })
+}
+
+/// A path under the workspace, written relative to it for display.
+fn relative_to(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .display()
+        .to_string()
+        .replace('\\', "/")
+}
+
+fn command_serve(
+    port: u16,
+    bind: Option<String>,
+    duckdb: Option<PathBuf>,
+    counts: bool,
+    settings: &Settings,
+) -> u8 {
+    let host = bind.unwrap_or_else(|| "127.0.0.1".to_string());
+
+    let address = match format!("{host}:{port}").parse::<std::net::SocketAddr>() {
+        Ok(address) => address,
+        Err(_) => {
+            eprintln!("error: '{host}' is not an address to bind. Try 127.0.0.1, or 0.0.0.0.");
+            return exit::USAGE;
+        }
+    };
+
+    let options = console::ServeOptions {
+        address,
+        ..console::ServeOptions::default()
+    };
+
+    let tokens = console::Tokens::from_environment_or_mint();
+
+    // Refused rather than warned about: one token for both roles silently
+    // promotes every viewer to an operator, which is the mistake here that
+    // looks like it is working.
+    if tokens.roles_collide() {
+        eprintln!(
+            "error: {} and {} are set to the same value, which would make every viewer an \
+             operator. Give them different tokens, or unset one and let it be minted.",
+            console::auth::OPERATOR_ENV,
+            console::auth::VIEWER_ENV
+        );
+        return exit::USAGE;
+    }
+
+    let serving = match console::serve(options.clone(), tokens) {
+        Ok(serving) => serving,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return exit::USAGE;
+        }
+    };
+
+    for warning in options.warnings() {
+        eprintln!("warning: {warning}\n");
+    }
+
+    let workspace = ConsoleWorkspace {
+        settings: settings.clone(),
+        duckdb,
+        counts,
+        running: std::sync::Mutex::new(()),
+    };
+
+    println!(
+        "Console for {} on http://{}",
+        settings.workspace_root().display(),
+        serving.address()
+    );
+
+    // A minted token exists nowhere else, so it is printed. One taken from the
+    // environment is somebody's standing secret and is not — putting it in the
+    // scrollback and the CI log of every run is how a stable token leaks.
+    let tokens = serving.tokens();
+
+    match tokens.operator_source() {
+        console::Source::Minted => println!("\n  operator  {}", serving.link(tokens.operator())),
+        console::Source::Environment => {
+            println!("\n  operator  from {}", console::auth::OPERATOR_ENV)
+        }
+    }
+
+    match tokens.viewer_source() {
+        console::Source::Minted => println!("  viewer    {}", serving.link(tokens.viewer())),
+        console::Source::Environment => println!("  viewer    from {}", console::auth::VIEWER_ENV),
+    }
+
+    println!(
+        "\nAn operator can start runs; a viewer can only read. Minted tokens last as long as \
+         this process.\nCtrl-C to stop."
+    );
+
+    serving.run(std::sync::Arc::new(workspace));
 
     exit::OK
 }

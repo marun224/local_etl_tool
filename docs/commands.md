@@ -898,3 +898,70 @@ npm --prefix frontend run typecheck          # clean
 Nothing was written outside D:\workspace\ETL_Local_Tool except scratch files under the session
 temp directory. `.etl/scheduler.lock` and `.etl/scheduler.status` were removed after the lock
 test; `samples/inbox/` was removed after the watch test.
+
+## 2026-09-16 — Phase 8d: the web console
+
+```powershell
+# Gate before starting
+cargo test --workspace                       # 508 passing, as the tracker said
+
+# What the one dependency actually costs, before taking it
+cargo add tiny_http --dry-run -p etl-cli
+cargo tree -p etl-console                    # 5 new: tiny_http, ascii, chunked_transfer, httpdate, log
+```
+
+```text
+# Files written
+#   crates/console/             - new crate: auth, routes, ui, server, workspace (+ tests)
+#   crates/secrets/src/lib.rs   - random_token, reusing the OsRng that AES already brought
+#   crates/cli/src/main.rs      - etl serve; ConsoleWorkspace implementing console::Workspace
+#   Cargo.toml                  - crates/console added to the workspace
+```
+
+```powershell
+# Per-crate, while building
+cargo test -p etl-secrets
+cargo test -p etl-console
+cargo build -p etl-cli
+
+# The console itself
+.\target\debug\etl.exe serve --port 8099 --contexts samples\contexts.json --schedules samples\schedules.json
+
+# Refusals, checked at startup rather than at runtime
+$env:ETL_CONSOLE_OPERATOR_TOKEN="same"; $env:ETL_CONSOLE_VIEWER_TOKEN="same"
+.\target\debug\etl.exe serve --port 8098    # exit 1, names both variables
+.\target\debug\etl.exe serve --bind 0.0.0.0 # warns: no TLS, tokens cross the network in clear
+```
+
+```bash
+# The security properties, against the running console rather than only in tests (POSIX shell)
+curl -o /dev/null -w "%{http_code}" http://127.0.0.1:8099/api/health           # 200, no token
+curl -o /dev/null -w "%{http_code}" http://127.0.0.1:8099/api/pipelines        # 401
+curl -X POST "http://127.0.0.1:8099/api/runs?pipeline=orders_enriched&token=$OP"   # 401: URL token
+curl -X POST -H "Authorization: Bearer $VIEWER" ".../api/runs?pipeline=orders_enriched"  # 403
+curl -X POST -H "Authorization: Bearer $OP"     ".../api/runs?pipeline=orders_enriched"  # 200
+curl -H "Authorization: Bearer $VIEWER" ".../api/pipelines/..%2F..%2Fetc%2Fpasswd/lineage"  # 404
+curl -D - -o /dev/null -H "Authorization: Bearer $VIEWER" .../api/pipelines
+#   X-Etl-Role, Content-Security-Policy, X-Content-Type-Options, Cache-Control all present
+
+# Stopping it: pkill does not exist in Git Bash here
+taskkill //F //IM etl.exe
+```
+
+```powershell
+# Full gate
+cargo fmt --all
+cargo fmt --all --check                      # clean
+cargo clippy --workspace --all-targets -- -D warnings   # clean
+cargo test --workspace                       # 576 passing
+npm --prefix frontend run test               # 114 passing
+npm --prefix frontend run typecheck          # clean
+
+# Regression check: the acceptance runs still print what they printed
+.\target\debug\etl.exe components                                 # 54
+.\target\debug\etl.exe run samples\pipelines\orders_enriched.json # 12/5/7/6/6
+.\target\debug\etl.exe schedule list @s                           # 4 schedules, 3 enabled
+```
+
+Nothing was written outside D:\workspace\ETL_Local_Tool except scratch files under the session
+temp directory.

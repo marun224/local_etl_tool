@@ -3,27 +3,28 @@
 **State only.** Design lives in [PLAN_duckle_parity.md](PLAN_duckle_parity.md). Read this file
 first when picking the project back up.
 
-> ## ⏸ Paused 2026-09-16, after Phase 8c
+> ## ⏸ Paused 2026-09-16, after Phase 8d — **Phase 8 is complete**
 >
-> Stopped at a clean boundary — gate green, nothing mid-edit. **Phase 7 is complete** (a
-> desktop studio you can build, run and debug a pipeline in) and **Phase 8 is three-quarters
-> done**: 8a gave sources watermark incremental loading, 8b gave every run a record and the
-> workspace a lineage command, and 8c gave the workspace a scheduler.
+> Stopped at a clean boundary — gate green, nothing mid-edit. **Phases 0–8 are all done.**
+> There is a CLI, a desktop canvas, watermark incremental loading, run history and lineage, a
+> scheduler, and a web console. What is left is packaging (9), breadth (10), AI (11) and
+> benchmarks (12) — none of which the working product needs in order to work.
 >
 > Phases 0–5 are dated 2026-09-15 because that is when the work was done; the clock rolled
 > past midnight while pausing, which is the only reason those lines read a day later.
 >
-> **To resume:** read this file, then Phase 8 in the plan, then start **8d** — the web
-> console: `serve`, a shared token, and roles. Its one dependency question is settled
-> (Settled decision 8: `tiny_http`), and it is the first thing in the project that will parse
-> untrusted input off a socket, which is why that decision explicitly rejected hand-rolling
-> it. 8c left it two things to build on: the workspace lock, which a console sharing a
-> workspace with a scheduler will need to reason about, and `etl schedule list --json`, which
-> is the shape a console's schedule page wants.
+> **To resume:** read this file, then Phase 9 in the plan. Phase 9 is the standalone binary
+> export — one self-contained executable with a pipeline baked into it, cross-built. Two things
+> from earlier phases are waiting for it and are the reason it should be next: Settled decision
+> 3 made the vendored, air-gapped extension path *the only path* from Phase 4 onward, so Phase 9
+> is exercising something that has been in use for days rather than discovering it at the end;
+> and Settled decision 5 reserved the name `etl-runner` for exactly this artifact. The known
+> risk is the cross-build matrix, not the embedding — bundling the right native DuckDB and
+> extension binaries per target is the part that will take the time.
 >
 > ```powershell
 > cd D:\workspace\ETL_Local_Tool
-> cargo test --workspace                                            # expect 508 passing
+> cargo test --workspace                                            # expect 576 passing
 > npm --prefix frontend run test                                    # expect 114 passing
 > npm --prefix frontend run typecheck                               # expect clean
 > npm --prefix frontend run build                                   # expect clean
@@ -57,7 +58,7 @@ first when picking the project back up.
 > .\target\debug\etl.exe lineage samples\pipelines\orders_checked.json
 > ```
 >
-> And 8c's:
+> 8c's:
 >
 > ```powershell
 > $s = "--schedules", "samples\schedules.json", "--contexts", "samples\contexts.json"
@@ -66,18 +67,27 @@ first when picking the project back up.
 > .\target\debug\etl.exe schedule start --once @s
 > ```
 >
+> And 8d's — open the operator link it prints:
+>
+> ```powershell
+> .\target\debug\etl.exe serve @s              # 6 pipelines, 4 schedules, run history
+> ```
+>
 > All of these were run verbatim at the moment of pausing and printed exactly what is written
 > above. If any of them disagrees with this file later, trust the commands and fix the file.
 >
 > `schedule start --once` prints nothing on a second run within fifteen minutes, which is
-> correct rather than broken: the interval is anchored on the run it just did. `etl schedule
-> list` will say `due now` when something is overdue.
+> correct rather than broken: the interval is anchored on the run it just did.
+>
+> **`etl serve` holds the terminal** and is stopped with Ctrl-C. On Windows a killed `etl.exe`
+> keeps its port until the process really goes; `taskkill /F /IM etl.exe` is the blunt way, and
+> `pkill` does not exist in Git Bash here. A port already in use is reported clearly and exits 1.
 >
 > **`.etl/` was reset before those runs**, so the incremental sample really did start from
 > nothing. It is git-ignored local state; a fresh clone starts empty anyway, and
 > `etl state forget` and `etl runs prune` are how you get back here deliberately.
 >
-> **State of the tree:** clean and committed — 13 commits on `main`, the last being Phase 8c.
+> **State of the tree:** clean and committed — 14 commits on `main`, the last being Phase 8d.
 > Everything is pushed; `origin/main` at `github.com/marun224/local_etl_tool` (private) is at
 > the same commit as `HEAD`.
 >
@@ -92,10 +102,8 @@ first when picking the project back up.
 
 ## Where things stand
 
-- **Next phase:** Phase 8, split into 8a–8d in the plan on 2026-09-16 before starting.
-- **In progress:** nothing. **8a, 8b and 8c are complete** (2026-09-16). Next is **8d** — the
-  web console: `serve`, shared-token auth, roles. Its dependency is settled (decision 8:
-  `tiny_http`).
+- **Next phase:** Phase 9 — standalone binary export and air-gapped packaging.
+- **In progress:** nothing. **Phase 8 is complete** (8a–8d, all 2026-09-16).
 - **Blocked on:** nothing.
 
 Phase 6 was split into 6a and 6b on 2026-09-16 before starting; **both are complete**
@@ -109,11 +117,11 @@ pass), `ctl.throttle` (nothing to throttle until Phase 10 has a row cursor).
 
 ## What works today
 
-Phases 0–7 are complete and 8a–8c are done, so there is a working CLI, **a canvas you can build
-a pipeline on**, and **a scheduler that runs them**. From the repo root:
+**Phases 0–8 are complete.** There is a working CLI, **a canvas you can build a pipeline on**,
+**a scheduler that runs them**, and **a console to watch it from**. From the repo root:
 
 ```powershell
-cargo test --workspace        # 508 tests: 254 engine, 113 scheduler, 51 e2e, 45 state, 20 secrets, 15 metadata, 10 desktop
+cargo test --workspace        # 576 tests: 254 engine, 113 scheduler, 65 console, 51 e2e, 45 state, 23 secrets, 15 metadata, 10 desktop
 .\target\debug\etl.exe run samples\pipelines\orders_enriched.json
 .\target\debug\etl.exe validate samples\pipelines\orders_enriched.json
 .\target\debug\etl.exe plan samples\pipelines\orders_enriched.json --script
@@ -416,6 +424,64 @@ exclusive create and `--force`, and the error message differs per platform becau
 situations genuinely do. Who holds it is written to a readable `.etl/scheduler.status` beside
 it, since the lock itself cannot be opened while held.
 
+**There is a web console.** `etl serve` binds loopback, mints a pair of tokens, and prints a
+link for each. It lists the workspace's pipelines with whether each one compiles and how its
+last run went, shows what is scheduled and when it next fires, shows recent run history, and
+lets an **operator** start a run.
+
+```powershell
+$s = "--schedules", "samples\schedules.json", "--contexts", "samples\contexts.json"
+.\target\debug\etl.exe serve @s                      # http://127.0.0.1:8087
+.\target\debug\etl.exe serve --port 9000 @s
+.\target\debug\etl.exe serve --bind 0.0.0.0 @s       # warns, loudly, and says why
+```
+
+**Two roles, and both have powers the other does not.** A viewer reads; an operator reads and
+starts runs. A third role that could do exactly what the second can would be decoration rather
+than access control, and there is nothing else to gate — secrets are not exposed over HTTP at
+all, and editing a pipeline is the canvas's job.
+
+**Tokens are minted per process and printed once**, the way a local notebook server does.
+Nothing is stored, so there is no token file to leak and a console that has been stopped cannot
+be reached with yesterday's link. A stable token — for CI, or a console that restarts — comes
+from `ETL_CONSOLE_OPERATOR_TOKEN` and `ETL_CONSOLE_VIEWER_TOKEN`, **never a flag**, because an
+argument is visible in the process list; that is the call already made for `etl secret set`. A
+token taken from the environment is not printed, since that would put a standing secret in the
+scrollback and the CI log of every run. Setting both variables to the same value is **refused at
+startup**: it silently promotes every viewer to an operator.
+
+**A `?token=` works on the page and nowhere else.** The printed link has to carry one to open
+anything; the page moves it out of the address bar on load, keeps it in session storage, and
+sends a header from then on. The API takes only the header — which is what stops a console link
+pasted into a chat from being a usable credential, and stops another site's form from posting
+one for you.
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8087/api/pipelines
+curl -H "Authorization: Bearer $TOKEN" -X POST 'http://127.0.0.1:8087/api/runs?pipeline=orders_enriched'
+curl http://127.0.0.1:8087/api/health   # the one route with no token, and it says only "ok"
+```
+
+**Eight routes.** The page, health, pipelines, one pipeline's lineage, runs, one run, schedules,
+and a POST to start a run. Every authenticated response carries `X-Etl-Role`, which is how the
+page knows whether to draw a Run button rather than guessing it from an error message.
+
+**It is not a public service, and it says so.** Loopback unless told otherwise, no TLS, no
+accounts. Binding elsewhere prints a warning naming the actual exposure — the tokens cross that
+network in clear — and points at a reverse proxy or an SSH tunnel.
+
+**A pipeline name from the network is resolved by lookup, never joined onto a path.** A name
+that is not in the workspace's own list finds nothing, so `../../etc/passwd` is a 404 rather
+than a file read. Everything the page renders goes in through `textContent`, so a pipeline named
+`<img onerror=…>` is a string rather than script running with an operator's token; a test
+asserts the page contains no `innerHTML` and never gains one.
+
+**Runs the console starts are the same runs.** They go through the same `perform` that `etl run`
+and the scheduler use, so they are recorded in history and advance watermarks identically, and
+`etl runs show` cannot tell where one came from. They are serialised by a mutex, so two people
+clicking Run cannot race; running beside a *scheduler* is the same unguarded case a hand-run
+`etl run` is.
+
 **Nodes can be materialised.** `"materialize": "auto" | "view" | "memory" | "disk"` on a node.
 `view` is the lazy default, `memory` a temp table, `disk` a Parquet spill under `.etl/tmp/` that
 the executor clears up afterwards. Every mode gives the same answer; there is a test that says
@@ -426,8 +492,7 @@ extension, which sits badly with Phase 9's vendored set) and DuckLake (a catalog
 needs its own design pass rather than a thirteenth copy of the ATTACH shape). Both are listed
 under Phase 4 in the plan, so both need a decision recorded there rather than quietly dropping.
 
-**Not built yet:** the rest of Phase 8 (8d) and the three control components deferred out
-of 6b. **The canvas cannot edit an `incremental` block or a schedule** — both survive a GUI
+**Not built yet:** Phases 9–12, and the three control components deferred out of 6b. **The canvas cannot edit an `incremental` block or a schedule** — both survive a GUI
 round trip untouched, but there is no panel for either; a schedule is not in the pipeline
 document at all, so its panel is a workspace-level screen rather than an inspector tab, and
 that is 8d's shape rather than 7's. i18next and Vega are in the plan's stack note and stay
@@ -459,11 +524,11 @@ fail the run. That is `ctl.fail`'s shape and it needs 6b's execution-model decis
 | 7b | — the canvas | **done** | 2026-09-16 |
 | 7c | — the generated property panel | **done** | 2026-09-16 |
 | 7d | — the run view, Plan tab, and the policy panel | **done** | 2026-09-16 |
-| 8 | Headless runner: serve, scheduler, RBAC, incremental | **in progress** | |
+| 8 | Headless runner: serve, scheduler, RBAC, incremental | **done** | 2026-09-16 |
 | 8a | — watermark incremental loading | **done** | 2026-09-16 |
 | 8b | — the runner: history, `--json`, lineage | **done** | 2026-09-16 |
 | 8c | — scheduler: interval, cron, file-watch | **done** | 2026-09-16 |
-| 8d | — web console: serve, token auth, roles | not started | |
+| 8d | — web console: serve, token auth, roles | **done** | 2026-09-16 |
 | 9 | Standalone binary export + air-gapped packaging | not started | |
 | 10 | Rust-native connectors | not started | |
 | 11 | AI assistant + MCP server | not started | |
@@ -657,6 +722,35 @@ Settled decisions 5–8.)
 - **`schedule start` returns exit 3 if any run failed**, matching `run`'s codes. A scheduler
   staying up therefore only reports at the end, which is fine for `--once` and means nothing
   for a long-lived one.
+
+### From Phase 8d
+
+- **The console is the first code here that takes untrusted input off a socket**, and the
+  dependency posture reflects it: `tiny_http` rather than a hand-rolled server (Settled decision
+  8), and the five crates it brings are the whole of Phase 8's dependency budget.
+- **A `?token=` is accepted on the page and refused on the API.** Worth knowing before somebody
+  "fixes" it: it is not an oversight. It is what stops a console link in a chat log from being a
+  working API credential and stops another origin's form from posting one.
+- **The page has no build step and must not gain one.** It is a string in `ui.rs` so the
+  headless runner can serve its own console; Phase 9's standalone binary inherits that for free.
+  A test asserts the page loads nothing external, so it cannot drift into working only where
+  there is a network.
+- **`innerHTML` is forbidden in `ui.rs` and there is a test that says so.** Everything the page
+  renders is workspace data somebody else wrote.
+- **Two roles is the whole model, and a third would need a reason.** `Role::allows` is an
+  ordering rather than a permission set, which is right while one role is strictly the other
+  plus one power and wrong the moment it is not.
+- **`etl serve` holds the terminal and has no shutdown path.** Ctrl-C is how it stops; a
+  shutdown route nothing calls is a route nothing tests. On Windows a leftover `etl.exe` keeps
+  its port — `taskkill /F /IM etl.exe`, since `pkill` does not exist in Git Bash here. A port
+  already in use is reported clearly and exits 1.
+- **Pipelines are found by scanning, not by a manifest.** Any `.json` under the workspace that
+  parses as a document with nodes, at most four levels deep, skipping `.etl/`, `target/`,
+  `node_modules/` and dot-directories. A manifest would be a second place to keep in step with
+  the folder, and the folder is the source of truth everywhere else in this product.
+- **The console compiles every pipeline on every listing.** That is what lets it say which ones
+  will not run, which is the thing worth knowing before 3am — but it is real work per page
+  refresh, and a workspace with many pipelines is where that would first be felt.
 
 ## Session log
 
@@ -1100,3 +1194,41 @@ concurrency is handled by a workspace lock plus sequential runs (not by adding l
   refused by pid and host, killed the first without unwinding, and confirmed the leftover file
   did not wedge the workspace. That is the Ctrl-C case, which is how a foreground scheduler is
   stopped every single time.
+
+### 2026-09-16 — Phase 8d: the web console
+
+The last slice of Phase 8, and a view over what 8b and 8c produce rather than anything new
+underneath. Settled decision 8 held: `tiny_http`, and five crates arrive with it.
+
+- `crates/console/` — new crate, no engine dependency:
+  - `auth.rs` — two roles, constant-time comparison, tokens minted per process or taken from
+    the environment
+  - `routes.rs` — eight routes as pure functions; hardening headers on every response
+  - `ui.rs` — the page, one string, no build step, no external loads
+  - `server.rs` — `tiny_http` and a four-thread pool; the only part that knows about sockets
+  - `workspace.rs` — the `Workspace` trait the CLI implements
+- `crates/secrets/src/lib.rs` — `random_token`, because this is where the project keeps its
+  cryptography and `OsRng` was already a dependency of the AES decision 4 chose
+- `crates/cli/src/main.rs` — `etl serve`, and `ConsoleWorkspace` implementing the trait
+
+**65 console tests, 3 new in secrets.** Gate green: fmt clean, clippy clean with `-D warnings`,
+**576 Rust tests** and 114 frontend, typecheck clean.
+
+#### What running it changed
+
+- **The page originally worked out its own role by probing.** It sent a `POST` it expected to
+  fail and read the role out of the error message, which works exactly until somebody rewords
+  the error. The server now states it in `X-Etl-Role` on every authenticated response,
+  including the refusals — which is where knowing your own role is most useful.
+- **`with_role` returned before attaching that header on a refusal.** Caught by a test that
+  asserted the property rather than the happy path.
+- **Clippy found a parameter threaded through a recursion and never used** — `collect_pipelines`
+  carried a `root` it did not need.
+- **A leftover `etl.exe` from an earlier test held the port**, so a later console failed to bind
+  and every request went to the *old* server with the *new* tokens, returning 401. The 401s were
+  correct on both sides; `pkill` simply does not exist in Git Bash on Windows. Worth knowing
+  before debugging an auth problem that is not one.
+- **The security properties were checked against the running console**, not only in tests: a
+  token in the URL refused on the API for both a GET and a POST, a viewer's `POST` refused with
+  the run not happening, a traversal attempt answered 404, and the hardening headers read off
+  the wire.

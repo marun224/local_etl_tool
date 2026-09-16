@@ -419,12 +419,38 @@ fn write_new(path: &Path, contents: &str) -> Result<(), SecretError> {
 }
 
 // ---------------------------------------------------------------------------
+// Random tokens
+// ---------------------------------------------------------------------------
+
+/// A fresh random token, hex, `bytes` bytes of entropy.
+///
+/// Here rather than in the console crate because this is where the project
+/// keeps its cryptography: `OsRng` is already a dependency of the AES that
+/// Settled decision 4 chose, and hex is already written below. A console
+/// minting its own tokens from a second source of randomness would be two
+/// answers to one question.
+///
+/// **From the operating system, never from a pseudo-random generator seeded by
+/// the clock.** A bearer token that can be guessed is not a token. `OsRng`
+/// reads the platform CSPRNG, and a failure to do so panics rather than
+/// silently returning something weaker — which is the correct trade here,
+/// because the alternative is a console that looks locked and is not.
+pub fn random_token(bytes: usize) -> String {
+    use aes_gcm::aead::rand_core::RngCore;
+
+    let mut buffer = vec![0_u8; bytes];
+    OsRng.fill_bytes(&mut buffer);
+
+    to_hex(&buffer)
+}
+
+// ---------------------------------------------------------------------------
 // Hex
 // ---------------------------------------------------------------------------
 
 /// Hex rather than base64: it keeps the store greppable, it has no padding
 /// rules to get wrong, and it is ten lines rather than a dependency.
-fn to_hex(bytes: &[u8]) -> String {
+pub(crate) fn to_hex(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
 
     for byte in bytes {

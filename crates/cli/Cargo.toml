@@ -15,6 +15,7 @@ etl-duckdb-engine.workspace = true
 etl-metadata.workspace = true
 etl-secrets.workspace = true
 etl-state.workspace = true
+etl-console.workspace = true
 etl-scheduler.workspace = true
 clap.workspace = true
 serde_json.workspace = true
