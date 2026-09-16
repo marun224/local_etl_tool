@@ -35,9 +35,10 @@ and what can be configured.
 ```
 
 The namespace comes from the id, so `src.file.jsonl` is a source and gets no
-input port and one `main` output automatically. Override with `.inputs(...)` /
-`.outputs(...)` only when the component is unusual — a join takes two named
-inputs, a quality check has a second `reject` output.
+input port and one `main` output automatically. A `qa.*` id gets one input and
+**two** outputs, `main` and `rejected`. Override with `.inputs(...)` /
+`.outputs(...)` only when the component is unusual within its namespace — a join
+takes two named inputs, and so does `qa.referential`.
 
 **Property types** are `text`, `path`, `sql`, `boolean`, `integer`, `number`,
 `string_list`, `map`, and `enumerated(&[...])`. The type decides both the
@@ -116,6 +117,42 @@ which are user-written SQL by definition — that is what the type means.
 Use `create_view(node, &body)` for anything producing a relation and
 `copy_to(upstream, path, &options)` for a sink; they handle the statement
 wrapper and the alias view.
+
+Note that `exactly_one_input` and `exactly_two_inputs` hand back the **relation**
+to read, not the upstream node id. When the edge came from a quality node's
+`rejected` port those differ, and the relation is the one that exists. Nothing in
+a builder should reach for `input.node_id` directly.
+
+### Quality components
+
+A `qa.*` component splits rather than filters, so it does not call `create_view`
+itself. It works out a base relation and a boolean predicate and hands both to
+`quality_split`, which writes the accepted and rejected views together:
+
+```rust
+pub(crate) fn quality_not_null(node: &Lowering<'_>) -> Result<String, EngineError> {
+    let upstream = exactly_one_input(node)?;
+    let columns = checked_columns(node, "columns")?;
+
+    let predicate = columns
+        .iter()
+        .map(|column| format!("{column} IS NOT NULL"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+
+    Ok(quality_split(node, &plain_base(&upstream), &predicate, &[]))
+}
+```
+
+Write the predicate for the rows that **pass**; `quality_split` derives the
+rejected side by negating it. Do not write the two separately — the split is
+exact precisely because both sides read one expression, and a hand-written
+negation is where the rows would start going missing. If the predicate needs a
+helper column, as `qa.unique` does for its window function, name it in the
+fourth argument and it is projected away.
+
+The row counts follow automatically: a component whose spec has a `rejected`
+port gets two count probes, and the executor reports both.
 
 ### What the spec cannot express
 

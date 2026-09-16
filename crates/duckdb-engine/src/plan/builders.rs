@@ -14,9 +14,10 @@
 //! dispatch with a spec registry so that adding the ninth is data rather than
 //! another match arm.
 
-use super::{Input, Materialize, StageKind};
+use super::{reject_relation, CountProbe, Input, Materialize, StageKind};
 use crate::sql::{quote_identifier, quote_literal, quote_path};
 use crate::EngineError;
+use etl_metadata::{MAIN_PORT, REJECTED_PORT};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
 /// What a builder needs to know about the node it is lowering.
@@ -91,7 +92,7 @@ pub(crate) fn transform_filter(node: &Lowering<'_>) -> Result<String, EngineErro
 
     let body = format!(
         "SELECT * FROM {} WHERE {}",
-        quote_identifier(upstream),
+        quote_identifier(&upstream),
         predicate.trim()
     );
 
@@ -108,7 +109,7 @@ pub(crate) fn transform_select(node: &Lowering<'_>) -> Result<String, EngineErro
     let body = format!(
         "SELECT {} FROM {}",
         projected.join(", "),
-        quote_identifier(upstream)
+        quote_identifier(&upstream)
     );
 
     Ok(create_view(node, &body))
@@ -138,9 +139,9 @@ pub(crate) fn transform_join(node: &Lowering<'_>) -> Result<String, EngineError>
 
     let body = format!(
         "SELECT * FROM {} {} {}{}",
-        quote_identifier(left),
+        quote_identifier(&left),
         join_type,
-        quote_identifier(right),
+        quote_identifier(&right),
         condition
     );
 
@@ -369,7 +370,7 @@ fn sink_database(node: &Lowering<'_>, database_type: &str) -> Result<String, Eng
     let (attach, alias) = attach_database(node, database_type, false)?;
 
     let table = qualified_table(node, &alias)?;
-    let source = quote_identifier(upstream);
+    let source = quote_identifier(&upstream);
 
     // A database sink's modes are not a file sink's: there is no
     // `error_if_exists` here, because the useful third option against a table
@@ -419,7 +420,7 @@ pub(crate) fn transform_derive(node: &Lowering<'_>) -> Result<String, EngineErro
     let body = format!(
         "SELECT *, {} FROM {}",
         expressions.trim().trim_end_matches(','),
-        quote_identifier(upstream)
+        quote_identifier(&upstream)
     );
 
     Ok(create_view(node, &body))
@@ -440,7 +441,7 @@ pub(crate) fn transform_rename(node: &Lowering<'_>) -> Result<String, EngineErro
     let body = format!(
         "SELECT * RENAME ({}) FROM {}",
         renames.join(", "),
-        quote_identifier(upstream)
+        quote_identifier(&upstream)
     );
 
     Ok(create_view(node, &body))
@@ -464,7 +465,7 @@ pub(crate) fn transform_cast(node: &Lowering<'_>) -> Result<String, EngineError>
     let body = format!(
         "SELECT * REPLACE ({}) FROM {}",
         casts.join(", "),
-        quote_identifier(upstream)
+        quote_identifier(&upstream)
     );
 
     Ok(create_view(node, &body))
@@ -476,7 +477,7 @@ pub(crate) fn transform_cast(node: &Lowering<'_>) -> Result<String, EngineError>
 
 pub(crate) fn transform_distinct(node: &Lowering<'_>) -> Result<String, EngineError> {
     let upstream = exactly_one_input(node)?;
-    let body = format!("SELECT DISTINCT * FROM {}", quote_identifier(upstream));
+    let body = format!("SELECT DISTINCT * FROM {}", quote_identifier(&upstream));
 
     Ok(create_view(node, &body))
 }
@@ -494,7 +495,7 @@ pub(crate) fn transform_dedup(node: &Lowering<'_>) -> Result<String, EngineError
 
     let body = format!(
         "SELECT * FROM {} QUALIFY row_number() OVER ({}) = 1",
-        quote_identifier(upstream),
+        quote_identifier(&upstream),
         window
     );
 
@@ -507,7 +508,7 @@ pub(crate) fn transform_sort(node: &Lowering<'_>) -> Result<String, EngineError>
 
     let body = format!(
         "SELECT * FROM {} ORDER BY {}",
-        quote_identifier(upstream),
+        quote_identifier(&upstream),
         by.trim()
     );
 
@@ -521,7 +522,7 @@ pub(crate) fn transform_limit(node: &Lowering<'_>) -> Result<String, EngineError
 
     let mut body = format!(
         "SELECT * FROM {} LIMIT {}",
-        quote_identifier(upstream),
+        quote_identifier(&upstream),
         count
     );
     if offset > 0 {
@@ -550,7 +551,7 @@ pub(crate) fn transform_sample(node: &Lowering<'_>) -> Result<String, EngineErro
         }
     };
 
-    let body = format!("SELECT * FROM {} {}", quote_identifier(upstream), clause);
+    let body = format!("SELECT * FROM {} {}", quote_identifier(&upstream), clause);
 
     Ok(create_view(node, &body))
 }
@@ -572,7 +573,7 @@ pub(crate) fn transform_aggregate(node: &Lowering<'_>) -> Result<String, EngineE
         format!(
             "SELECT {} FROM {}",
             aggregations,
-            quote_identifier(upstream)
+            quote_identifier(&upstream)
         )
     } else {
         let grouped = groups.join(", ");
@@ -580,7 +581,7 @@ pub(crate) fn transform_aggregate(node: &Lowering<'_>) -> Result<String, EngineE
             "SELECT {}, {} FROM {} GROUP BY {}",
             grouped,
             aggregations,
-            quote_identifier(upstream),
+            quote_identifier(&upstream),
             grouped
         )
     };
@@ -610,7 +611,7 @@ pub(crate) fn transform_window(node: &Lowering<'_>) -> Result<String, EngineErro
         expression.trim(),
         over,
         quote_identifier(output),
-        quote_identifier(upstream)
+        quote_identifier(&upstream)
     );
 
     Ok(create_view(node, &body))
@@ -649,7 +650,7 @@ pub(crate) fn transform_pivot(node: &Lowering<'_>) -> Result<String, EngineError
 
     let mut body = format!(
         "PIVOT {} ON {} IN ({}) USING {}",
-        quote_identifier(upstream),
+        quote_identifier(&upstream),
         on.join(", "),
         values.join(", "),
         using.trim()
@@ -669,7 +670,7 @@ pub(crate) fn transform_unpivot(node: &Lowering<'_>) -> Result<String, EngineErr
 
     let body = format!(
         "UNPIVOT {} ON {} INTO NAME {} VALUE {}",
-        quote_identifier(upstream),
+        quote_identifier(&upstream),
         columns.join(", "),
         quote_identifier(resolved_str(node, "name_column")?),
         quote_identifier(resolved_str(node, "value_column")?)
@@ -695,7 +696,7 @@ pub(crate) fn transform_union(node: &Lowering<'_>) -> Result<String, EngineError
         operator.push_str(" BY NAME");
     }
 
-    Ok(create_view(node, &two_sided(left, &operator, right)))
+    Ok(create_view(node, &two_sided(&left, &operator, &right)))
 }
 
 pub(crate) fn transform_intersect(node: &Lowering<'_>) -> Result<String, EngineError> {
@@ -714,7 +715,7 @@ fn set_operation(node: &Lowering<'_>, operator: &str) -> Result<String, EngineEr
         operator.push_str(" ALL");
     }
 
-    Ok(create_view(node, &two_sided(left, &operator, right)))
+    Ok(create_view(node, &two_sided(&left, &operator, &right)))
 }
 
 fn two_sided(left: &str, operator: &str, right: &str) -> String {
@@ -738,7 +739,7 @@ pub(crate) fn sink_parquet(node: &Lowering<'_>) -> Result<String, EngineError> {
         quote_literal(resolved_str(node, "compression")?)
     );
 
-    Ok(copy_to(upstream, path, &options))
+    Ok(copy_to(&upstream, path, &options))
 }
 
 pub(crate) fn sink_csv(node: &Lowering<'_>) -> Result<String, EngineError> {
@@ -752,14 +753,14 @@ pub(crate) fn sink_csv(node: &Lowering<'_>) -> Result<String, EngineError> {
         options.push(format!("DELIMITER {}", quote_literal(delimiter)));
     }
 
-    Ok(copy_to(upstream, path, &options.join(", ")))
+    Ok(copy_to(&upstream, path, &options.join(", ")))
 }
 
 pub(crate) fn sink_json(node: &Lowering<'_>) -> Result<String, EngineError> {
     let upstream = exactly_one_input(node)?;
     let path = required_str(node, "path")?;
 
-    Ok(copy_to(upstream, path, "FORMAT json, ARRAY true"))
+    Ok(copy_to(&upstream, path, "FORMAT json, ARRAY true"))
 }
 
 pub(crate) fn sink_jsonl(node: &Lowering<'_>) -> Result<String, EngineError> {
@@ -768,7 +769,7 @@ pub(crate) fn sink_jsonl(node: &Lowering<'_>) -> Result<String, EngineError> {
 
     // The same writer as `snk.file.json` without ARRAY: one JSON value per
     // line, which is what streams and log pipelines expect.
-    Ok(copy_to(upstream, path, "FORMAT json"))
+    Ok(copy_to(&upstream, path, "FORMAT json"))
 }
 
 pub(crate) fn sink_excel(node: &Lowering<'_>) -> Result<String, EngineError> {
@@ -783,7 +784,7 @@ pub(crate) fn sink_excel(node: &Lowering<'_>) -> Result<String, EngineError> {
         options.push_str(&format!(", SHEET {}", quote_literal(sheet)));
     }
 
-    Ok(copy_to(upstream, path, &options))
+    Ok(copy_to(&upstream, path, &options))
 }
 
 pub(crate) fn sink_s3(node: &Lowering<'_>) -> Result<String, EngineError> {
@@ -806,7 +807,7 @@ pub(crate) fn sink_s3(node: &Lowering<'_>) -> Result<String, EngineError> {
         }
     };
 
-    Ok(copy_to(upstream, path, &options))
+    Ok(copy_to(&upstream, path, &options))
 }
 
 // ---------------------------------------------------------------------------
@@ -1117,9 +1118,9 @@ fn type_name(node: &Lowering<'_>, declared: &str) -> Result<String, EngineError>
 // Input arity
 // ---------------------------------------------------------------------------
 
-fn exactly_one_input<'a>(node: &Lowering<'a>) -> Result<&'a str, EngineError> {
+fn exactly_one_input(node: &Lowering<'_>) -> Result<String, EngineError> {
     match node.inputs {
-        [only] => Ok(&only.node_id),
+        [only] => Ok(only.relation()),
         inputs => Err(EngineError::WrongInputCount {
             id: node.node_id.to_string(),
             component_id: node.component_id.to_string(),
@@ -1134,7 +1135,7 @@ fn exactly_one_input<'a>(node: &Lowering<'a>) -> Result<&'a str, EngineError> {
 /// A handle named `left` or `right` wins over edge order, so re-wiring the
 /// canvas cannot silently swap the sides of an outer join. Without handles,
 /// document order decides.
-fn exactly_two_inputs<'a>(node: &Lowering<'a>) -> Result<(&'a str, &'a str), EngineError> {
+fn exactly_two_inputs(node: &Lowering<'_>) -> Result<(String, String), EngineError> {
     let [first, second] = node.inputs else {
         return Err(EngineError::WrongInputCount {
             id: node.node_id.to_string(),
@@ -1147,27 +1148,262 @@ fn exactly_two_inputs<'a>(node: &Lowering<'a>) -> Result<(&'a str, &'a str), Eng
     let side = |input: &Input| input.target_handle.clone().unwrap_or_default();
 
     if side(second) == "left" || side(first) == "right" {
-        Ok((&second.node_id, &first.node_id))
+        Ok((second.relation(), first.relation()))
     } else {
-        Ok((&first.node_id, &second.node_id))
+        Ok((first.relation(), second.relation()))
     }
 }
 
-/// The count probe that follows a stage, so the run can report how many rows
+/// The count probes that follow a stage, so the run can report how many rows
 /// it produced.
 ///
 /// A sink writes exactly the rows its input yields, so counting the upstream
 /// relation and counting the file would give the same answer — and `COPY`
 /// reports nothing we could read instead.
-pub(crate) fn count_probe(node_id: &str, kind: StageKind, from: Option<&str>) -> Option<String> {
+pub(crate) fn count_probes(
+    node_id: &str,
+    kind: StageKind,
+    splits: bool,
+    from: Option<&str>,
+) -> Vec<CountProbe> {
     let relation = if kind.produces_relation() {
-        node_id
+        node_id.to_string()
     } else {
-        from?
+        match from {
+            Some(upstream) => upstream.to_string(),
+            None => return Vec::new(),
+        }
     };
 
-    Some(format!(
-        "SELECT count(*) AS n FROM {};",
-        quote_identifier(relation)
-    ))
+    let probe = |relation: &str, port: Option<&str>| CountProbe {
+        sql: format!("SELECT count(*) AS n FROM {};", quote_identifier(relation)),
+        port: port.map(str::to_string),
+    };
+
+    let mut probes = vec![probe(&relation, splits.then_some(MAIN_PORT))];
+
+    // A quality node reports both sides. The order is the contract with the
+    // executor, which reads counts off stdout positionally: accepted first,
+    // because that is the order the two views are created in.
+    if splits {
+        probes.push(probe(&reject_relation(node_id), Some(REJECTED_PORT)));
+    }
+
+    probes
+}
+
+// ---------------------------------------------------------------------------
+// Quality
+// ---------------------------------------------------------------------------
+
+/// Lower a validator into the two relations it produces.
+///
+/// Every `qa.*` component reduces to the same three things: a `base` relation
+/// to test, a boolean `predicate` over it, and any helper columns the base
+/// added that must not reach the output.
+///
+/// **The split is exact, and that is the point.** Accepted is
+/// `coalesce(<pred>, false)` and rejected is `NOT coalesce(<pred>, false)`,
+/// both reading the same expression — so every input row lands on exactly one
+/// side and none is lost. The `coalesce` is load-bearing rather than
+/// defensive: SQL predicates are three-valued, and a NULL is an *unknown*, not
+/// a pass. Without it, `WHERE pred` and `WHERE NOT pred` would both drop the
+/// unknowns, and the two outputs would quietly fail to add up to the input.
+fn quality_split(
+    node: &Lowering<'_>,
+    base: &str,
+    predicate: &str,
+    helper_columns: &[&str],
+) -> String {
+    let projection = if helper_columns.is_empty() {
+        "*".to_string()
+    } else {
+        let excluded: Vec<String> = helper_columns.iter().map(|c| quote_identifier(c)).collect();
+        format!("* EXCLUDE ({})", excluded.join(", "))
+    };
+
+    let accepted = format!("SELECT {projection} FROM ({base}) WHERE coalesce({predicate}, false)");
+    let rejected =
+        format!("SELECT {projection} FROM ({base}) WHERE NOT coalesce({predicate}, false)");
+
+    // The accepted side goes through `create_view`, so a validator honours
+    // `materialize` exactly as any other stage does. The rejected side is
+    // always a plain view: it is normally small and normally terminal, so
+    // spilling it would buy nothing and would need a second spill path.
+    let mut statement = create_view(node, &accepted);
+
+    statement.push_str(&format!(
+        "\nCREATE OR REPLACE TEMP VIEW {} AS ({});",
+        quote_identifier(&reject_relation(node.node_id)),
+        rejected
+    ));
+
+    statement
+}
+
+/// The columns a validator checks: required, quoted, and at least one.
+fn checked_columns(node: &Lowering<'_>, key: &str) -> Result<Vec<String>, EngineError> {
+    let values = required_array(node, key)?;
+    column_list(node, key, values)
+}
+
+/// A validator's list of literal values: required, quoted, and at least one.
+///
+/// The sibling of [`column_list`], and separate from it because the difference
+/// matters: these become string literals, not identifiers. Quoting a value as
+/// an identifier would turn `IN ('paid')` into `IN ("paid")` — a column
+/// reference, which is a different query that usually still runs.
+fn checked_values(node: &Lowering<'_>, key: &str) -> Result<Vec<String>, EngineError> {
+    let values = required_array(node, key)?;
+
+    if values.is_empty() {
+        return Err(EngineError::InvalidProperty {
+            id: node.node_id.to_string(),
+            property: key.to_string(),
+            reason: "must list at least one value".to_string(),
+        });
+    }
+
+    values
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(quote_literal)
+                .ok_or_else(|| EngineError::InvalidProperty {
+                    id: node.node_id.to_string(),
+                    property: key.to_string(),
+                    reason: "every entry must be text".to_string(),
+                })
+        })
+        .collect()
+}
+
+/// One end of a numeric range, if the node set it.
+fn optional_number(node: &Lowering<'_>, key: &str) -> Result<Option<String>, EngineError> {
+    match node.properties.get(key) {
+        None | Some(JsonValue::Null) => Ok(None),
+
+        // The number's own text rather than a parsed float: a bound written as
+        // 9007199254740993 has to reach SQL as that, not as the nearest double.
+        Some(JsonValue::Number(number)) => Ok(Some(number.to_string())),
+
+        Some(_) => Err(EngineError::InvalidProperty {
+            id: node.node_id.to_string(),
+            property: key.to_string(),
+            reason: "must be a number".to_string(),
+        }),
+    }
+}
+
+/// `SELECT * FROM <relation>` — the base every validator but `qa.unique` tests.
+fn plain_base(upstream: &str) -> String {
+    format!("SELECT * FROM {}", quote_identifier(upstream))
+}
+
+pub(crate) fn quality_not_null(node: &Lowering<'_>) -> Result<String, EngineError> {
+    let upstream = exactly_one_input(node)?;
+    let columns = checked_columns(node, "columns")?;
+
+    let predicate = columns
+        .iter()
+        .map(|column| format!("{column} IS NOT NULL"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+
+    Ok(quality_split(node, &plain_base(&upstream), &predicate, &[]))
+}
+
+pub(crate) fn quality_unique(node: &Lowering<'_>) -> Result<String, EngineError> {
+    let upstream = exactly_one_input(node)?;
+    let columns = checked_columns(node, "columns")?;
+    let key = columns.join(", ");
+
+    // A duplicate is a property of a row's neighbours rather than of the row,
+    // so this is the one validator whose predicate needs a helper column.
+    //
+    // Every copy of a duplicated key is rejected, deliberately. Keeping one is
+    // deduplication, which is what `xf.dedup` is for; a validator that quietly
+    // kept a survivor would be doing something its name does not say.
+    let helper = "__etl_occurrences";
+
+    let base = format!(
+        "SELECT *, count(*) OVER (PARTITION BY {key}) AS {} FROM {}",
+        quote_identifier(helper),
+        quote_identifier(&upstream)
+    );
+
+    let predicate = format!("{} = 1", quote_identifier(helper));
+    Ok(quality_split(node, &base, &predicate, &[helper]))
+}
+
+pub(crate) fn quality_range(node: &Lowering<'_>) -> Result<String, EngineError> {
+    let upstream = exactly_one_input(node)?;
+    let column = quote_identifier(required_str(node, "column")?);
+
+    let mut bounds = Vec::new();
+    if let Some(low) = optional_number(node, "min")? {
+        bounds.push(format!("{column} >= {low}"));
+    }
+    if let Some(high) = optional_number(node, "max")? {
+        bounds.push(format!("{column} <= {high}"));
+    }
+
+    if bounds.is_empty() {
+        return Err(EngineError::InvalidProperty {
+            id: node.node_id.to_string(),
+            property: "min".to_string(),
+            reason: "or max must be set; a range with neither bound checks nothing".to_string(),
+        });
+    }
+
+    let predicate = bounds.join(" AND ");
+    Ok(quality_split(node, &plain_base(&upstream), &predicate, &[]))
+}
+
+pub(crate) fn quality_regex(node: &Lowering<'_>) -> Result<String, EngineError> {
+    let upstream = exactly_one_input(node)?;
+    let column = quote_identifier(required_str(node, "column")?);
+    let pattern = quote_literal(required_str(node, "pattern")?);
+
+    let predicate = format!("regexp_matches({column}, {pattern})");
+    Ok(quality_split(node, &plain_base(&upstream), &predicate, &[]))
+}
+
+pub(crate) fn quality_accepted_values(node: &Lowering<'_>) -> Result<String, EngineError> {
+    let upstream = exactly_one_input(node)?;
+    let column = quote_identifier(required_str(node, "column")?);
+    let listed = checked_values(node, "values")?.join(", ");
+    let predicate = format!("{column} IN ({listed})");
+    Ok(quality_split(node, &plain_base(&upstream), &predicate, &[]))
+}
+
+pub(crate) fn quality_expression(node: &Lowering<'_>) -> Result<String, EngineError> {
+    let upstream = exactly_one_input(node)?;
+
+    // Deliberately unescaped, for the same reason `xf.sql` is: the point of
+    // this component is that the user writes SQL. Anyone who can edit the
+    // document can already run arbitrary SQL through `xf.sql`, so quoting here
+    // would buy nothing and break every legitimate use.
+    let predicate = required_str(node, "predicate")?;
+    Ok(quality_split(node, &plain_base(&upstream), predicate, &[]))
+}
+
+pub(crate) fn quality_referential(node: &Lowering<'_>) -> Result<String, EngineError> {
+    let (left, right) = exactly_two_inputs(node)?;
+
+    let column = quote_identifier(required_str(node, "column")?);
+    let reference = quote_identifier(required_str(node, "reference_column")?);
+
+    // `IN` rather than a join, so a row is tested without being duplicated by a
+    // reference side holding the key more than once. Its three-valued result is
+    // wanted here: a NULL key, or a reference set that contains NULLs and no
+    // match, both yield NULL — an unconfirmed reference — which
+    // `quality_split`'s coalesce sends to the reject side.
+    let predicate = format!(
+        "{column} IN (SELECT {reference} FROM {})",
+        quote_identifier(&right)
+    );
+
+    Ok(quality_split(node, &plain_base(&left), &predicate, &[]))
 }

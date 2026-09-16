@@ -316,9 +316,19 @@ fn command_run(
                     Some(rows) => format!("{rows} rows"),
                     None => "-".to_string(),
                 };
+
+                // A quality node's rejected count is shown even when it is
+                // zero. Zero rejects is the result someone ran the check to
+                // see, and hiding it would make a passing check look like a
+                // node that did nothing.
+                let rejected = match stage.rejected {
+                    Some(rejected) => format!("  {rejected} rejected"),
+                    None => String::new(),
+                };
+
                 println!(
-                    "  {:width$}  {:>12}  {}",
-                    stage.label, rows, stage.component_id
+                    "  {:width$}  {:>12}  {}{}",
+                    stage.label, rows, stage.component_id, rejected
                 );
             }
 

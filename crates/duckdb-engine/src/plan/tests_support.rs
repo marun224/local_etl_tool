@@ -39,6 +39,21 @@ pub(crate) fn edge(id: &str, source: &str, target: &str, handle: Option<&str>) -
     }
 }
 
+/// An edge that leaves a named output port, for wiring a quality node's two
+/// sides. [`edge`] always leaves `main`, which is every other component.
+pub(crate) fn edge_from(
+    id: &str,
+    source: &str,
+    source_handle: &str,
+    target: &str,
+    target_handle: Option<&str>,
+) -> PipelineEdge {
+    PipelineEdge {
+        source_handle: Some(source_handle.to_string()),
+        ..edge(id, source, target, target_handle)
+    }
+}
+
 pub(crate) fn document(nodes: Vec<PipelineNode>, edges: Vec<PipelineEdge>) -> PipelineDoc {
     PipelineDoc {
         format_version: 1,

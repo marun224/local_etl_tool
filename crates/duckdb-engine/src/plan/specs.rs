@@ -618,6 +618,98 @@ fn all_components() -> Vec<(ComponentSpec, BuildFn)> {
                 .properties(database_write("data/analytics.db")),
             builders::sink_sqlite,
         ),
+        // -- Quality ------------------------------------------------------
+        //
+        // Every one of these splits its input: the rows that passed leave by
+        // `main`, the ones that did not by `rejected`. Leaving the reject port
+        // unwired drops those rows, which is the ordinary case — wiring it to a
+        // sink is what turns a check into a dead-letter report.
+        (
+            ComponentSpec::new("qa.not_null", "Not null")
+                .description("Reject rows where any of the named columns is null.")
+                .icon("shield-alert")
+                .properties(vec![PropertySpec::string_list("columns")
+                    .required()
+                    .help("Every one of these must have a value.")]),
+            builders::quality_not_null,
+        ),
+        (
+            ComponentSpec::new("qa.unique", "Unique")
+                .description("Reject rows whose key appears more than once.")
+                .icon("fingerprint")
+                .properties(vec![PropertySpec::string_list("columns").required().help(
+                    "The key. Named together they form one compound key, not one check \
+                         each. Every copy of a repeated key is rejected — to keep one instead, \
+                         use xf.dedup.",
+                )]),
+            builders::quality_unique,
+        ),
+        (
+            ComponentSpec::new("qa.range", "Range")
+                .description("Reject rows whose value falls outside a numeric range.")
+                .icon("ruler")
+                .properties(vec![
+                    PropertySpec::text("column")
+                        .required()
+                        .help("The column to bound."),
+                    PropertySpec::number("min").help("Lowest accepted value, inclusive."),
+                    PropertySpec::number("max").help("Highest accepted value, inclusive."),
+                ]),
+            builders::quality_range,
+        ),
+        (
+            ComponentSpec::new("qa.regex", "Pattern")
+                .description("Reject rows whose text does not match a pattern.")
+                .icon("regex")
+                .properties(vec![
+                    PropertySpec::text("column")
+                        .required()
+                        .help("The column to test."),
+                    PropertySpec::text("pattern")
+                        .required()
+                        .help("A regular expression, e.g. ^[^@]+@[^@]+$ for an email address."),
+                ]),
+            builders::quality_regex,
+        ),
+        (
+            ComponentSpec::new("qa.accepted_values", "Accepted values")
+                .description("Reject rows whose value is not one of a listed set.")
+                .icon("list-checks")
+                .properties(vec![
+                    PropertySpec::text("column")
+                        .required()
+                        .help("The column to test."),
+                    PropertySpec::string_list("values")
+                        .required()
+                        .help("The values this column is allowed to hold."),
+                ]),
+            builders::quality_accepted_values,
+        ),
+        (
+            ComponentSpec::new("qa.expression", "Expression")
+                .description("Reject rows for which a SQL expression is not true.")
+                .icon("code")
+                .properties(vec![PropertySpec::sql("predicate").required().help(
+                    "A boolean SQL expression over the input's columns, e.g. total >= 0 AND \
+                     status <> 'void'. A row for which it is unknown is rejected.",
+                )]),
+            builders::quality_expression,
+        ),
+        (
+            ComponentSpec::new("qa.referential", "Referential")
+                .description("Reject rows whose key is not present in a second input.")
+                .icon("link")
+                .inputs(vec![PortSpec::new("left"), PortSpec::new("right")])
+                .properties(vec![
+                    PropertySpec::text("column")
+                        .required()
+                        .help("The key on the left input."),
+                    PropertySpec::text("reference_column")
+                        .required()
+                        .help("The column on the right input it must be found in."),
+                ]),
+            builders::quality_referential,
+        ),
     ]
 }
 

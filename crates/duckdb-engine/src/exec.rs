@@ -119,8 +119,28 @@ pub struct StageOutcome {
     pub node_id: String,
     pub label: String,
     pub component_id: String,
-    /// Rows the stage produced, when counts were collected.
+    /// Rows the stage produced, when counts were collected. For a quality node
+    /// this is the accepted side only; see [`StageOutcome::rejected`].
     pub rows: Option<u64>,
+    /// Rows a quality node sent to its dead-letter output. `None` for every
+    /// stage that does not split, which is how a node with nothing to reject
+    /// stays distinguishable from a node that cannot reject at all.
+    pub rejected: Option<u64>,
+}
+
+impl StageOutcome {
+    /// Every row the stage saw, accepted and rejected together.
+    ///
+    /// For a quality node the two sides partition the input exactly, so this is
+    /// the upstream row count — which is the number worth showing beside a
+    /// rejection rate.
+    pub fn rows_in(&self) -> Option<u64> {
+        match (self.rows, self.rejected) {
+            (Some(rows), Some(rejected)) => Some(rows + rejected),
+            (rows, None) => rows,
+            (None, rejected) => rejected,
+        }
+    }
 }
 
 /// What a whole run did.
@@ -458,9 +478,11 @@ fn parse_counts(stdout: &str) -> Result<Vec<u64>, ExecError> {
 
 /// Turn a non-zero exit into an error that names the stage responsible.
 ///
-/// With counts on, every stage emits exactly one array, so the number that
-/// arrived is the number of stages that finished — and the next one is the
-/// culprit. Without counts there is nothing to count, so the error stays
+/// With counts on, each count probe emits exactly one array, so the number that
+/// arrived is the number of probes that finished — and the stage owning the
+/// next one is the culprit. Probes, not stages: a quality node emits two, so
+/// counting stages would name the wrong node for everything after the first
+/// one. Without counts there is nothing to count, so the error stays
 /// unattributed rather than guessing.
 fn attribute_failure(
     plan: &Plan,
@@ -472,9 +494,9 @@ fn attribute_failure(
         return ExecError::RunFailed { message };
     }
 
-    let counted: Vec<&Stage> = plan.counted_stages().collect();
+    let probes: Vec<&Stage> = plan.count_probes().map(|(stage, _)| stage).collect();
 
-    match counted.get(counts.len()) {
+    match probes.get(counts.len()) {
         Some(stage) => ExecError::StageFailed {
             node_id: stage.node_id.clone(),
             label: stage.label.clone(),
@@ -485,21 +507,28 @@ fn attribute_failure(
 }
 
 fn outcomes(plan: &Plan, counts_enabled: bool, counts: &[u64]) -> Vec<StageOutcome> {
-    let mut by_node = std::collections::HashMap::new();
+    // Keyed by node **and port**, because a quality node contributes two
+    // numbers and they must not overwrite one another.
+    let mut by_output = std::collections::HashMap::new();
 
     if counts_enabled {
-        for (stage, count) in plan.counted_stages().zip(counts) {
-            by_node.insert(stage.node_id.clone(), *count);
+        for ((stage, probe), count) in plan.count_probes().zip(counts) {
+            by_output.insert((stage.node_id.clone(), probe.is_rejected()), *count);
         }
     }
 
     plan.stages
         .iter()
-        .map(|stage| StageOutcome {
-            node_id: stage.node_id.clone(),
-            label: stage.label.clone(),
-            component_id: stage.component_id.clone(),
-            rows: by_node.get(&stage.node_id).copied(),
+        .map(|stage| {
+            let count = |rejected: bool| by_output.get(&(stage.node_id.clone(), rejected)).copied();
+
+            StageOutcome {
+                node_id: stage.node_id.clone(),
+                label: stage.label.clone(),
+                component_id: stage.component_id.clone(),
+                rows: count(false),
+                rejected: stage.splits.then(|| count(true)).flatten(),
+            }
         })
         .collect()
 }

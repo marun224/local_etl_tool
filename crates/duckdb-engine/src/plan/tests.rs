@@ -250,16 +250,16 @@ fn every_namespace_maps_to_a_kind() {
 
 #[test]
 fn a_known_namespace_with_an_unimplemented_component_says_so() {
-    // `qa.*` is a real namespace whose components arrive in Phase 6. Until
+    // `ctl.*` is a real namespace whose components arrive in Phase 6b. Until
     // then the error should name the component, not complain about the
-    // namespace.
-    let pipeline = doc(&[("check", "qa.not_null")], &[]);
+    // namespace. (This test used `qa.not_null` until 6a implemented it.)
+    let pipeline = doc(&[("gate", "ctl.if")], &[]);
 
     assert_eq!(
         compile(&pipeline),
         Err(EngineError::UnsupportedComponent {
-            id: "check".to_string(),
-            component_id: "qa.not_null".to_string(),
+            id: "gate".to_string(),
+            component_id: "ctl.if".to_string(),
         })
     );
 }

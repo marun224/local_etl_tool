@@ -21,6 +21,13 @@ fn the_registry_holds_exactly_these_components() {
     assert_eq!(
         ids,
         [
+            "qa.accepted_values",
+            "qa.expression",
+            "qa.not_null",
+            "qa.range",
+            "qa.referential",
+            "qa.regex",
+            "qa.unique",
             "snk.cloud.s3",
             "snk.db.mysql",
             "snk.db.postgres",

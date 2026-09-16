@@ -255,18 +255,100 @@ wrong key fails closed.
 
 ### Phase 6 — Quality nodes, reject ports, control flow
 
-**Goal.** The `qa.*` (29) and `ctl.*` (21) namespaces.
+**Split into 6a and 6b, 2026-09-16, before starting.** As written this phase held two pieces of
+work with different risk. `qa.*` extends the existing model: a stage gains a second output and a
+second row count, and nothing about how a plan *runs* changes. `ctl.*` does not extend it — it
+breaks it. `foreach`, `if/branch`, `wait`, `run-pipeline` and per-stage `retry_attempts` cannot
+exist inside one SQL script, and one SQL script handed to DuckDB in one process is the execution
+model that Phase 2 chose deliberately and all 40 components sit on. Discovering that mid-sitting
+means rewriting `exec.rs` with a phase half-built. They are therefore separate phases, and 6b
+starts with a written decision rather than with code.
 
-**Files.** `specs.rs`, `builders.rs`, `src/plan/mod.rs` (multi-output edges), `src/policy.rs`.
+---
 
-**Do.** Validators (not_null, unique, range, regex, referential, row_count, schema_match, …)
-each with a second **reject** output port for dead-letter rows. Control flow: foreach,
-if/branch, wait, throttle, sequence, run-pipeline, fail, log. Per-stage `retry_attempts`,
-`retry_backoff_ms`, `continue_on_failure`, `memory_limit_mb`.
+#### Phase 6a — Quality nodes and reject ports
 
-**Verify.** A pipeline with a failing quality check routes bad rows to the reject sink and good
-rows onward in one pass; `continue_on_failure` lets downstream stages run while the run still
-ends failed; retry backs off and does not retry on cancellation.
+**Goal.** The `qa.*` namespace: a validator splits its input into rows that passed and rows that
+did not, in one pass, with both counted.
+
+**Files.** `crates/metadata/src/component.rs`, `src/plan/mod.rs`, `src/plan/builders.rs`,
+`src/plan/specs.rs`, `src/exec.rs`, `crates/cli/src/main.rs`.
+
+**Three invariants this breaks, which is the whole of the work.** Each is currently relied on in
+code and documented there:
+
+1. **One relation per stage.** `create_view` names the relation after the node id. A quality node
+   needs two, so it needs a name for the second and downstream wiring has to read
+   `Input::source_handle` to choose between them. The field is already carried end to end and has
+   never been read by anything — 6a is what it was plumbed for.
+2. **One row count per stage.** `exec::outcomes` zips `counted_stages()` against DuckDB's stdout
+   positionally, and `attribute_failure` states the invariant outright. A stage emitting two
+   counts shifts every later stage's count by one — silently, with no error, reporting wrong
+   numbers against the right node names. `Stage.count_sql` therefore becomes a list.
+3. **A handle is decorative.** Nothing validates `source_handle` against the upstream component's
+   declared output ports today, because nothing reads it. Once it selects a relation, a typo in a
+   handle has to be an error naming the port, not a silent read of the wrong branch.
+
+**Do.**
+
+- `PortSpec::rejected()`, and `qa.*` defaulting to outputs `[main, rejected]`.
+- `Input::relation()` — the relation an input reads, which is the upstream node id for `main` and
+  a suffixed name for `rejected`. `exactly_one_input` and `exactly_two_inputs` are the only two
+  places that resolve an upstream relation, so routing every existing component through it is a
+  two-line change.
+- `EngineError::UnknownPort`, naming the port and listing the ones that exist.
+- The reject relation name is reserved: a node id that collides with one is an error, not a
+  silent overwrite.
+- Seven validators, each lowering to the same shape — a base relation, a predicate, and an
+  optional list of helper columns to project away:
+
+  | Component | Predicate |
+  |---|---|
+  | `qa.not_null` | the named columns are all non-null |
+  | `qa.unique` | the row's key occurs exactly once |
+  | `qa.range` | a numeric column sits within `min`/`max` |
+  | `qa.regex` | a text column matches a pattern |
+  | `qa.accepted_values` | a column's value is in a listed set |
+  | `qa.expression` | an arbitrary boolean SQL predicate — the escape hatch |
+  | `qa.referential` | the key exists in a second input |
+
+- **The split is exact, and that is the property to test.** Accepted is
+  `WHERE coalesce(<pred>, false)` and rejected is `WHERE NOT coalesce(<pred>, false)`. Both sides
+  read the same expression, so a row where the predicate is NULL — an unknown, not a pass — is
+  rejected rather than lost. Every input row lands on exactly one side; a test asserts
+  accepted + rejected = input for every validator.
+
+**Verify.** A pipeline with a failing check routes bad rows to a reject sink and good rows onward
+in one pass, and reports both counts against the right nodes. Accepted + rejected = input for all
+seven. A handle naming a port that does not exist fails validation by name. The gate stays green.
+
+**Done.** Seven `qa.*` components registered and tested; row counts still attributed correctly
+across a plan that mixes quality nodes with ordinary ones.
+
+**Deliberately not in 6a.** `qa.row_count` and `qa.schema_match` are assertions about a whole
+relation, not partitions of it: they have no reject rows and their only outcome is to fail the
+run. That is `ctl.fail`'s shape, and it needs 6b's execution-model decision. Recorded here rather
+than dropped, as Phase 4 did with XML and DuckLake.
+
+---
+
+#### Phase 6b — Control flow and per-stage policy
+
+**Starts with a decision, not with code.** `ctl.*` and per-stage retry both require a stage to be
+runnable on its own, which the one-script model forbids: temp views live in a session, and every
+`-c` is a fresh process. Write the options up before building — a persistent connection
+(stdin-driven CLI, or linking `duckdb-rs` and dropping the subprocess), re-running scripts per
+iteration, or splitting a plan into script segments at control boundaries — and record which one
+was chosen and why. The risks section already flags keeping the invocation behind one function so
+an embedded engine is an option rather than a rewrite; this is the phase that cashes that in.
+
+**Then.** Control flow: foreach, if/branch, wait, throttle, sequence, run-pipeline, fail, log.
+Per-stage `retry_attempts`, `retry_backoff_ms`, `continue_on_failure`, `memory_limit_mb` in
+`src/policy.rs`. Plus `qa.row_count` and `qa.schema_match`, deferred from 6a.
+
+**Verify.** `continue_on_failure` lets downstream stages run while the run still ends failed;
+retry backs off and does not retry on cancellation; a foreach over three values runs its body
+three times.
 
 **Done.** Both namespaces registered and tested.
 

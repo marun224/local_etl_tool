@@ -22,7 +22,9 @@ pub use context::{Context, ContextError, Contexts};
 pub use exec::{run, ExecError, RunOptions, RunReport, StageOutcome};
 pub use params::{resolve, ParamError, ParamWarning, Resolved, Resolver};
 pub use plan::specs::{registry, Component, Registry};
-pub use plan::{compile, Input, Plan, Stage, StageKind, Warning};
+pub use plan::{
+    compile, reject_relation, CountProbe, Input, Plan, Stage, StageKind, Warning, REJECT_SUFFIX,
+};
 pub use sql::{quote_identifier, quote_literal, quote_path};
 
 /// Everything that can go wrong turning a document into a plan.
@@ -84,6 +86,24 @@ pub enum EngineError {
         expected: usize,
         actual: usize,
     },
+
+    #[error(
+        "an edge leaves node '{id}' by a port named '{port}', which '{component_id}' does not \
+         have. Its outputs are: {}",
+        .known.join(", ")
+    )]
+    UnknownPort {
+        id: String,
+        component_id: String,
+        port: String,
+        known: Vec<String>,
+    },
+
+    #[error(
+        "node '{id}' ends in '{suffix}', which is reserved: it is the name given to the rows a \
+         quality node rejects, so a node using it would collide with one. Rename the node."
+    )]
+    ReservedNodeId { id: String, suffix: String },
 }
 
 impl EngineError {
@@ -97,7 +117,9 @@ impl EngineError {
             | EngineError::MissingProperty { id, .. }
             | EngineError::InvalidProperty { id, .. }
             | EngineError::UnsupportedComponent { id, .. }
-            | EngineError::WrongInputCount { id, .. } => Some(id),
+            | EngineError::WrongInputCount { id, .. }
+            | EngineError::UnknownPort { id, .. }
+            | EngineError::ReservedNodeId { id, .. } => Some(id),
             EngineError::UnknownEdgeEndpoint { node_id, .. }
             | EngineError::SelfEdge { node_id, .. } => Some(node_id),
             EngineError::Cycle { nodes } => nodes.first().map(String::as_str),

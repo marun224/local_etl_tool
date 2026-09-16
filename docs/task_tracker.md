@@ -3,21 +3,22 @@
 **State only.** Design lives in [PLAN_duckle_parity.md](PLAN_duckle_parity.md). Read this file
 first when picking the project back up.
 
-> ## ⏸ Paused 2026-09-16, after Phase 5
+> ## ⏸ Paused 2026-09-16, after Phase 6a
 >
-> Stopped at a clean boundary — gate green, nothing mid-edit. **Phase 5 is complete.**
+> Stopped at a clean boundary — gate green, nothing mid-edit. **Phase 6a is complete.**
 >
-> Every phase below is dated 2026-09-15 because that is when the work was done; the clock
-> rolled past midnight while pausing, which is the only reason this line reads a day later.
+> Phases 0–5 are dated 2026-09-15 because that is when the work was done; the clock rolled
+> past midnight while pausing, which is the only reason those lines read a day later.
 >
-> **To resume:** read this file, then Phase 6 in the plan, then start. Nothing needs to be
-> decided first.
+> **To resume:** read this file, then Phase 6b in the plan. Unlike every phase so far, 6b
+> opens with a decision to make rather than code to write — the plan says which.
 >
 > ```powershell
 > cd D:\workspace\ETL_Local_Tool
-> cargo test --workspace                                            # expect 284 passing
-> .\target\debug\etl.exe components                                 # expect 40
+> cargo test --workspace                                            # expect 300 passing
+> .\target\debug\etl.exe components                                 # expect 47
 > .\target\debug\etl.exe run samples\pipelines\orders_enriched.json # expect 12/5/7/6/6
+> .\target\debug\etl.exe run samples\pipelines\orders_checked.json  # expect 12/10+2/9+1/9/2/1
 > ```
 >
 > The phase's own acceptance criterion, which should print the same 12/6/6 twice into two
@@ -50,16 +51,21 @@ first when picking the project back up.
 
 ## Where things stand
 
-- **Next phase:** Phase 6 — Quality nodes, reject ports, control flow
+- **Next phase:** Phase 6b — Control flow and per-stage policy. **It starts with a written
+  decision, not with code:** `ctl.*` and per-stage retry both need a stage to be runnable on
+  its own, and the one-script-per-run model forbids that. See Phase 6b in the plan.
 - **In progress:** nothing
 - **Blocked on:** nothing.
 
+Phase 6 was split into 6a and 6b on 2026-09-16, before starting — the reasoning is in the plan.
+**6a is complete** (2026-09-16).
+
 ## What works today
 
-Phases 0–5 are complete, so there is a working CLI. From the repo root:
+Phases 0–5 and 6a are complete, so there is a working CLI. From the repo root:
 
 ```powershell
-cargo test --workspace        # 284 tests: 222 engine, 27 end-to-end, 20 secrets, 15 metadata
+cargo test --workspace        # 300 tests: 234 engine, 31 end-to-end, 20 secrets, 15 metadata
 .\target\debug\etl.exe run samples\pipelines\orders_enriched.json
 .\target\debug\etl.exe validate samples\pipelines\orders_enriched.json
 .\target\debug\etl.exe plan samples\pipelines\orders_enriched.json --script
@@ -69,7 +75,19 @@ cargo test --workspace        # 284 tests: 222 engine, 27 end-to-end, 20 secrets
 
 The run prints `12 / 5 / 7 / 6 / 6` rows and writes `samples/out/orders_enriched.parquet`.
 
-**Forty components exist.** Sources: `src.cloud.http`, `src.cloud.s3`, `src.db.mysql`,
+**Quality nodes split rather than filter.** A `qa.*` node sends the rows that passed out of
+`main` and the ones that did not out of `rejected`; wiring the second to a sink is what turns a
+check into a dead-letter report, and leaving it unwired drops those rows.
+
+```powershell
+.\target\debug\etl.exe run samples\pipelines\orders_checked.json   # 12 / 10+2 / 9+1 / 9 / 2 / 1
+```
+
+The split is exact by construction: accepted is `coalesce(<predicate>, false)` and rejected is
+its exact negation, so a row whose predicate is *unknown* is rejected rather than lost by both
+sides. A test asserts accepted + rejected = input for every validator, against real data.
+
+**Forty-seven components exist.** Sources: `src.cloud.http`, `src.cloud.s3`, `src.db.mysql`,
 `src.db.postgres`, `src.db.sqlite`, `src.file.csv`, `src.file.excel`, `src.file.json`,
 `src.file.jsonl`, `src.file.parquet`, `src.lake.delta`, `src.lake.iceberg`. Transforms:
 `xf.aggregate`, `xf.cast`, `xf.dedup`, `xf.derive`, `xf.distinct`, `xf.except`,
@@ -77,8 +95,9 @@ The run prints `12 / 5 / 7 / 6 / 6` rows and writes `samples/out/orders_enriched
 `xf.pivot`, `xf.rename`, `xf.sample`, `xf.select`, `xf.sort`, `xf.sql`, `xf.union`,
 `xf.unpivot`, `xf.window`. Sinks: `snk.cloud.s3`, `snk.db.mysql`, `snk.db.postgres`,
 `snk.db.sqlite`, `snk.file.csv`, `snk.file.excel`, `snk.file.json`, `snk.file.jsonl`,
-`snk.file.parquet`. Everything else in the six namespaces compiles to `UnsupportedComponent`,
-by design.
+`snk.file.parquet`. Quality: `qa.accepted_values`, `qa.expression`, `qa.not_null`, `qa.range`,
+`qa.referential`, `qa.regex`, `qa.unique`. Everything else in the six namespaces compiles to
+`UnsupportedComponent`, by design.
 
 **Extensions are vendored**, not installed system-wide: `.\scripts\fetch-duckdb-extensions.ps1`
 puts them under `tools/duckdb/extensions/` and the executor points DuckDB at that directory. A
@@ -122,7 +141,11 @@ extension, which sits badly with Phase 9's vendored set) and DuckLake (a catalog
 needs its own design pass rather than a thirteenth copy of the ATTACH shape). Both are listed
 under Phase 4 in the plan, so both need a decision recorded there rather than quietly dropping.
 
-**Not built yet:** quality and control-flow nodes (Phase 6), the desktop app (Phase 7).
+**Not built yet:** control flow and per-stage policy (Phase 6b), the desktop app (Phase 7).
+
+**Deferred out of 6a, on purpose:** `qa.row_count` and `qa.schema_match`. Both assert something
+about a whole relation rather than partitioning it — no reject rows, and the only outcome is to
+fail the run. That is `ctl.fail`'s shape and it needs 6b's execution-model decision first.
 
 ## Phase status
 

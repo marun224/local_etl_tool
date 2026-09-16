@@ -5,10 +5,12 @@
 //! change to it should be a decision someone makes, not a diff nobody notices.
 
 use super::tests_support::{
-    compile_materialized, compile_one, compile_two, compile_two_sided, sql_of,
+    compile_materialized, compile_one, compile_two, compile_two_sided, document, edge, edge_from,
+    node, sql_of,
 };
+use crate::plan::{compile, Plan};
 use crate::EngineError;
-use serde_json::json;
+use serde_json::{json, Value as JsonValue};
 
 // ---------------------------------------------------------------------------
 // Sources
@@ -405,10 +407,11 @@ fn an_alias_adds_a_second_view_without_renaming_the_first() {
 fn a_relation_producing_stage_counts_itself() {
     let plan = compile_one("src.file.csv", json!({ "path": "in.csv" }));
 
-    assert_eq!(
-        plan.stage("n").unwrap().count_sql.as_deref(),
-        Some(r#"SELECT count(*) AS n FROM "n";"#)
-    );
+    let counts = &plan.stage("n").unwrap().counts;
+
+    assert_eq!(counts.len(), 1, "a stage that does not split counts once");
+    assert_eq!(counts[0].sql, r#"SELECT count(*) AS n FROM "n";"#);
+    assert_eq!(counts[0].port, None, "an only count names no port");
 }
 
 #[test]
@@ -418,10 +421,10 @@ fn a_sink_counts_its_upstream_because_copy_reports_nothing() {
         ("snk.file.parquet", json!({ "path": "out.parquet" })),
     );
 
-    assert_eq!(
-        plan.stage("b").unwrap().count_sql.as_deref(),
-        Some(r#"SELECT count(*) AS n FROM "a";"#)
-    );
+    let counts = &plan.stage("b").unwrap().counts;
+
+    assert_eq!(counts.len(), 1);
+    assert_eq!(counts[0].sql, r#"SELECT count(*) AS n FROM "a";"#);
 }
 
 #[test]
@@ -1319,4 +1322,284 @@ fn compile_two_err(
     second: (&str, serde_json::Value),
 ) -> EngineError {
     super::tests_support::compile_two_result(first, second).expect_err("expected this to fail")
+}
+
+// ---------------------------------------------------------------------------
+// Quality nodes (Phase 6a)
+// ---------------------------------------------------------------------------
+
+/// A source feeding a validator, so the two generated views can be read.
+fn compile_quality(component_id: &str, properties: JsonValue) -> Plan {
+    compile(&document(
+        vec![
+            node("a", "src.file.csv", json!({ "path": "in.csv" })),
+            node("q", component_id, properties),
+        ],
+        vec![edge("e0", "a", "q", Some("in"))],
+    ))
+    .expect("compiles")
+}
+
+#[test]
+fn a_validator_creates_an_accepted_and_a_rejected_relation() {
+    let plan = compile_quality("qa.not_null", json!({ "columns": ["email"] }));
+    let sql = sql_of(&plan, "q");
+
+    assert_eq!(
+        sql,
+        "CREATE OR REPLACE TEMP VIEW \"q\" AS (SELECT * FROM (SELECT * FROM \"a\") \
+         WHERE coalesce(\"email\" IS NOT NULL, false));\n\
+         CREATE OR REPLACE TEMP VIEW \"q__rejected\" AS (SELECT * FROM (SELECT * FROM \"a\") \
+         WHERE NOT coalesce(\"email\" IS NOT NULL, false));"
+    );
+}
+
+#[test]
+fn the_two_sides_read_the_same_predicate_so_the_split_is_exact() {
+    // The property the whole design rests on: whatever the predicate is, the
+    // accepted side is `coalesce(p, false)` and the rejected side is its exact
+    // negation. A row where `p` is NULL is unknown, not passing, and must land
+    // on the reject side rather than vanishing from both.
+    for (component_id, properties) in [
+        ("qa.not_null", json!({ "columns": ["a"] })),
+        ("qa.unique", json!({ "columns": ["a"] })),
+        ("qa.range", json!({ "column": "a", "min": 0 })),
+        ("qa.regex", json!({ "column": "a", "pattern": "^x" })),
+        (
+            "qa.accepted_values",
+            json!({ "column": "a", "values": ["x"] }),
+        ),
+        ("qa.expression", json!({ "predicate": "a > 0" })),
+    ] {
+        let plan = compile_quality(component_id, properties);
+        let sql = sql_of(&plan, "q");
+
+        let accepted = sql
+            .split_once("WHERE coalesce(")
+            .expect("an accepted side")
+            .1;
+        let rejected = sql
+            .split_once("WHERE NOT coalesce(")
+            .expect("a rejected side")
+            .1;
+
+        assert_eq!(
+            accepted.split_once(", false)").unwrap().0,
+            rejected.split_once(", false)").unwrap().0,
+            "{component_id} must test the same expression on both sides"
+        );
+    }
+}
+
+#[test]
+fn a_validator_counts_both_of_its_outputs_accepted_first() {
+    let plan = compile_quality("qa.not_null", json!({ "columns": ["email"] }));
+    let counts = &plan.stage("q").unwrap().counts;
+
+    assert_eq!(counts.len(), 2, "a validator reports both sides");
+
+    assert_eq!(counts[0].sql, r#"SELECT count(*) AS n FROM "q";"#);
+    assert_eq!(counts[0].port.as_deref(), Some("main"));
+
+    assert_eq!(counts[1].sql, r#"SELECT count(*) AS n FROM "q__rejected";"#);
+    assert_eq!(counts[1].port.as_deref(), Some("rejected"));
+}
+
+#[test]
+fn count_probes_stay_in_stdout_order_across_a_mixed_plan() {
+    // The invariant the executor depends on: probes come back in the order
+    // DuckDB will print them, however many each stage contributes. Get this
+    // wrong and every count after the first validator is attributed to the
+    // wrong node — silently, because the numbers are all still plausible.
+    let plan = compile(&document(
+        vec![
+            node("a", "src.file.csv", json!({ "path": "in.csv" })),
+            node("q", "qa.not_null", json!({ "columns": ["email"] })),
+            node("f", "xf.filter", json!({ "predicate": "x > 0" })),
+        ],
+        vec![
+            edge("e0", "a", "q", Some("in")),
+            edge("e1", "q", "f", Some("in")),
+        ],
+    ))
+    .expect("compiles");
+
+    let order: Vec<(&str, Option<&str>)> = plan
+        .count_probes()
+        .map(|(stage, probe)| (stage.node_id.as_str(), probe.port.as_deref()))
+        .collect();
+
+    assert_eq!(
+        order,
+        [
+            ("a", None),
+            ("q", Some("main")),
+            ("q", Some("rejected")),
+            ("f", None),
+        ]
+    );
+}
+
+#[test]
+fn unique_rejects_every_copy_of_a_repeated_key() {
+    let plan = compile_quality("qa.unique", json!({ "columns": ["order_id", "line"] }));
+    let sql = sql_of(&plan, "q");
+
+    assert!(
+        sql.contains(r#"count(*) OVER (PARTITION BY "order_id", "line")"#),
+        "the columns form one compound key, not a check each: {sql}"
+    );
+
+    assert!(
+        sql.contains(r#"= 1"#),
+        "a key seen once passes; every copy of one seen twice does not: {sql}"
+    );
+
+    assert!(
+        sql.contains(r#"* EXCLUDE ("__etl_occurrences")"#),
+        "the helper column must not reach the output: {sql}"
+    );
+}
+
+#[test]
+fn accepted_values_are_literals_and_not_column_references() {
+    // `IN ("paid")` is a column reference and usually still runs, giving the
+    // wrong answer quietly. `IN ('paid')` is the value.
+    let plan = compile_quality(
+        "qa.accepted_values",
+        json!({ "column": "status", "values": ["paid", "void"] }),
+    );
+
+    assert!(
+        sql_of(&plan, "q").contains(r#""status" IN ('paid', 'void')"#),
+        "{}",
+        sql_of(&plan, "q")
+    );
+}
+
+#[test]
+fn a_range_needs_at_least_one_bound() {
+    let failed = compile(&document(
+        vec![
+            node("a", "src.file.csv", json!({ "path": "in.csv" })),
+            node("q", "qa.range", json!({ "column": "total" })),
+        ],
+        vec![edge("e0", "a", "q", Some("in"))],
+    ))
+    .expect_err("a range with no bounds checks nothing");
+
+    assert!(
+        matches!(&failed, EngineError::InvalidProperty { id, .. } if id == "q"),
+        "{failed:?}"
+    );
+}
+
+#[test]
+fn a_numeric_bound_keeps_its_own_text_rather_than_becoming_a_float() {
+    let plan = compile_quality(
+        "qa.range",
+        json!({ "column": "id", "min": 9007199254740993i64 }),
+    );
+
+    assert!(
+        sql_of(&plan, "q").contains("9007199254740993"),
+        "a bound past the precision of a double must survive: {}",
+        sql_of(&plan, "q")
+    );
+}
+
+#[test]
+fn a_downstream_node_reads_the_port_its_edge_left_by() {
+    let plan = compile(&document(
+        vec![
+            node("a", "src.file.csv", json!({ "path": "in.csv" })),
+            node("q", "qa.not_null", json!({ "columns": ["email"] })),
+            node("good", "snk.file.csv", json!({ "path": "good.csv" })),
+            node("bad", "snk.file.csv", json!({ "path": "bad.csv" })),
+        ],
+        vec![
+            edge("e0", "a", "q", Some("in")),
+            edge_from("e1", "q", "main", "good", Some("in")),
+            edge_from("e2", "q", "rejected", "bad", Some("in")),
+        ],
+    ))
+    .expect("compiles");
+
+    assert!(sql_of(&plan, "good").contains(r#"FROM "q""#));
+    assert!(sql_of(&plan, "bad").contains(r#"FROM "q__rejected""#));
+
+    // And the sinks count the relation they actually read, not the node id.
+    assert_eq!(
+        plan.stage("bad").unwrap().from.as_deref(),
+        Some("q__rejected")
+    );
+}
+
+#[test]
+fn a_port_the_component_does_not_have_is_named_in_the_error() {
+    let failed = compile(&document(
+        vec![
+            node("a", "src.file.csv", json!({ "path": "in.csv" })),
+            node("b", "snk.file.csv", json!({ "path": "out.csv" })),
+        ],
+        vec![edge_from("e0", "a", "rejcted", "b", Some("in"))],
+    ))
+    .expect_err("a source has no reject port");
+
+    match failed {
+        EngineError::UnknownPort {
+            id, port, known, ..
+        } => {
+            assert_eq!(id, "a");
+            assert_eq!(port, "rejcted");
+            assert_eq!(known, ["main"], "the message says what was available");
+        }
+        other => panic!("expected UnknownPort, got {other:?}"),
+    }
+}
+
+#[test]
+fn the_reject_suffix_is_reserved_for_node_ids() {
+    let failed = compile(&document(
+        vec![node(
+            "check__rejected",
+            "src.file.csv",
+            json!({ "path": "in.csv" }),
+        )],
+        vec![],
+    ))
+    .expect_err("this id would collide with a generated relation");
+
+    assert!(
+        matches!(&failed, EngineError::ReservedNodeId { id, .. } if id == "check__rejected"),
+        "{failed:?}"
+    );
+}
+
+#[test]
+fn referential_tests_the_left_input_against_the_right() {
+    let plan = compile(&document(
+        vec![
+            node("orders", "src.file.csv", json!({ "path": "o.csv" })),
+            node("customers", "src.file.csv", json!({ "path": "c.csv" })),
+            node(
+                "q",
+                "qa.referential",
+                json!({ "column": "customer_id", "reference_column": "id" }),
+            ),
+        ],
+        vec![
+            edge("e0", "orders", "q", Some("left")),
+            edge("e1", "customers", "q", Some("right")),
+        ],
+    ))
+    .expect("compiles");
+
+    let sql = sql_of(&plan, "q");
+
+    assert!(
+        sql.contains(r#""customer_id" IN (SELECT "id" FROM "customers")"#),
+        "{sql}"
+    );
+    assert!(sql.contains(r#"FROM (SELECT * FROM "orders")"#), "{sql}");
 }

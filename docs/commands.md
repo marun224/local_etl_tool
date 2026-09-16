@@ -605,3 +605,38 @@ never existed, and inventing them after the fact would put dates on work that gi
 
 **The tree is no longer the only copy.** `tools/` stays out — 284 MB of vendored DuckDB binary
 and extensions, both reproducible from `scripts/`.
+
+## 2026-09-16 — Phase 6a: quality nodes and reject ports
+
+Phase 6 was split before any code was written. `qa.*` extends the existing model; `ctl.*`
+breaks it, because control flow and per-stage retry cannot live inside one SQL script and one
+script per run is what `exec.rs` is built on. Splitting kept a known rewrite out of a phase that
+did not need one. The reasoning is in the plan under Phase 6.
+
+Built: seven validators, a second output port, two row counts per quality stage, and two new
+validation errors. The gate, then the acceptance run:
+
+```powershell
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace                          # 300 passing, up from 284
+.\target\debug\etl.exe components               # 47, up from 40
+
+.\target\debug\etl.exe validate samples\pipelines\orders_checked.json
+.\target\debug\etl.exe run samples\pipelines\orders_checked.json
+Get-Content samples\out\rejected_status.csv     # 1003 returned, 1005 cancelled
+Get-Content samples\out\rejected_amount.csv     # 1012, 610.00
+```
+
+The run prints `12 / 10 rows + 2 rejected / 9 rows + 1 rejected / 9 / 2 / 1`: twelve orders in,
+two with a status outside the accepted set, one over the amount ceiling, nine clean. Both
+rejects are written to their own files in the same pass as the good rows.
+
+Two things worth remembering, because both cost time:
+
+- **`cargo clippy --fix` after a blanket `&` rewrite.** Changing `exactly_one_input` to return
+  `String` meant every call site needed `&`, and a regex over-applied it to the helpers that
+  already took `&str`. Clippy named all four; `--fix` took them.
+- **The expected row counts in the first e2e test were wrong, not the code.** `shipped` is 7
+  rows in orders.csv, not 6 — counted by hand and miscounted. `awk -F, 'NR>1{c[$5]++} END{...}'`
+  settled it in one line. Count the fixture, do not remember it.

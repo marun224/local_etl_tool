@@ -252,7 +252,25 @@ impl PortSpec {
     pub fn input() -> Self {
         Self::new("in")
     }
+
+    /// The dead-letter output of a quality node: the rows that failed its
+    /// check. Wired to a sink it is an error report; left unwired the rows are
+    /// simply dropped, which is the common case and must not be an error.
+    pub fn rejected() -> Self {
+        Self::new(REJECTED_PORT).help("Rows that did not pass the check.")
+    }
 }
+
+/// The handle name of a quality node's dead-letter output.
+///
+/// One constant rather than a literal in the spec, the planner and the engine:
+/// this string is the contract between an edge drawn on the canvas and the
+/// relation the engine creates, and three copies of it is three chances for
+/// one to drift.
+pub const REJECTED_PORT: &str = "rejected";
+
+/// The handle name of the ordinary output every producing component has.
+pub const MAIN_PORT: &str = "main";
 
 /// Everything that describes one component.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -301,6 +319,12 @@ impl ComponentSpec {
             Namespace::Source => (vec![], vec![PortSpec::main()]),
             Namespace::Sink => (vec![PortSpec::input()], vec![]),
             Namespace::Control => (vec![PortSpec::input()], vec![PortSpec::main()]),
+            // A validator splits rather than filters: the rows that passed
+            // leave by `main`, the ones that did not by `rejected`.
+            Namespace::Quality => (
+                vec![PortSpec::input()],
+                vec![PortSpec::main(), PortSpec::rejected()],
+            ),
             _ => (vec![PortSpec::input()], vec![PortSpec::main()]),
         };
 
@@ -360,6 +384,26 @@ impl ComponentSpec {
     /// How many upstream connections this component expects.
     pub fn input_count(&self) -> usize {
         self.inputs.len()
+    }
+
+    /// Whether this component declares an output with this handle name.
+    ///
+    /// An edge leaving an unnamed handle means `main`, which is what a canvas
+    /// emits for a component with one output.
+    pub fn has_output(&self, handle: Option<&str>) -> bool {
+        let wanted = handle.unwrap_or(MAIN_PORT);
+        self.outputs.iter().any(|port| port.name == wanted)
+    }
+
+    /// The handle names of this component's outputs, for an error message that
+    /// can say what the alternatives were.
+    pub fn output_names(&self) -> Vec<String> {
+        self.outputs.iter().map(|port| port.name.clone()).collect()
+    }
+
+    /// Whether this component has a dead-letter output.
+    pub fn has_reject_port(&self) -> bool {
+        self.has_output(Some(REJECTED_PORT))
     }
 }
 

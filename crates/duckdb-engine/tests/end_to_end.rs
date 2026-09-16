@@ -1244,3 +1244,271 @@ fn a_pipeline_that_needs_a_secret_will_not_run_without_the_key() {
         "{error:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Quality nodes, against real data (Phase 6a)
+//
+// The golden-SQL tests prove the two statements are the ones intended. These
+// prove DuckDB agrees they are valid, that the numbers come back attributed to
+// the right node and the right port, and — the property the whole design rests
+// on — that the two sides of a split add up to what went in.
+// ---------------------------------------------------------------------------
+
+/// A source feeding one validator, with no sink.
+///
+/// Sink-less on purpose: the count probes still run, and forcing the two views
+/// through them is exactly what this needs to measure. It also keeps the test
+/// about the split rather than about writing files.
+fn quality_only(component_id: &str, properties: &str) -> PipelineDoc {
+    let json = format!(
+        r#"{{
+          "formatVersion": 1,
+          "nodes": [
+            {{"id": "orders", "type": "source", "position": {{"x": 0, "y": 0}},
+             "data": {{"label": "Orders", "componentId": "src.file.csv",
+                      "properties": {{"path": "samples/data/orders.csv"}}}}}},
+            {{"id": "check", "type": "transform", "position": {{"x": 200, "y": 0}},
+             "data": {{"label": "Check", "componentId": "{component_id}",
+                      "properties": {properties}}}}}
+          ],
+          "edges": [
+            {{"id": "e1", "source": "orders", "target": "check",
+             "sourceHandle": "main", "targetHandle": "in"}}
+          ]
+        }}"#
+    );
+
+    PipelineDoc::from_json(&json).expect("document parses")
+}
+
+#[test]
+fn every_validator_splits_its_input_exactly() {
+    if duckdb_binary().is_none() {
+        eprintln!("skipping: no DuckDB binary; run scripts/fetch-duckdb.ps1");
+        return;
+    }
+
+    // orders.csv holds 12 rows. Whatever each check decides, the two sides must
+    // account for all 12 — a row for which the predicate is unknown is rejected,
+    // never dropped from both. That is what `coalesce(pred, false)` buys, and
+    // this is the test that would fail without it.
+    let cases = [
+        ("qa.not_null", r#"{"columns": ["customer_id"]}"#, 12, 0),
+        ("qa.unique", r#"{"columns": ["order_id"]}"#, 12, 0),
+        ("qa.unique", r#"{"columns": ["customer_id"]}"#, 1, 11),
+        ("qa.range", r#"{"column": "amount", "min": 100}"#, 6, 6),
+        (
+            "qa.accepted_values",
+            r#"{"column": "status", "values": ["shipped", "pending"]}"#,
+            10,
+            2,
+        ),
+        (
+            "qa.regex",
+            r#"{"column": "customer_id", "pattern": "^C00[1-3]$"}"#,
+            7,
+            5,
+        ),
+        ("qa.expression", r#"{"predicate": "amount > 100"}"#, 6, 6),
+    ];
+
+    for (component_id, properties, expected_ok, expected_bad) in cases {
+        let plan = compile(&quality_only(component_id, properties)).expect("compiles");
+        let report = run(&plan, &options()).unwrap_or_else(|e| panic!("{component_id}: {e}"));
+
+        let check = report
+            .stages
+            .iter()
+            .find(|s| s.node_id == "check")
+            .expect("the validator is in the report");
+
+        assert_eq!(
+            (check.rows, check.rejected),
+            (Some(expected_ok), Some(expected_bad)),
+            "{component_id} {properties}"
+        );
+
+        assert_eq!(
+            check.rows_in(),
+            Some(12),
+            "{component_id}: the two sides must account for every input row"
+        );
+    }
+}
+
+#[test]
+fn a_rejected_row_reaches_a_dead_letter_sink_in_the_same_pass() {
+    let Some(binary) = duckdb_binary() else {
+        return;
+    };
+
+    let out = output_dir("quality_reject");
+
+    // Good rows and bad rows leave by different ports, into different files,
+    // from one run over the input.
+    let json = r#"{
+      "formatVersion": 1,
+      "nodes": [
+        {"id": "orders", "type": "source", "position": {"x": 0, "y": 0},
+         "data": {"label": "Orders", "componentId": "src.file.csv",
+                  "properties": {"path": "samples/data/orders.csv"}}},
+        {"id": "check", "type": "transform", "position": {"x": 200, "y": 0},
+         "data": {"label": "Status is known", "componentId": "qa.accepted_values",
+                  "properties": {"column": "status", "values": ["shipped", "pending"]}}},
+        {"id": "good", "type": "sink", "position": {"x": 400, "y": 0},
+         "data": {"label": "Good", "componentId": "snk.file.csv",
+                  "properties": {"path": "{out}/good.csv"}}},
+        {"id": "bad", "type": "sink", "position": {"x": 400, "y": 120},
+         "data": {"label": "Rejected", "componentId": "snk.file.csv",
+                  "properties": {"path": "{out}/bad.csv"}}}
+      ],
+      "edges": [
+        {"id": "e1", "source": "orders", "target": "check",
+         "sourceHandle": "main", "targetHandle": "in"},
+        {"id": "e2", "source": "check", "target": "good",
+         "sourceHandle": "main", "targetHandle": "in"},
+        {"id": "e3", "source": "check", "target": "bad",
+         "sourceHandle": "rejected", "targetHandle": "in"}
+      ]
+    }"#;
+
+    let plan = compile(&document_with_out(json, &out)).expect("compiles");
+    let report = run(&plan, &options()).expect("runs");
+
+    let rows = |id: &str| {
+        report
+            .stages
+            .iter()
+            .find(|s| s.node_id == id)
+            .and_then(|s| s.rows)
+    };
+
+    assert_eq!(rows("orders"), Some(12));
+    // 7 shipped + 3 pending accepted; 1 returned + 1 cancelled rejected.
+    assert_eq!(
+        rows("good"),
+        Some(10),
+        "the good sink reads the accepted port"
+    );
+    assert_eq!(rows("bad"), Some(2), "the bad sink reads the rejected port");
+
+    // The files themselves, read back independently of the code under test.
+    let read = |name: &str| {
+        let path = out.join(name).to_string_lossy().replace('\\', "/");
+        query(
+            &binary,
+            &format!("SELECT count(*) AS n FROM read_csv('{path}');"),
+        )
+    };
+
+    assert_eq!(read("good.csv"), r#"[{"n":10}]"#);
+    assert_eq!(read("bad.csv"), r#"[{"n":2}]"#);
+
+    // And they hold the rows they should, not merely the right number of them.
+    let bad_path = out.join("bad.csv").to_string_lossy().replace('\\', "/");
+    assert_eq!(
+        query(
+            &binary,
+            &format!(
+                "SELECT string_agg(DISTINCT status, ',' ORDER BY status) AS s \
+                 FROM read_csv('{bad_path}');"
+            )
+        ),
+        r#"[{"s":"cancelled,returned"}]"#,
+        "only the statuses outside the accepted set were rejected"
+    );
+}
+
+#[test]
+fn a_referential_check_finds_the_orphan_against_a_second_input() {
+    if duckdb_binary().is_none() {
+        return;
+    }
+
+    // Order 1010 belongs to C006, which is not in customers.csv — the same
+    // orphan the inner join in the happy-path test silently drops. A quality
+    // node is how you find out it happened.
+    let json = r#"{
+      "formatVersion": 1,
+      "nodes": [
+        {"id": "orders", "type": "source", "position": {"x": 0, "y": 0},
+         "data": {"label": "Orders", "componentId": "src.file.csv",
+                  "properties": {"path": "samples/data/orders.csv"}}},
+        {"id": "customers", "type": "source", "position": {"x": 0, "y": 120},
+         "data": {"label": "Customers", "componentId": "src.file.csv",
+                  "properties": {"path": "samples/data/customers.csv"}}},
+        {"id": "check", "type": "transform", "position": {"x": 200, "y": 0},
+         "data": {"label": "Customer exists", "componentId": "qa.referential",
+                  "properties": {"column": "customer_id", "reference_column": "customer_id"}}}
+      ],
+      "edges": [
+        {"id": "e1", "source": "orders", "target": "check",
+         "sourceHandle": "main", "targetHandle": "left"},
+        {"id": "e2", "source": "customers", "target": "check",
+         "sourceHandle": "main", "targetHandle": "right"}
+      ]
+    }"#;
+
+    let plan = compile(&PipelineDoc::from_json(json).expect("parses")).expect("compiles");
+    let report = run(&plan, &options()).expect("runs");
+
+    let check = report
+        .stages
+        .iter()
+        .find(|s| s.node_id == "check")
+        .expect("in the report");
+
+    assert_eq!((check.rows, check.rejected), (Some(11), Some(1)));
+    assert_eq!(check.rows_in(), Some(12));
+}
+
+#[test]
+fn counts_stay_attributed_correctly_after_a_validator() {
+    if duckdb_binary().is_none() {
+        return;
+    }
+
+    // The regression this whole change risked: a validator emits two counts, so
+    // anything reading stdout one-count-per-stage attributes every later number
+    // to the wrong node. The filter below keeps a different number of rows than
+    // either side of the check, so a shift of one would be visible.
+    let json = r#"{
+      "formatVersion": 1,
+      "nodes": [
+        {"id": "orders", "type": "source", "position": {"x": 0, "y": 0},
+         "data": {"label": "Orders", "componentId": "src.file.csv",
+                  "properties": {"path": "samples/data/orders.csv"}}},
+        {"id": "check", "type": "transform", "position": {"x": 200, "y": 0},
+         "data": {"label": "Check", "componentId": "qa.range",
+                  "properties": {"column": "amount", "min": 100}}},
+        {"id": "big", "type": "transform", "position": {"x": 400, "y": 0},
+         "data": {"label": "Very large", "componentId": "xf.filter",
+                  "properties": {"predicate": "amount > 400"}}}
+      ],
+      "edges": [
+        {"id": "e1", "source": "orders", "target": "check",
+         "sourceHandle": "main", "targetHandle": "in"},
+        {"id": "e2", "source": "check", "target": "big",
+         "sourceHandle": "main", "targetHandle": "in"}
+      ]
+    }"#;
+
+    let plan = compile(&PipelineDoc::from_json(json).expect("parses")).expect("compiles");
+    let report = run(&plan, &options()).expect("runs");
+
+    let outcome: Vec<(&str, Option<u64>, Option<u64>)> = report
+        .stages
+        .iter()
+        .map(|s| (s.node_id.as_str(), s.rows, s.rejected))
+        .collect();
+
+    // 12 in; 6 at or above 100 and 6 below; of those 6, two are over 400.
+    assert_eq!(
+        outcome,
+        [
+            ("orders", Some(12), None),
+            ("check", Some(6), Some(6)),
+            ("big", Some(2), None),
+        ]
+    );
+}

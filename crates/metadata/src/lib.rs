@@ -19,7 +19,9 @@
 
 pub mod component;
 
-pub use component::{ComponentSpec, Namespace, PortSpec, PropertySpec, PropertyType};
+pub use component::{
+    ComponentSpec, Namespace, PortSpec, PropertySpec, PropertyType, MAIN_PORT, REJECTED_PORT,
+};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;

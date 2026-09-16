@@ -15,7 +15,7 @@ pub(crate) mod builders;
 pub mod specs;
 
 use crate::EngineError;
-use etl_metadata::{PipelineDoc, PipelineNode};
+use etl_metadata::{PipelineDoc, PipelineNode, REJECTED_PORT};
 use serde_json::Value as JsonValue;
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, VecDeque};
@@ -134,6 +134,63 @@ pub struct Input {
     pub target_handle: Option<String>,
 }
 
+impl Input {
+    /// The relation this input reads.
+    ///
+    /// Usually the upstream node id, because a stage names its relation after
+    /// itself. A quality node is the exception: it creates two relations, and
+    /// the handle the edge left by is what says which one this is. An absent
+    /// handle means `main`, which is what a canvas emits for a component that
+    /// has only one output.
+    pub fn relation(&self) -> String {
+        match self.source_handle.as_deref() {
+            Some(REJECTED_PORT) => reject_relation(&self.node_id),
+            _ => self.node_id.clone(),
+        }
+    }
+
+    /// Whether this input comes from a dead-letter port.
+    pub fn is_rejected(&self) -> bool {
+        self.source_handle.as_deref() == Some(REJECTED_PORT)
+    }
+}
+
+/// The suffix that names a quality node's dead-letter relation.
+///
+/// A quality node `check_email` creates `check_email` for the rows that passed
+/// and `check_email__rejected` for the rows that did not. The suffix is
+/// reserved: [`compile`] refuses a document where a node id collides with one,
+/// because the collision would otherwise be a silent overwrite of one node's
+/// output by another's.
+pub const REJECT_SUFFIX: &str = "__rejected";
+
+/// The relation holding the rows a quality node rejected.
+pub fn reject_relation(node_id: &str) -> String {
+    format!("{node_id}{REJECT_SUFFIX}")
+}
+
+/// One `SELECT count(*)` a stage emits, and which of its outputs it counts.
+///
+/// A list rather than a single statement because a quality node reports two
+/// numbers. That matters more than it looks: the executor attributes counts to
+/// stages **positionally**, by how many JSON arrays DuckDB has printed, so a
+/// stage that emits two counts while the executor expects one shifts every
+/// later stage's number by one — silently, and against the right node names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CountProbe {
+    /// The statement itself.
+    pub sql: String,
+    /// The output port being counted, or `None` for a stage's only count.
+    pub port: Option<String>,
+}
+
+impl CountProbe {
+    /// Whether this probe counts a dead-letter output.
+    pub fn is_rejected(&self) -> bool {
+        self.port.as_deref() == Some(REJECTED_PORT)
+    }
+}
+
 /// One node, lowered and placed in execution order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Stage {
@@ -141,14 +198,19 @@ pub struct Stage {
     pub component_id: String,
     pub label: String,
     pub kind: StageKind,
+    /// Whether this stage partitions its input across two outputs instead of
+    /// producing one relation. True for a quality node, and the reason
+    /// [`Stage::counts`] can hold two entries.
+    pub splits: bool,
     /// The complete statement(s) that realise this stage — a `CREATE OR
     /// REPLACE TEMP VIEW` for anything producing a relation, a `COPY ... TO`
     /// for a sink. Held whole rather than as a fragment so the plan view can
     /// show exactly what will run.
     pub sql: String,
-    /// The count query that follows this stage, so the run can report rows.
-    /// `None` for stages that neither produce a relation nor read one.
-    pub count_sql: Option<String>,
+    /// The count queries that follow this stage, so the run can report rows.
+    /// Empty for a stage that neither produces a relation nor reads one; two
+    /// entries for a quality node, which counts both of its outputs.
+    pub counts: Vec<CountProbe>,
     /// Upstream connections, in document order.
     pub inputs: Vec<Input>,
     /// The single upstream relation this stage reads from, when there is
@@ -177,6 +239,11 @@ impl Stage {
     /// SQL both key off the node id; the alias is an additional view.
     pub fn relation_name(&self) -> &str {
         &self.node_id
+    }
+
+    /// The dead-letter relation this stage creates, if it is one that splits.
+    pub fn reject_relation_name(&self) -> Option<String> {
+        self.splits.then(|| reject_relation(&self.node_id))
     }
 }
 
@@ -318,8 +385,8 @@ impl Plan {
             script.push('\n');
 
             if counts {
-                if let Some(count_sql) = &stage.count_sql {
-                    script.push_str(count_sql);
+                for probe in &stage.counts {
+                    script.push_str(&probe.sql);
                     script.push('\n');
                 }
             }
@@ -330,10 +397,16 @@ impl Plan {
         script
     }
 
-    /// Stages that will emit a row count when the script runs with counts on,
-    /// in the order their counts appear on stdout.
-    pub fn counted_stages(&self) -> impl Iterator<Item = &Stage> {
-        self.stages.iter().filter(|s| s.count_sql.is_some())
+    /// Every count the script will emit with counts on, paired with the stage
+    /// that emits it, **in the order they appear on stdout**.
+    ///
+    /// That order is the contract: the executor has no other way to tell whose
+    /// number it is holding. A stage contributes as many entries here as it
+    /// emits statements — one for most, two for a quality node.
+    pub fn count_probes(&self) -> impl Iterator<Item = (&Stage, &CountProbe)> {
+        self.stages
+            .iter()
+            .flat_map(|stage| stage.counts.iter().map(move |probe| (stage, probe)))
     }
 }
 
@@ -342,6 +415,8 @@ pub fn compile(doc: &PipelineDoc) -> Result<Plan, EngineError> {
     if doc.nodes.is_empty() {
         return Err(EngineError::EmptyPipeline);
     }
+
+    reserve_suffix(&doc.nodes)?;
 
     let index = build_index(&doc.nodes)?;
     let kinds = classify(&doc.nodes)?;
@@ -575,16 +650,23 @@ fn build_stages(
                 })
                 .collect();
 
+            // The relation, not the node id: an input taken from a quality
+            // node's reject port reads a different relation than its main one,
+            // and this is what the executor attributes a row count to.
             let from = match inputs.as_slice() {
-                [only] => Some(only.node_id.clone()),
+                [only] => Some(only.relation()),
                 _ => None,
             };
+
+            check_ports(doc, &inputs)?;
 
             // Everything the component needs is derived from its spec: which
             // properties are required, what they default to, and how many
             // inputs it takes. The builder only turns valid input into SQL.
             let component = specs::lookup(&node.id, &component_id)?;
             specs::check_input_count(&node.id, &component.spec, inputs.len())?;
+
+            let splits = component.spec.has_reject_port();
 
             let properties = specs::resolve_properties(
                 &node.id,
@@ -628,7 +710,7 @@ fn build_stages(
                 spill_path: spill_path.as_deref(),
             })?;
 
-            let count_sql = builders::count_probe(&node.id, kind, from.as_deref());
+            let counts = builders::count_probes(&node.id, kind, splits, from.as_deref());
 
             let (sink_path, sink_mode) = if kind == StageKind::Sink {
                 let read = |key: &str| {
@@ -647,8 +729,9 @@ fn build_stages(
                 component_id,
                 label: node.data.label.clone(),
                 kind,
+                splits,
                 sql,
-                count_sql,
+                counts,
                 inputs,
                 from,
                 alias: node.data.alias.clone(),
@@ -660,6 +743,61 @@ fn build_stages(
             })
         })
         .collect()
+}
+
+/// Refuse a node id that would collide with a generated reject relation.
+///
+/// The suffix is reserved outright rather than only where a collision actually
+/// exists today. The precise check would pass now and start failing later, when
+/// someone adds a quality node elsewhere in the document — a validation error
+/// on a node nobody touched. Reserving the suffix costs a name nobody wants and
+/// fails at the moment the name is chosen.
+fn reserve_suffix(nodes: &[PipelineNode]) -> Result<(), EngineError> {
+    match nodes.iter().find(|node| node.id.ends_with(REJECT_SUFFIX)) {
+        None => Ok(()),
+        Some(node) => Err(EngineError::ReservedNodeId {
+            id: node.id.clone(),
+            suffix: REJECT_SUFFIX.to_string(),
+        }),
+    }
+}
+
+/// Check every input's handle against the outputs its upstream component
+/// actually declares.
+///
+/// Until quality nodes existed, a handle was decorative: every component had
+/// one output, so nothing read it and a typo was harmless. Now it selects a
+/// relation, and a typo would silently read the wrong branch — the accepted
+/// rows where the document asked for the rejected ones. Hence an error.
+///
+/// An upstream whose component is not registered is skipped rather than
+/// reported: it fails on its own account, and because stages are built in
+/// topological order that failure is reported first anyway.
+fn check_ports(doc: &PipelineDoc, inputs: &[Input]) -> Result<(), EngineError> {
+    for input in inputs {
+        let Some(upstream) = doc.nodes.iter().find(|node| node.id == input.node_id) else {
+            continue;
+        };
+
+        let Some(component_id) = upstream.data.component_id.as_deref() else {
+            continue;
+        };
+
+        let Some(component) = specs::registry().get(component_id) else {
+            continue;
+        };
+
+        if !component.spec.has_output(input.source_handle.as_deref()) {
+            return Err(EngineError::UnknownPort {
+                id: upstream.id.clone(),
+                component_id: component_id.to_string(),
+                port: input.source_handle.clone().unwrap_or_default(),
+                known: component.spec.output_names(),
+            });
+        }
+    }
+
+    Ok(())
 }
 
 fn collect_graph_warnings(

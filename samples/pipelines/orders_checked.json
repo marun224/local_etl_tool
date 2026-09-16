@@ -1,0 +1,143 @@
+{
+  "formatVersion": 1,
+  "name": "orders_checked",
+  "nodes": [
+    {
+      "id": "read_orders",
+      "type": "source",
+      "position": {
+        "x": 0.0,
+        "y": 0.0
+      },
+      "data": {
+        "label": "Orders CSV",
+        "componentId": "src.file.csv",
+        "properties": {
+          "path": "${workspace}/samples/data/orders.csv",
+          "header": true,
+          "delimiter": ","
+        },
+        "alias": "orders"
+      }
+    },
+    {
+      "id": "check_status",
+      "type": "transform",
+      "position": {
+        "x": 280.0,
+        "y": 0.0
+      },
+      "data": {
+        "label": "Status is known",
+        "componentId": "qa.accepted_values",
+        "properties": {
+          "column": "status",
+          "values": ["shipped", "pending"]
+        }
+      }
+    },
+    {
+      "id": "check_amount",
+      "type": "transform",
+      "position": {
+        "x": 560.0,
+        "y": 0.0
+      },
+      "data": {
+        "label": "Amount is sane",
+        "componentId": "qa.range",
+        "properties": {
+          "column": "amount",
+          "min": 0,
+          "max": 500
+        }
+      }
+    },
+    {
+      "id": "write_clean",
+      "type": "sink",
+      "position": {
+        "x": 840.0,
+        "y": 0.0
+      },
+      "data": {
+        "label": "Clean orders",
+        "componentId": "snk.file.parquet",
+        "properties": {
+          "path": "${workspace}/samples/out/orders_clean.parquet",
+          "mode": "overwrite",
+          "compression": "zstd"
+        }
+      }
+    },
+    {
+      "id": "write_bad_status",
+      "type": "sink",
+      "position": {
+        "x": 560.0,
+        "y": 180.0
+      },
+      "data": {
+        "label": "Unknown status",
+        "componentId": "snk.file.csv",
+        "properties": {
+          "path": "${workspace}/samples/out/rejected_status.csv",
+          "mode": "overwrite"
+        }
+      }
+    },
+    {
+      "id": "write_bad_amount",
+      "type": "sink",
+      "position": {
+        "x": 840.0,
+        "y": 180.0
+      },
+      "data": {
+        "label": "Amount out of range",
+        "componentId": "snk.file.csv",
+        "properties": {
+          "path": "${workspace}/samples/out/rejected_amount.csv",
+          "mode": "overwrite"
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "source": "read_orders",
+      "target": "check_status",
+      "sourceHandle": "main",
+      "targetHandle": "in"
+    },
+    {
+      "id": "e2",
+      "source": "check_status",
+      "target": "check_amount",
+      "sourceHandle": "main",
+      "targetHandle": "in"
+    },
+    {
+      "id": "e3",
+      "source": "check_amount",
+      "target": "write_clean",
+      "sourceHandle": "main",
+      "targetHandle": "in"
+    },
+    {
+      "id": "e4",
+      "source": "check_status",
+      "target": "write_bad_status",
+      "sourceHandle": "rejected",
+      "targetHandle": "in"
+    },
+    {
+      "id": "e5",
+      "source": "check_amount",
+      "target": "write_bad_amount",
+      "sourceHandle": "rejected",
+      "targetHandle": "in"
+    }
+  ]
+}
