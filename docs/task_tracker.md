@@ -87,7 +87,7 @@ first when picking the project back up.
 > nothing. It is git-ignored local state; a fresh clone starts empty anyway, and
 > `etl state forget` and `etl runs prune` are how you get back here deliberately.
 >
-> **State of the tree:** clean and committed — 14 commits on `main`, the last being Phase 8d.
+> **State of the tree:** clean and committed — 15 commits on `main`, the last being Phase 8d.
 > Everything is pushed; `origin/main` at `github.com/marun224/local_etl_tool` (private) is at
 > the same commit as `HEAD`.
 >
