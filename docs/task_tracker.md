@@ -3,26 +3,27 @@
 **State only.** Design lives in [PLAN_duckle_parity.md](PLAN_duckle_parity.md). Read this file
 first when picking the project back up.
 
-> ## ⏸ Paused 2026-09-16, after Phase 8b
+> ## ⏸ Paused 2026-09-16, after Phase 8c
 >
 > Stopped at a clean boundary — gate green, nothing mid-edit. **Phase 7 is complete** (a
-> desktop studio you can build, run and debug a pipeline in) and **Phase 8 is half done**:
-> 8a gave sources watermark incremental loading, 8b gave every run a record and the workspace
-> a lineage command.
+> desktop studio you can build, run and debug a pipeline in) and **Phase 8 is three-quarters
+> done**: 8a gave sources watermark incremental loading, 8b gave every run a record and the
+> workspace a lineage command, and 8c gave the workspace a scheduler.
 >
 > Phases 0–5 are dated 2026-09-15 because that is when the work was done; the clock rolled
 > past midnight while pausing, which is the only reason those lines read a day later.
 >
-> **To resume:** read this file, then Phase 8 in the plan, then start **8c** — the scheduler:
-> interval and cron in UTC, and file-watch by polling `mtime`. Both dependency questions it
-> used to carry are settled (Settled decisions 6 and 7), so it needs nothing new. The one
-> thing it has to face rather than assume is concurrency: `crates/state` says out loud that it
-> has no locking and that single-writer is the assumption "until a scheduler exists to break
-> it". 8c is that scheduler.
+> **To resume:** read this file, then Phase 8 in the plan, then start **8d** — the web
+> console: `serve`, a shared token, and roles. Its one dependency question is settled
+> (Settled decision 8: `tiny_http`), and it is the first thing in the project that will parse
+> untrusted input off a socket, which is why that decision explicitly rejected hand-rolling
+> it. 8c left it two things to build on: the workspace lock, which a console sharing a
+> workspace with a scheduler will need to reason about, and `etl schedule list --json`, which
+> is the shape a console's schedule page wants.
 >
 > ```powershell
 > cd D:\workspace\ETL_Local_Tool
-> cargo test --workspace                                            # expect 378 passing
+> cargo test --workspace                                            # expect 508 passing
 > npm --prefix frontend run test                                    # expect 114 passing
 > npm --prefix frontend run typecheck                               # expect clean
 > npm --prefix frontend run build                                   # expect clean
@@ -49,25 +50,36 @@ first when picking the project back up.
 > .\target\debug\etl.exe state list
 > ```
 >
-> And 8b's:
+> 8b's:
 >
 > ```powershell
 > .\target\debug\etl.exe runs list --limit 5
 > .\target\debug\etl.exe lineage samples\pipelines\orders_checked.json
 > ```
 >
+> And 8c's:
+>
+> ```powershell
+> $s = "--schedules", "samples\schedules.json", "--contexts", "samples\contexts.json"
+> .\target\debug\etl.exe schedule list @s      # 4 schedules, 3 enabled, times in UTC
+> .\target\debug\etl.exe schedule check @s     # all runnable
+> .\target\debug\etl.exe schedule start --once @s
+> ```
+>
 > All of these were run verbatim at the moment of pausing and printed exactly what is written
 > above. If any of them disagrees with this file later, trust the commands and fix the file.
+>
+> `schedule start --once` prints nothing on a second run within fifteen minutes, which is
+> correct rather than broken: the interval is anchored on the run it just did. `etl schedule
+> list` will say `due now` when something is overdue.
 >
 > **`.etl/` was reset before those runs**, so the incremental sample really did start from
 > nothing. It is git-ignored local state; a fresh clone starts empty anyway, and
 > `etl state forget` and `etl runs prune` are how you get back here deliberately.
 >
-> **State of the tree:** clean and committed — 12 commits on `main`, the last being Phase 8b.
-> **Three are unpushed.** `origin/main` at `github.com/marun224/local_etl_tool` (private) is at
-> `63d50bf`, Phase 8a's state store; the three after it — 8a's watermark loading, the Phase 8
-> decisions, and 8b — exist only on this machine. Pushing is the first thing to do on
-> resuming, or before if this machine is not the only copy that matters.
+> **State of the tree:** clean and committed — 13 commits on `main`, the last being Phase 8c.
+> Everything is pushed; `origin/main` at `github.com/marun224/local_etl_tool` (private) is at
+> the same commit as `HEAD`.
 >
 > **Phases 0–5 are one commit, not six.** The phases happened on the dates recorded below;
 > the commits did not exist, and dating them after the fact would have git assert a history
@@ -81,9 +93,9 @@ first when picking the project back up.
 ## Where things stand
 
 - **Next phase:** Phase 8, split into 8a–8d in the plan on 2026-09-16 before starting.
-- **In progress:** nothing. **8a and 8b are complete** (2026-09-16). Next is **8c** — the
-  scheduler: interval and UTC cron, file-watch by polling `mtime`. The dependency questions it
-  used to carry are settled (decisions 6 and 7), so it needs nothing new.
+- **In progress:** nothing. **8a, 8b and 8c are complete** (2026-09-16). Next is **8d** — the
+  web console: `serve`, shared-token auth, roles. Its dependency is settled (decision 8:
+  `tiny_http`).
 - **Blocked on:** nothing.
 
 Phase 6 was split into 6a and 6b on 2026-09-16 before starting; **both are complete**
@@ -97,11 +109,11 @@ pass), `ctl.throttle` (nothing to throttle until Phase 10 has a row cursor).
 
 ## What works today
 
-Phases 0–6 are complete and 7a–7c are done, so there is a working CLI **and a canvas you can
-build a pipeline on**. From the repo root:
+Phases 0–7 are complete and 8a–8c are done, so there is a working CLI, **a canvas you can build
+a pipeline on**, and **a scheduler that runs them**. From the repo root:
 
 ```powershell
-cargo test --workspace        # 378 tests: 254 engine, 51 e2e, 28 state, 20 secrets, 15 metadata, 10 desktop
+cargo test --workspace        # 508 tests: 254 engine, 113 scheduler, 51 e2e, 45 state, 20 secrets, 15 metadata, 10 desktop
 .\target\debug\etl.exe run samples\pipelines\orders_enriched.json
 .\target\debug\etl.exe validate samples\pipelines\orders_enriched.json
 .\target\debug\etl.exe plan samples\pipelines\orders_enriched.json --script
@@ -335,6 +347,75 @@ or below the mark is never seen. That is inherent to watermarking, and is why th
 be one that only goes up. State lives in `.etl/state/<pipeline>.json`, keyed by the document's
 `name` when it has one so a renamed *file* keeps its history.
 
+**The workspace has a scheduler.** Schedules live in their own file — `.etl/schedules.json`,
+or wherever `--schedules` points — because a schedule is a property of *this workspace* rather
+than of the pipeline: the same document is a five-minute job on a laptop and a nightly one in
+production. `samples/schedules.json` is the committed example, since `.etl/` is git-ignored.
+
+```powershell
+$s = "--schedules", "samples\schedules.json", "--contexts", "samples\contexts.json"
+.\target\debug\etl.exe schedule list @s          # what exists, and when each next fires
+.\target\debug\etl.exe schedule check @s         # every pipeline it names, compiled
+.\target\debug\etl.exe schedule start --once @s  # one pass over what is due
+.\target\debug\etl.exe schedule start @s         # stay up. Ctrl-C to stop
+```
+
+```jsonc
+{
+  "name": "orders_hourly",
+  "pipeline": "samples/pipelines/orders_incremental.json",
+  "trigger": { "every": "1h" },   // or {"cron": "0 3 * * *"}, or {"watch": "data/inbox"}
+  "enabled": true,                // default; a disabled one is still listed, saying "off"
+  "context": "prod",              // as --context would
+  "params": { "since": "2026-01-01" }
+}
+```
+
+**A scheduled run is the same run.** It goes through the same code `etl run` does, so it is
+recorded in `.etl/runs/`, it advances watermarks on the same rule, and `etl runs show` cannot
+tell the difference. That is Settled decision 5's reasoning one level down: two paths that must
+agree about the same file forever eventually do not.
+
+**An interval is counted from the last recorded run**, not from when the scheduler started — so
+restarting does not restart the clock, and an hourly pipeline that ran at 02:00 is due at 03:00
+whether or not anything was up in between. This is the reason 8c depends on 8b rather than
+merely following it. A pipeline that is **overdue** runs at once rather than waiting for the
+next whole hour, and `schedule list` says `due now` rather than printing a timestamp in the past.
+
+**It does not catch up, and it does not run two things at once.** A run that overruns its next
+tick means that tick is missed, counted and reported — never queued, because for a watermarked
+pipeline each run already reads everything new since the last mark. Runs are sequential, and a
+workspace lock keeps a second scheduler out; between them, `crates/state`'s single-writer
+assumption stays *true* rather than becoming something to hope about. A hand-run `etl run`
+alongside a scheduler is still unguarded, deliberately.
+
+**Being behind and missing a tick are counted separately.** Behind is downtime — how many
+intervals passed between the last run and startup — and is said once in the banner. Missed is
+overrun, measured from when a run started, and is said at the end. They send you looking in
+different places, so conflating them would be worse than saying neither.
+
+**Cron is five fields and always UTC.** `*`, `n`, `a-b`, `*/step`, `a-b/step`, lists, `jan`–`dec`
+and `sun`–`sat` names, and the `@hourly`/`@daily`/`@weekly`/`@monthly`/`@yearly` shorthands. Both
+day fields restricted means **either** matches, which is what every Unix cron does — `0 0 13 * fri`
+is the 13th *and* every Friday, not Friday the 13th. A `tz` field is **refused with the reason**
+rather than approximated (Settled decision 6), and an expression that cannot fire within five
+years reports `never` rather than parsing happily and doing nothing forever.
+
+**A file-watch polls, and fires only once a change has settled.** Stable across two polls, so a
+2 GB CSV still being copied into the inbox is never read half-written; with the default
+ten-second poll that costs ten to twenty seconds of latency. The first poll takes a baseline
+and never fires, so a restart does not reprocess an inbox that has been sitting there since
+yesterday. **Immediate entries only** — what happens below a subdirectory rides on that
+directory's own mtime, which NTFS defers, so watch the directory whose files actually matter.
+
+**The lock is a held handle, not a file that exists.** Ctrl-C is how you stop a foreground
+scheduler, so an existence check would be left behind on almost every stop and every restart
+would need `--force` — a guard people learn to bypass by reflex. On Windows the file is held
+with no sharing and the OS releases it however the process dies; elsewhere it falls back to an
+exclusive create and `--force`, and the error message differs per platform because the
+situations genuinely do. Who holds it is written to a readable `.etl/scheduler.status` beside
+it, since the lock itself cannot be opened while held.
+
 **Nodes can be materialised.** `"materialize": "auto" | "view" | "memory" | "disk"` on a node.
 `view` is the lazy default, `memory` a temp table, `disk` a Parquet spill under `.etl/tmp/` that
 the executor clears up afterwards. Every mode gives the same answer; there is a test that says
@@ -345,10 +426,11 @@ extension, which sits badly with Phase 9's vendored set) and DuckLake (a catalog
 needs its own design pass rather than a thirteenth copy of the ATTACH shape). Both are listed
 under Phase 4 in the plan, so both need a decision recorded there rather than quietly dropping.
 
-**Not built yet:** the rest of Phase 8 (8c–8d) and the three control components deferred out
-of 6b. **The canvas cannot edit an `incremental` block** — it survives a GUI round trip
-untouched, but there is no panel for it; that belongs with a Phase 8 that has a runner to
-schedule — see the top of this file. i18next and Vega are in the plan's stack note and stay
+**Not built yet:** the rest of Phase 8 (8d) and the three control components deferred out
+of 6b. **The canvas cannot edit an `incremental` block or a schedule** — both survive a GUI
+round trip untouched, but there is no panel for either; a schedule is not in the pipeline
+document at all, so its panel is a workspace-level screen rather than an inspector tab, and
+that is 8d's shape rather than 7's. i18next and Vega are in the plan's stack note and stay
 uninstalled until the thing that needs them exists; lucide-react arrived with the palette in 7b,
 and 7d added nothing, having written its own SQL highlighter rather than taking Prism.
 
@@ -380,7 +462,7 @@ fail the run. That is `ctl.fail`'s shape and it needs 6b's execution-model decis
 | 8 | Headless runner: serve, scheduler, RBAC, incremental | **in progress** | |
 | 8a | — watermark incremental loading | **done** | 2026-09-16 |
 | 8b | — the runner: history, `--json`, lineage | **done** | 2026-09-16 |
-| 8c | — scheduler: interval, cron, file-watch | not started | |
+| 8c | — scheduler: interval, cron, file-watch | **done** | 2026-09-16 |
 | 8d | — web console: serve, token auth, roles | not started | |
 | 9 | Standalone binary export + air-gapped packaging | not started | |
 | 10 | Rust-native connectors | not started | |
@@ -550,6 +632,31 @@ Settled decisions 5–8.)
   the engine actually creates; the alias is an extra view on top.
 - No `petgraph` dependency — Kahn's algorithm is ~30 lines and hand-rolling it gave control over
   deterministic tie-breaking and error messages that name the specific nodes in a cycle.
+
+### From Phase 8c
+
+- **Directory mtimes are not a reliable signal for nested content.** Two watch tests asserted
+  that a file created one level down fires and an edit does not; both failed, in *opposite*
+  directions. NTFS defers directory timestamp updates, so neither is guaranteed. The top level
+  is solid for a reason unrelated to the directory's clock — a new file is an entry with its
+  own fresh mtime, a removed one changes the summed length — so the contract is "immediate
+  entries", with the measurement written into the module docs rather than a behaviour asserted
+  that the filesystem does not promise.
+- **The civil-date conversion now has two copies, not three.** `etl_state::time` is the shared
+  one, promoted out of the state crate so the scheduler could use it and gain the inverse plus
+  a weekday. **The engine's `${date}` still has its own** — `etl-duckdb-engine` does not depend
+  on `etl-state`, and making it do so is a change to the engine rather than to the scheduler.
+  Worth folding in whenever something else touches `params.rs`.
+- **`PipelineDoc::resource_pool` is still read by nothing.** 8c schedules without admission
+  pools, as the plan's note said it would. The field stays unused until a phase claims it.
+- **Ctrl-C kills a run in flight.** There is no signal handling — that needs a dependency this
+  workspace has not taken — so stopping a scheduler mid-run terminates DuckDB with it. Safe by
+  construction rather than by care: a watermark advances only on a run that fully succeeded, so
+  the next run redoes the window. A half-written output file is possible, and `mode:
+  "overwrite"` is what makes that recoverable.
+- **`schedule start` returns exit 3 if any run failed**, matching `run`'s codes. A scheduler
+  staying up therefore only reports at the end, which is fine for `--once` and means nothing
+  for a long-lived one.
 
 ## Session log
 
@@ -951,3 +1058,45 @@ The last quarter of Phase 5, after the dependency question was settled in favour
 passing** (222 engine, 27 end-to-end, 20 secrets, 15 metadata). Both acceptance runs still
 print what they should. Nothing committed — asked, and the answer was "not yet".
 
+### 2026-09-16 — Phase 8c: the scheduler
+
+Three design questions were settled first, because each forks the work: a schedule lives in its
+own file (not the pipeline document), an overrun tick is skipped and counted (not queued), and
+concurrency is handled by a workspace lock plus sequential runs (not by adding locking to
+`crates/state`).
+
+- `crates/scheduler/` — new crate, no engine dependency and **no new external dependency**:
+  - `lib.rs` — `ScheduleFile`, `Schedule`, `Trigger`, and a `RawTrigger` wire form that exists
+    so a `tz` field can be *seen* in order to be refused by name
+  - `cron.rs` — five fields, UTC, bitmask sets, `next_after` that skips whole months and days
+  - `every.rs` — `30s`/`5m`/`1h`/`2h30m`, and what an interval is counted from
+  - `watch.rs` — mtime polling, settle-across-two-polls, baseline on first poll
+  - `lock.rs` — a held handle on Windows, an exclusive create elsewhere
+  - `run.rs` — the loop, behind a `Clock` trait so the tests never sleep
+- `crates/state/src/time.rs` — the civil-date conversion promoted out of `lib.rs`, plus
+  `days_from_civil`, `weekday` and `from_rfc3339`
+- `crates/cli/src/main.rs` — `command_run` split into `perform` and `print_report`, so the
+  scheduler runs pipelines through the same path; `etl schedule list|check|start`;
+  `--schedules` on the shared settings
+- `samples/schedules.json` — the committed example, since `.etl/` is git-ignored
+
+**113 scheduler tests, 17 new state tests.** Gate green: fmt clean, clippy clean with
+`-D warnings`, **508 Rust tests** and 114 frontend, typecheck clean.
+
+#### What running it changed
+
+- **The first end-to-end run printed a wrong message about its own behaviour** — *34 tick(s)
+  were missed while an earlier run was still going*, when nothing had been running. It was
+  counting the hours since the last run. Downtime and overrun are now counted separately, as
+  `Entry::behind` and `Tick::missed`, because they send you looking in different places.
+- **Two watch tests failed in opposite directions**, which is what established that directory
+  mtimes say nothing dependable about nested content. The tests now pin the contract that
+  actually holds rather than a behaviour the filesystem does not promise.
+- **A schedule that was overdue waited instead of running.** `next_after` skips to the next
+  grid slot, which is right *after* a run and wrong *at startup*: down for three hours on an
+  hourly schedule should mean run now, not wait fifty minutes. Startup now uses the anchor plus
+  one interval, which leaves the tick in the past so it fires at once.
+- **The lock survived being killed, on purpose.** Started a scheduler, confirmed a second was
+  refused by pid and host, killed the first without unwinding, and confirmed the leftover file
+  did not wedge the workspace. That is the Ctrl-C case, which is how a foreground scheduler is
+  stopped every single time.

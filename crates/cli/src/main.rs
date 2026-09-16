@@ -12,6 +12,7 @@ use etl_duckdb_engine::{
 };
 use etl_metadata::Namespace;
 use etl_metadata::PipelineDoc;
+use etl_scheduler as sched;
 use etl_secrets::SecretStore;
 use etl_state as state;
 use std::collections::BTreeMap;
@@ -64,9 +65,43 @@ struct Settings {
     /// Read contexts from here instead of <workspace>/.etl/contexts.json.
     #[arg(long, value_name = "FILE", global = true)]
     contexts: Option<PathBuf>,
+
+    /// Read schedules from here instead of <workspace>/.etl/schedules.json.
+    #[arg(long, value_name = "FILE", global = true)]
+    schedules: Option<PathBuf>,
 }
 
 impl Settings {
+    /// Where this workspace's schedules are.
+    fn schedules_path(&self) -> PathBuf {
+        self.schedules
+            .clone()
+            .unwrap_or_else(|| sched::ScheduleFile::path_in(&self.workspace_root()))
+    }
+
+    /// These settings as one schedule's run would see them.
+    ///
+    /// The schedule's own bindings first, then whatever was given on the
+    /// command line, so a `--param` passed to `schedule start` beats the file
+    /// — the same precedence `run` already gives an explicit binding over a
+    /// context. The context works the other way round only in that an
+    /// explicit `--context` wins; otherwise the schedule's own is used.
+    fn for_schedule(&self, schedule: &sched::Schedule) -> Settings {
+        let mut settings = self.clone();
+
+        let mut params: Vec<String> = schedule
+            .params
+            .iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect();
+        params.extend(self.params.iter().cloned());
+
+        settings.params = params;
+        settings.context = self.context.clone().or_else(|| schedule.context.clone());
+
+        settings
+    }
+
     fn workspace_root(&self) -> PathBuf {
         self.workspace
             .clone()
@@ -185,6 +220,15 @@ enum Command {
         settings: Settings,
     },
 
+    /// Run pipelines on a schedule.
+    Schedule {
+        #[command(subcommand)]
+        action: ScheduleAction,
+
+        #[command(flatten)]
+        settings: Settings,
+    },
+
     /// Check a pipeline without running it. Touches nothing.
     Validate {
         /// The pipeline JSON file.
@@ -284,6 +328,8 @@ fn main() -> ExitCode {
             settings,
         } => command_run(&pipeline, duckdb, !no_counts, show_sql, json, &settings),
 
+        Command::Schedule { action, settings } => command_schedule(action, &settings),
+
         Command::Validate { pipeline, settings } => command_validate(&pipeline, &settings),
 
         Command::Contexts { settings } => command_contexts(&settings),
@@ -320,24 +366,47 @@ fn main() -> ExitCode {
 // Commands
 // ---------------------------------------------------------------------------
 
-fn command_run(
+/// One execution, from a file on disk to a record in history.
+///
+/// Shared by `etl run` and the scheduler, so there is exactly one code path
+/// that knows how a run is compiled, executed and recorded. That is the same
+/// reason Settled decision 5 put the runner on `etl` rather than in a second
+/// binary: two paths that have to agree about the same file forever are two
+/// paths that eventually do not.
+struct Performed {
+    /// What was appended to history. Always present — a run that failed is
+    /// still a run that happened.
+    record: state::RunRecord,
+
+    /// Absent when DuckDB failed before producing a report at all.
+    report: Option<RunReport>,
+
+    state_key: String,
+}
+
+/// Compile and run one pipeline, recording whatever happened.
+///
+/// `Err` is a pipeline that never started: unreadable, invalid, or a DuckDB
+/// that is not there. Those are not recorded, because they are a broken
+/// installation or a broken file rather than a failed run — the distinction
+/// 8b drew and this keeps.
+fn perform(
     pipeline: &Path,
     duckdb: Option<PathBuf>,
     counts: bool,
     show_sql: bool,
-    json: bool,
     settings: &Settings,
-) -> u8 {
+    quiet: bool,
+) -> Result<Performed, u8> {
     let Loaded {
         plan,
         resolved,
         state_key,
-    } = match load_and_compile(pipeline, settings) {
-        Ok(loaded) => loaded,
-        Err(code) => return code,
-    };
+    } = load_and_compile(pipeline, settings)?;
 
-    report_warnings(&plan);
+    if !quiet {
+        report_warnings(&plan);
+    }
 
     let options = RunOptions {
         duckdb_bin: duckdb,
@@ -368,97 +437,11 @@ fn command_run(
             let record = record_of(id, &state_key, pipeline, started, &report);
             remember(settings, &state_key, &record);
 
-            // JSON is the whole of stdout when it is asked for, so a script can
-            // parse it without stripping a table off the front.
-            if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&record).expect("a record serialises")
-                );
-
-                return if report.failed() {
-                    exit::FAILED
-                } else {
-                    match save_watermarks(settings, &state_key, &report, true) {
-                        Ok(()) => exit::OK,
-                        Err(code) => code,
-                    }
-                };
-            }
-
-            let width = report
-                .stages
-                .iter()
-                .map(|s| s.label.chars().count())
-                .max()
-                .unwrap_or(0);
-
-            for stage in &report.stages {
-                let rows = match (&stage.skipped, stage.rows) {
-                    // A stage that did not run says why, rather than showing a
-                    // dash that reads the same as "no counts were collected".
-                    (Some(reason), _) => reason.describe(),
-                    (None, Some(rows)) => format!("{rows} rows"),
-                    (None, None) => "-".to_string(),
-                };
-
-                // A quality node's rejected count is shown even when it is
-                // zero. Zero rejects is the result someone ran the check to
-                // see, and hiding it would make a passing check look like a
-                // node that did nothing.
-                let rejected = match stage.rejected {
-                    Some(rejected) => format!("  {rejected} rejected"),
-                    None => String::new(),
-                };
-
-                // Most stages have no timing and must not be padded into a
-                // column of blanks; the ones that do have earned it. See
-                // `StageOutcome::elapsed` for which those are and why.
-                let took = match stage.elapsed {
-                    Some(elapsed) => format!("  {:.0}ms", elapsed.as_secs_f64() * 1000.0),
-                    None => String::new(),
-                };
-
-                println!(
-                    "  {:width$}  {:>12}  {}{}{}",
-                    stage.label, rows, stage.component_id, rejected, took
-                );
-            }
-
-            for failure in &report.failures {
-                println!(
-                    "  ! {} ({}): {}",
-                    failure.label, failure.node_id, failure.message
-                );
-            }
-
-            for note in &report.notes {
-                println!("  · {note}");
-            }
-
-            println!(
-                "\nRan {} stage(s) in {:.2}s",
-                report.stages.len(),
-                report.elapsed.as_secs_f64()
-            );
-            // A report can describe a failed run: `continue_on_failure` hands
-            // back everything that happened rather than only the first error,
-            // and the exit code is what says it still failed.
-            if report.failed() {
-                // Deliberately no state written. The run wrote some of its
-                // output and failed; leaving the watermark behind that output
-                // is the recoverable direction, because the next run redoes
-                // the window rather than skipping it.
-                if !report.watermarks.is_empty() {
-                    println!("  · watermarks not advanced: the run failed");
-                }
-                exit::FAILED
-            } else {
-                match save_watermarks(settings, &state_key, &report, false) {
-                    Ok(()) => exit::OK,
-                    Err(code) => code,
-                }
-            }
+            Ok(Performed {
+                record,
+                report: Some(report),
+                state_key,
+            })
         }
 
         Err(error) => {
@@ -468,24 +451,135 @@ fn command_run(
             // installation rather than a failed pipeline.
             if let ExecError::DuckdbNotFound { .. } = error {
                 eprintln!("error: {error}");
-                return exit::USAGE;
+                return Err(exit::USAGE);
             }
 
             let record = failed_record(id, &state_key, pipeline, started, error.to_string());
             remember(settings, &state_key, &record);
 
-            if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&record).expect("a record serialises")
-                );
-            } else {
-                eprintln!("error: {error}");
-            }
-
-            exit::FAILED
+            Ok(Performed {
+                record,
+                report: None,
+                state_key,
+            })
         }
     }
+}
+
+fn command_run(
+    pipeline: &Path,
+    duckdb: Option<PathBuf>,
+    counts: bool,
+    show_sql: bool,
+    json: bool,
+    settings: &Settings,
+) -> u8 {
+    let performed = match perform(pipeline, duckdb, counts, show_sql, settings, false) {
+        Ok(performed) => performed,
+        Err(code) => return code,
+    };
+
+    // JSON is the whole of stdout when it is asked for, so a script can parse
+    // it without stripping a table off the front.
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&performed.record).expect("a record serialises")
+        );
+    }
+
+    let Some(report) = &performed.report else {
+        if !json {
+            for failure in &performed.record.failures {
+                eprintln!("error: {failure}");
+            }
+        }
+
+        return exit::FAILED;
+    };
+
+    if !json {
+        print_report(report);
+    }
+
+    // A report can describe a failed run: `continue_on_failure` hands back
+    // everything that happened rather than only the first error, and the exit
+    // code is what says it still failed.
+    if report.failed() {
+        // Deliberately no state written. The run wrote some of its output and
+        // failed; leaving the watermark behind that output is the recoverable
+        // direction, because the next run redoes the window rather than
+        // skipping it.
+        if !json && !report.watermarks.is_empty() {
+            println!("  · watermarks not advanced: the run failed");
+        }
+
+        return exit::FAILED;
+    }
+
+    match save_watermarks(settings, &performed.state_key, report, json) {
+        Ok(()) => exit::OK,
+        Err(code) => code,
+    }
+}
+
+/// The per-stage table `etl run` prints.
+fn print_report(report: &RunReport) {
+    let width = report
+        .stages
+        .iter()
+        .map(|s| s.label.chars().count())
+        .max()
+        .unwrap_or(0);
+
+    for stage in &report.stages {
+        let rows = match (&stage.skipped, stage.rows) {
+            // A stage that did not run says why, rather than showing a dash
+            // that reads the same as "no counts were collected".
+            (Some(reason), _) => reason.describe(),
+            (None, Some(rows)) => format!("{rows} rows"),
+            (None, None) => "-".to_string(),
+        };
+
+        // A quality node's rejected count is shown even when it is zero. Zero
+        // rejects is the result someone ran the check to see, and hiding it
+        // would make a passing check look like a node that did nothing.
+        let rejected = match stage.rejected {
+            Some(rejected) => format!("  {rejected} rejected"),
+            None => String::new(),
+        };
+
+        // Most stages have no timing and must not be padded into a column of
+        // blanks; the ones that do have earned it. See `StageOutcome::elapsed`
+        // for which those are and why.
+        let took = match stage.elapsed {
+            Some(elapsed) => format!("  {:.0}ms", elapsed.as_secs_f64() * 1000.0),
+            None => String::new(),
+        };
+
+        println!(
+            "  {:width$}  {:>12}  {}{}{}",
+            stage.label, rows, stage.component_id, rejected, took
+        );
+    }
+
+    for failure in &report.failures {
+        println!(
+            "  ! {} ({}): {}",
+            failure.label, failure.node_id, failure.message
+        );
+    }
+
+    for note in &report.notes {
+        println!("  · {note}");
+    }
+
+    println!(
+        "
+Ran {} stage(s) in {:.2}s",
+        report.stages.len(),
+        report.elapsed.as_secs_f64()
+    );
 }
 
 fn command_lineage(pipeline: &Path, json: bool, settings: &Settings) -> u8 {
@@ -570,6 +664,404 @@ Flow:"
     }
 
     exit::OK
+}
+
+// ---------------------------------------------------------------------------
+// Schedules
+// ---------------------------------------------------------------------------
+
+#[derive(Subcommand, Debug)]
+enum ScheduleAction {
+    /// Show the workspace's schedules and when each one next fires.
+    List {
+        /// Emit JSON rather than a table.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Check the schedule file without running anything.
+    ///
+    /// Every pipeline it names is compiled too, because a schedule pointing at
+    /// a pipeline that will not compile is the failure you want to find now
+    /// rather than at 3am.
+    Check,
+
+    /// Run pipelines as they come due, until interrupted.
+    Start {
+        /// Look once at what is due, run it, and exit. What a cron entry or a
+        /// CI job wants; also the way to try a schedule without staying up.
+        #[arg(long)]
+        once: bool,
+
+        /// Take the workspace lock even if a lock file is already there.
+        #[arg(long)]
+        force: bool,
+
+        /// DuckDB binary to use, as `run` takes it.
+        #[arg(long, value_name = "PATH")]
+        duckdb: Option<PathBuf>,
+
+        /// Skip per-stage row counts, as `run` does.
+        #[arg(long)]
+        no_counts: bool,
+    },
+}
+
+fn command_schedule(action: ScheduleAction, settings: &Settings) -> u8 {
+    let path = settings.schedules_path();
+
+    let file = match sched::ScheduleFile::load(&path) {
+        Ok(file) => file,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return exit::INVALID;
+        }
+    };
+
+    match action {
+        ScheduleAction::List { json } => command_schedule_list(&file, json, settings),
+        ScheduleAction::Check => command_schedule_check(&file, &path, settings),
+        ScheduleAction::Start {
+            once,
+            force,
+            duckdb,
+            no_counts,
+        } => command_schedule_start(&file, force, once, duckdb, !no_counts, settings),
+    }
+}
+
+fn command_schedule_list(file: &sched::ScheduleFile, json: bool, settings: &Settings) -> u8 {
+    if file.schedules.is_empty() && !json {
+        println!(
+            "No schedules. Write some to {}",
+            settings.schedules_path().display()
+        );
+        return exit::OK;
+    }
+
+    // Built over every schedule rather than only the enabled ones, so a
+    // disabled row can still say what it would do.
+    let scheduler = build_scheduler(file.schedules.iter().cloned(), settings);
+
+    if json {
+        let rows: Vec<serde_json::Value> = scheduler
+            .entries()
+            .iter()
+            .map(|entry| {
+                serde_json::json!({
+                    "name": entry.schedule.name,
+                    "pipeline": entry.schedule.pipeline.display().to_string(),
+                    "trigger": entry.schedule.trigger.describe(),
+                    "enabled": entry.schedule.enabled,
+                    "next": entry.next.map(state::time::to_rfc3339),
+                    "lastRun": entry.last_run.map(state::time::to_rfc3339),
+                })
+            })
+            .collect();
+
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&rows).expect("schedules serialise")
+        );
+
+        return exit::OK;
+    }
+
+    let width = scheduler
+        .entries()
+        .iter()
+        .map(|entry| entry.schedule.name.chars().count())
+        .max()
+        .unwrap_or(0);
+
+    let now = state::time::now_unix();
+
+    for entry in scheduler.entries() {
+        // A disabled schedule is still listed — one that vanished would be
+        // harder to debug than one that says it is off — but it must not
+        // advertise a next fire it is never going to reach.
+        let next = if entry.schedule.enabled {
+            entry.describe_next(now)
+        } else {
+            "off".to_string()
+        };
+
+        println!(
+            "  {:width$}  {:<22}  {}",
+            entry.schedule.name,
+            entry.schedule.trigger.describe(),
+            next
+        );
+    }
+
+    let enabled = file.enabled().count();
+    println!(
+        "\n{} schedule(s), {enabled} enabled. Times are UTC.",
+        file.schedules.len()
+    );
+
+    exit::OK
+}
+
+fn command_schedule_check(file: &sched::ScheduleFile, path: &Path, settings: &Settings) -> u8 {
+    if file.schedules.is_empty() {
+        println!("No schedules in {}", path.display());
+        return exit::OK;
+    }
+
+    // The file itself is already checked by `load`; what is left is whether
+    // each schedule points at a pipeline that exists and compiles.
+    let mut broken = 0;
+
+    let width = file
+        .schedules
+        .iter()
+        .map(|schedule| schedule.name.chars().count())
+        .max()
+        .unwrap_or(0);
+
+    for schedule in &file.schedules {
+        let pipeline = schedule.pipeline_in(&settings.workspace_root());
+        let settings = settings.for_schedule(schedule);
+
+        // Compiling prints its own errors, so a broken one has already said
+        // why by the time its row is written.
+        let verdict = match load_and_compile(&pipeline, &settings) {
+            Ok(_) => "ok    ",
+            Err(_) => {
+                broken += 1;
+                "BROKEN"
+            }
+        };
+
+        println!(
+            "  {verdict}  {:width$}  {}",
+            schedule.name,
+            pipeline.display()
+        );
+    }
+
+    if broken > 0 {
+        println!(
+            "\n{broken} of {} schedule(s) will not run.",
+            file.schedules.len()
+        );
+        return exit::INVALID;
+    }
+
+    println!("\n{} schedule(s), all runnable.", file.schedules.len());
+
+    exit::OK
+}
+
+fn command_schedule_start(
+    file: &sched::ScheduleFile,
+    force: bool,
+    once: bool,
+    duckdb: Option<PathBuf>,
+    counts: bool,
+    settings: &Settings,
+) -> u8 {
+    let workspace = settings.workspace_root();
+
+    if file.enabled().count() == 0 {
+        eprintln!(
+            "error: no enabled schedules in {}",
+            settings.schedules_path().display()
+        );
+        return exit::USAGE;
+    }
+
+    // Taken before anything runs, and held for as long as this process does.
+    // One scheduler per workspace is what keeps the state store's
+    // single-writer assumption true rather than merely hoped for.
+    let lock = match sched::WorkspaceLock::acquire(&workspace, force) {
+        Ok(lock) => lock,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return exit::USAGE;
+        }
+    };
+
+    let mut scheduler = build_scheduler(file.enabled().cloned(), settings);
+
+    println!(
+        "Scheduling {} pipeline(s) from {}. Times are UTC.",
+        scheduler.entries().len(),
+        settings.schedules_path().display()
+    );
+
+    let now = state::time::now_unix();
+
+    for entry in scheduler.entries() {
+        // Downtime, said once at startup. It is a fact about the past, and
+        // repeating it every tick would turn it into noise.
+        let behind = match entry.behind {
+            0 => String::new(),
+            1 => "  (1 interval behind)".to_string(),
+            count => format!("  ({count} intervals behind)"),
+        };
+
+        println!(
+            "  {}  {}  next {}{behind}",
+            entry.schedule.name,
+            entry.schedule.trigger.describe(),
+            entry.describe_next(now)
+        );
+    }
+
+    if once {
+        println!("\nOne pass, then exiting.");
+    } else {
+        println!("\nRunning. Ctrl-C to stop.");
+    }
+
+    let clock = sched::SystemClock;
+
+    let summary = scheduler.run(
+        &clock,
+        &mut |schedule| run_scheduled(schedule, duckdb.clone(), counts, settings),
+        if once { Some(1) } else { None },
+        &mut || false,
+    );
+
+    let nothing_left = scheduler.wake_at().is_none();
+
+    // Released explicitly rather than at the end of the scope, so what is
+    // printed below comes from a process that no longer holds the workspace.
+    lock.release();
+
+    if summary.missed() > 0 {
+        println!(
+            "\n{} tick(s) were missed while an earlier run was still going.",
+            summary.missed()
+        );
+    }
+
+    if !once && nothing_left {
+        // The loop ended on its own, which only happens when nothing can ever
+        // be due again. Saying so beats exiting silently and looking crashed.
+        println!("\nNothing left to wait for: no schedule can fire again.");
+    }
+
+    println!(
+        "Ran {} pipeline(s), {} failed.",
+        summary.ran(),
+        summary.failed()
+    );
+
+    if summary.failed() > 0 {
+        exit::FAILED
+    } else {
+        exit::OK
+    }
+}
+
+/// Run one scheduled pipeline, printing a line for it.
+///
+/// Goes through `perform`, which is the same path `etl run` takes, so a
+/// scheduled run is recorded in history and advances its watermarks exactly as
+/// a hand-run one does.
+fn run_scheduled(
+    schedule: &sched::Schedule,
+    duckdb: Option<PathBuf>,
+    counts: bool,
+    settings: &Settings,
+) -> sched::Outcome {
+    let settings = settings.for_schedule(schedule);
+    let pipeline = schedule.pipeline_in(&settings.workspace_root());
+    let at = state::now_utc();
+
+    println!("\n[{at}] {} — {}", schedule.name, pipeline.display());
+
+    let performed = match perform(&pipeline, duckdb, counts, false, &settings, true) {
+        Ok(performed) => performed,
+        Err(_) => {
+            // `perform` has already said what was wrong. A schedule pointing
+            // at a broken pipeline keeps its place in the rota rather than
+            // bringing the whole scheduler down — the other schedules are not
+            // at fault.
+            println!("  broken: it did not start");
+            return sched::Outcome::Broken;
+        }
+    };
+
+    let Some(report) = &performed.report else {
+        for failure in &performed.record.failures {
+            println!("  failed: {failure}");
+        }
+
+        return sched::Outcome::Failed;
+    };
+
+    if report.failed() {
+        for failure in &report.failures {
+            println!(
+                "  ! {} ({}): {}",
+                failure.label, failure.node_id, failure.message
+            );
+        }
+
+        println!(
+            "  failed after {:.2}s ({} stage(s))",
+            report.elapsed.as_secs_f64(),
+            report.stages.len()
+        );
+
+        return sched::Outcome::Failed;
+    }
+
+    let rows = performed
+        .record
+        .rows_written()
+        .map(|rows| format!("{rows} rows"))
+        .unwrap_or_else(|| "no sink".to_string());
+
+    println!(
+        "  ok, {rows} in {:.2}s ({} stage(s))",
+        report.elapsed.as_secs_f64(),
+        report.stages.len()
+    );
+
+    // Quiet: the scheduler prints one line per run, and a watermark note per
+    // node would bury it.
+    if save_watermarks(&settings, &performed.state_key, report, true).is_err() {
+        // The run worked and its output is written; the state did not save.
+        // `save_watermarks` has already said so on stderr. Reported as a
+        // failure because the next run will now redo this window.
+        return sched::Outcome::Failed;
+    }
+
+    sched::Outcome::Succeeded
+}
+
+/// Build a scheduler, telling it when each pipeline last ran.
+///
+/// The last run comes from `.etl/runs/` — 8b's history — which is why an
+/// interval survives a restart: an hourly pipeline that ran at 02:00 is due at
+/// 03:00 whether or not the scheduler was up in between.
+fn build_scheduler(
+    schedules: impl IntoIterator<Item = sched::Schedule>,
+    settings: &Settings,
+) -> sched::Scheduler {
+    let workspace = settings.workspace_root();
+    let history = state::History::at(&workspace);
+
+    sched::Scheduler::new(schedules, &workspace, state::time::now_unix(), |schedule| {
+        let pipeline = schedule.pipeline_in(&workspace);
+
+        // Keyed by the document's `name` when it has one, so this agrees with
+        // where the run records were actually written. A pipeline that cannot
+        // be read has no history, which is the same answer as never having
+        // run — and `check` is where that gets reported.
+        let text = std::fs::read_to_string(&pipeline).ok()?;
+        let document = PipelineDoc::from_json(&text).ok()?;
+        let key = state::key_for(document.name.as_deref(), &pipeline);
+
+        let recent = history.recent(&key, 1).ok()?;
+
+        state::time::from_rfc3339(&recent.first()?.started)
+    })
 }
 
 fn command_validate(pipeline: &Path, settings: &Settings) -> u8 {

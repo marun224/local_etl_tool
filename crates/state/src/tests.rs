@@ -233,13 +233,17 @@ fn listing_a_workspace_that_has_never_run_anything_is_empty() {
 #[test]
 fn timestamps_are_utc_and_sortable() {
     // Answers that are not in doubt, which is the whole justification for
-    // hand-rolling this rather than taking a date crate.
-    assert_eq!(from_unix_seconds(0), "1970-01-01T00:00:00Z");
-    assert_eq!(from_unix_seconds(86_399), "1970-01-01T23:59:59Z");
-    assert_eq!(from_unix_seconds(86_400), "1970-01-02T00:00:00Z");
+    // hand-rolling this rather than taking a date crate. The conversion moved
+    // to `time` in 8c; this stays because it is the shape `now_utc` writes
+    // into every state file and run record.
+    use crate::time::to_rfc3339;
+
+    assert_eq!(to_rfc3339(0), "1970-01-01T00:00:00Z");
+    assert_eq!(to_rfc3339(86_399), "1970-01-01T23:59:59Z");
+    assert_eq!(to_rfc3339(86_400), "1970-01-02T00:00:00Z");
     // A leap day, which is the case a wrong implementation gets wrong.
-    assert_eq!(from_unix_seconds(1_709_164_800), "2024-02-29T00:00:00Z");
-    assert_eq!(from_unix_seconds(1_774_000_000), "2026-03-20T09:46:40Z");
+    assert_eq!(to_rfc3339(1_709_164_800), "2024-02-29T00:00:00Z");
+    assert_eq!(to_rfc3339(1_774_000_000), "2026-03-20T09:46:40Z");
 }
 
 #[test]

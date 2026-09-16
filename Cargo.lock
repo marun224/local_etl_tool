@@ -913,6 +913,7 @@ dependencies = [
  "clap",
  "etl-duckdb-engine",
  "etl-metadata",
+ "etl-scheduler",
  "etl-secrets",
  "etl-state",
  "serde_json",
@@ -949,6 +950,16 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "etl-scheduler"
+version = "0.1.0"
+dependencies = [
+ "etl-state",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
 ]
 
 [[package]]

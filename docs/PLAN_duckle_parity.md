@@ -698,6 +698,93 @@ failing pipeline lands in history as `failed`; `etl run --json` parses as a sing
 **Not in 8b:** no `serve`, no scheduling — those are 8c and 8d. The desktop app does not read
 history yet; it has no panel for it and none is planned before the phase is done.
 
+**8c done 2026-09-16.** The scheduler: interval, UTC cron and file-watch, in a new
+`crates/scheduler/`, driven by `etl schedule list|check|start`. Settled decisions 6 and 7 held
+up — no timezone database and no `notify` — so the phase added **no external dependency at all**.
+
+Three questions were settled before any code was written, because each one forks the design:
+
+- **A schedule lives in its own file**, `.etl/schedules.json`, with `--schedules` to point
+  somewhere else and `samples/schedules.json` as the committed example. Not in the pipeline
+  document: a schedule is a property of *this workspace*, and the same pipeline is a
+  five-minute job on a laptop and a nightly one in production. Baking one cadence into the
+  document would force those to be two documents. It is the arrangement contexts already use,
+  for the same reason and with the same `.etl/`-is-git-ignored consequence.
+- **A run that overruns its tick skips to now and counts what it missed**, rather than working
+  through a backlog. For a watermarked pipeline each run already reads everything new since the
+  last mark, so five catch-up runs do exactly what one does — and a backlog that grows without
+  bound is a worse failure than a gap somebody can see.
+- **A workspace lock, and runs one at a time.** `crates/state` says out loud that it has no
+  locking and that single-writer is the assumption "until a scheduler exists to break it". 8c
+  is that scheduler, and it does not break it: sequential execution means its own runs cannot
+  overlap, and the lock means there is only ever one scheduler. The assumption is kept *true*
+  rather than made safe to violate. A hand-run `etl run` alongside a scheduler is still
+  unguarded, deliberately — a lock a person running one command has to wait on would make the
+  common case worse to protect against an uncommon one.
+
+Where each piece went, and what it turned out to cost:
+
+- **The scheduler crate does not depend on the engine.** It answers "what is due, and when
+  should I wake", and is handed a closure that runs one pipeline. That is what lets a fake
+  clock drive a day of scheduling in microseconds with no DuckDB anywhere near it — 113 tests,
+  none of which sleep. Execution stays in the CLI, which already knew how to do it.
+- **`command_run` was split into `perform` plus its printer.** The scheduler goes through the
+  same `perform`, so a scheduled run is compiled, recorded in history and advances its
+  watermarks by exactly the code a hand-run one uses. This is Settled decision 5's reasoning
+  applied one level down: two paths that must agree about the same file forever eventually do
+  not.
+- **An interval is counted from the last recorded run**, read out of 8b's `.etl/runs/`. That is
+  why 8c depends on 8b rather than merely following it: restarting the scheduler must not
+  restart the clock, and an hourly pipeline that ran at 02:00 is due at 03:00 whether or not
+  anything was up in between.
+- **A pipeline that is overdue runs at once, on the next tick's grid afterwards.** Down for
+  three hours on an hourly schedule means run now, not wait fifty minutes for the next whole
+  hour. The next tick is then anchored on the *due* time rather than the finish, so ticks do
+  not drift later by however long each run takes — pinned by a test that runs ten hours of
+  schedule and checks every fire is still on the hour.
+- **The civil-date conversion moved to `etl_state::time`.** It had been written twice already
+  (the engine's `${date}` and the state crate's timestamps); the scheduler needed a third, plus
+  the inverse and a weekday. The state crate's copy was promoted and the scheduler reads it.
+  The engine's copy is still its own — it does not depend on `etl-state`, and making it do so
+  is a change to the engine rather than to the scheduler, so it is left as a known duplicate
+  rather than smuggled into this phase.
+
+**Three things were found by running it rather than by reasoning about it:**
+
+- **Directory mtimes are not a reliable signal for nested content.** The first watch tests
+  asserted that a file created one level down fires and an edit does not; both failed, in
+  opposite directions. NTFS defers directory timestamp updates, so neither direction is
+  guaranteed. The top level is solid for a reason that has nothing to do with the directory's
+  clock — a new file is an entry with its own fresh mtime, and a removed one changes the summed
+  length — so the contract is now "immediate entries, and watch the directory whose files
+  matter", with the measurement written into the module docs.
+- **"Missed ticks" conflated two different things.** The first real run printed *34 tick(s)
+  were missed while an earlier run was still going* when nothing had been running — it was
+  counting the eight hours since the last run. Being **behind** because the scheduler was down
+  and **missing** a tick because a run overran are different problems that send you looking in
+  different places, so they are now counted separately: `Tick::missed` is measured from when
+  the run started, and `Entry::behind` is said once in the startup banner.
+- **The lock had to be a held handle, not a file that exists.** Ctrl-C is how a foreground
+  scheduler is stopped, so an existence-check lock would be left behind on almost every stop
+  and every restart would need `--force` — a guard people learn to bypass by reflex. On Windows
+  the file is held with `share_mode(0)`, which the OS releases however the process dies;
+  verified by killing a scheduler mid-sleep and starting another. Elsewhere std offers no
+  equivalent without a dependency, so it falls back to an exclusive create and `--force`, and
+  the error message differs per platform because the situations genuinely do.
+
+**Not in 8c, and why:** admission pools (`PipelineDoc::resource_pool` is still read by nothing,
+as the note below has said since the phase was split); catching up on missed ticks; a canvas
+panel for schedules; and any notion of local time. Ctrl-C ends the process without unwinding,
+so a run in progress is killed — which is safe by construction, because a watermark advances
+only on a run that fully succeeded, and the next run redoes the window.
+
+**Verify.** `etl schedule list|check` against `samples/schedules.json`; `etl schedule start
+--once` ran the overdue incremental pipeline and re-anchored it; a watch on a directory with a
+one-second poll fired once when a file landed and settled; a second `schedule start` was
+refused by name and pid while the first held the workspace, and succeeded once it had been
+killed. 508 Rust tests (254 engine, 113 scheduler, 51 e2e, 45 state, 20 secrets, 15 metadata,
+10 desktop) and 114 frontend, fmt and clippy clean.
+
 ### Phase 9 — Standalone binary export + air-gapped packaging
 
 **Goal.** "Build Pipeline" produces one self-contained executable, cross-OS.

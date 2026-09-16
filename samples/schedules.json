@@ -1,0 +1,28 @@
+{
+  "formatVersion": 1,
+  "schedules": [
+    {
+      "name": "orders_incremental",
+      "pipeline": "samples/pipelines/orders_incremental.json",
+      "trigger": { "every": "15m" }
+    },
+    {
+      "name": "orders_nightly",
+      "pipeline": "samples/pipelines/orders_enriched.json",
+      "trigger": { "cron": "0 3 * * *" }
+    },
+    {
+      "name": "orders_by_context",
+      "pipeline": "samples/pipelines/orders_by_context.json",
+      "trigger": { "cron": "0 9 * * mon-fri" },
+      "context": "prod"
+    },
+    {
+      "name": "inbox",
+      "pipeline": "samples/pipelines/csv_to_parquet.json",
+      "trigger": { "watch": "samples/data", "pollSeconds": 10 },
+      "enabled": false,
+      "params": { "since": "2026-01-01" }
+    }
+  ]
+}

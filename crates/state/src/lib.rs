@@ -28,10 +28,16 @@
 //!
 //! **What this does not do.** There is no locking, so two runs of the same
 //! pipeline at once will race and the second to finish wins. Single-writer is
-//! the assumption until a scheduler exists to break it, and 8c is where that
-//! gets faced rather than assumed away.
+//! the assumption, and 8c faced it rather than assuming it away: the scheduler
+//! takes a workspace lock so only one scheduler runs against a workspace, and
+//! executes pipelines one at a time so its own runs cannot overlap. That keeps
+//! the assumption true rather than making it safe to break — a hand-run `etl
+//! run` alongside a running scheduler is still unguarded, and deliberately so,
+//! because the alternative is locking that a person running one command by
+//! hand would have to understand and wait on.
 
 pub mod runs;
+pub mod time;
 
 pub use runs::{History, Outcome, RunRecord, StageRecord, WatermarkRecord};
 
@@ -39,7 +45,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
 /// The format version this crate writes.
@@ -369,60 +374,11 @@ pub(crate) fn check_key(key: &str) -> Result<(), StateError> {
 
 /// Now, UTC, as `YYYY-MM-DDTHH:MM:SSZ`.
 ///
-/// Hand-rolled for the same reason the engine's `${date}` is: this workspace
-/// has taken a date crate nowhere, the conversion is short and well known, and
-/// it is tested against timestamps whose answers are not in doubt. A timezone
-/// database would be a different argument — this is UTC only, which needs none.
+/// Kept here because every caller in this crate and the CLI reaches for it by
+/// this name; the conversion itself lives in [`time`], which is where the
+/// scheduler reads it from too.
 pub fn now_utc() -> String {
-    let seconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|since| since.as_secs() as i64)
-        .unwrap_or(0);
-
-    from_unix_seconds(seconds)
-}
-
-/// A Unix timestamp as `YYYY-MM-DDTHH:MM:SSZ`.
-fn from_unix_seconds(seconds: i64) -> String {
-    let days = seconds.div_euclid(86_400);
-    let within_day = seconds.rem_euclid(86_400);
-
-    let (year, month, day) = civil_from_days(days);
-    let (hour, minute, second) = (
-        within_day / 3_600,
-        (within_day % 3_600) / 60,
-        within_day % 60,
-    );
-
-    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
-}
-
-/// Days since 1970-01-01 to a calendar date. Howard Hinnant's `civil_from_days`.
-fn civil_from_days(days: i64) -> (i64, i64, i64) {
-    // Shift the epoch to 0000-03-01, so leap days land at the end of the cycle.
-    let shifted = days + 719_468;
-
-    let era = if shifted >= 0 {
-        shifted
-    } else {
-        shifted - 146_096
-    } / 146_097;
-    let day_of_era = shifted - era * 146_097; // [0, 146096]
-    let year_of_era =
-        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-
-    let year = year_of_era + era * 400;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let month_position = (5 * day_of_year + 2) / 153; // [0, 11], March-based
-
-    let day = day_of_year - (153 * month_position + 2) / 5 + 1;
-    let month = if month_position < 10 {
-        month_position + 3
-    } else {
-        month_position - 9
-    };
-
-    (year + i64::from(month <= 2), month, day)
+    time::to_rfc3339(time::now_unix())
 }
 
 #[cfg(test)]

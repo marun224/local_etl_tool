@@ -829,3 +829,72 @@ Four things worth remembering:
 - **Testing Library only unmounts automatically when vitest globals are on.** Without an explicit
   `cleanup()` every render piles into the same document, and the second test onward finds two of
   everything — which reads as a component bug for a good few minutes.
+
+## 2026-09-16 — Phase 8c: the scheduler
+
+```powershell
+# Gate before starting, to confirm the tracker's numbers
+cargo test --workspace                       # 378 passing, as the tracker said
+
+# Read what 8c had to build on
+#   docs/PLAN_duckle_parity.md  - Phase 8, and the 8a/8b notes
+#   crates/state/src/lib.rs     - the single-writer assumption, stated out loud
+#   crates/cli/src/main.rs      - command_run, load_and_compile, save_watermarks
+```
+
+```text
+# Files written
+#   crates/scheduler/            - new crate: lib, cron, every, watch, lock, run (+ tests)
+#   crates/state/src/time.rs     - civil dates promoted out of lib.rs, plus from_rfc3339
+#   crates/cli/src/main.rs       - perform/print_report split; etl schedule list|check|start
+#   samples/schedules.json       - the committed example
+#   Cargo.toml                   - crates/scheduler added to the workspace
+```
+
+```powershell
+# Per-crate, while building
+cargo test -p etl-state
+cargo test -p etl-scheduler
+cargo build -p etl-cli
+
+# The phase's own acceptance, from a cold shell at the repo root
+$s = "--schedules", "samples\schedules.json", "--contexts", "samples\contexts.json"
+.\target\debug\etl.exe schedule list @s
+.\target\debug\etl.exe schedule check @s
+.\target\debug\etl.exe schedule start --once @s
+```
+
+```bash
+# The lock, verified by killing a scheduler rather than by reasoning about it (POSIX shell)
+./target/debug/etl.exe schedule start --schedules samples/schedules.json ... &
+BGPID=$!; sleep 3
+./target/debug/etl.exe schedule start --once ...   # refused: names pid and host
+kill $BGPID; sleep 1
+./target/debug/etl.exe schedule start --once ...   # takes it: a leftover file is not a held lock
+
+# The watch, with a one-second poll and a file dropped into an inbox mid-run
+mkdir -p samples/inbox
+./target/debug/etl.exe schedule start --schedules <scratch>/watch.json ... &
+cp samples/data/orders.csv samples/inbox/landed.csv    # fired once, 7 rows, then settled
+rm -rf samples/inbox
+```
+
+```powershell
+# Full gate
+cargo fmt --all
+cargo fmt --all --check                      # clean
+cargo clippy --workspace --all-targets -- -D warnings   # clean
+cargo test --workspace                       # 508 passing
+npm --prefix frontend run test               # 114 passing
+npm --prefix frontend run typecheck          # clean
+
+# Regression check: every acceptance run from the tracker still prints what it printed
+.\target\debug\etl.exe components                                 # 54
+.\target\debug\etl.exe run samples\pipelines\orders_enriched.json # 12/5/7/6/6
+.\target\debug\etl.exe run samples\pipelines\orders_checked.json  # 12/10+2/9+1/9/2/1
+.\target\debug\etl.exe run samples\pipelines\orders_guarded.json  # 12 through, branch taken
+```
+
+Nothing was written outside D:\workspace\ETL_Local_Tool except scratch files under the session
+temp directory. `.etl/scheduler.lock` and `.etl/scheduler.status` were removed after the lock
+test; `samples/inbox/` was removed after the watch test.

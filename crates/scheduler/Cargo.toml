@@ -1,0 +1,13 @@
+[package]
+name = "etl-scheduler"
+description = "When a workspace runs its pipelines: interval, UTC cron, and file-watch triggers."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+etl-state.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
