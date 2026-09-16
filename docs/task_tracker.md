@@ -87,9 +87,13 @@ first when picking the project back up.
 > nothing. It is git-ignored local state; a fresh clone starts empty anyway, and
 > `etl state forget` and `etl runs prune` are how you get back here deliberately.
 >
-> **State of the tree:** clean and committed — 15 commits on `main`, the last being Phase 8d.
-> Everything is pushed; `origin/main` at `github.com/marun224/local_etl_tool` (private) is at
-> the same commit as `HEAD`.
+> **State of the tree:** clean and committed. The last phase commit is **`c6830a4` — Phase 8d**;
+> anything after it is this file. Everything is pushed; `origin/main` at
+> `github.com/marun224/local_etl_tool` (private) is at the same commit as `HEAD`.
+>
+> (This line used to carry a commit count, which was wrong twice and could not be right for
+> long: correcting it is itself a commit, so the number was stale the moment it was written.
+> `git log --oneline` answers it properly.)
 >
 > **Phases 0–5 are one commit, not six.** The phases happened on the dates recorded below;
 > the commits did not exist, and dating them after the fact would have git assert a history
