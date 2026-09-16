@@ -1,0 +1,21 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Node / frontend
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Vendored binaries - fetched by scripts/fetch-duckdb.ps1, not committed
+/tools/
+
+# Workspace runtime state
+.etl/
+/samples/out/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

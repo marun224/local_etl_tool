@@ -1,0 +1,18 @@
+{
+  "formatVersion": 1,
+  "active": "dev",
+  "contexts": {
+    "dev": {
+      "description": "This machine. Output stays inside the repo.",
+      "variables": {
+        "out_dir": "samples/out/dev"
+      }
+    },
+    "prod": {
+      "description": "Stands in for a shared location; the pipeline does not change.",
+      "variables": {
+        "out_dir": "samples/out/prod"
+      }
+    }
+  }
+}

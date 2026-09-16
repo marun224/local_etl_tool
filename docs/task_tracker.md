@@ -1,0 +1,672 @@
+# Task Tracker
+
+**State only.** Design lives in [PLAN_duckle_parity.md](PLAN_duckle_parity.md). Read this file
+first when picking the project back up.
+
+> ## ⏸ Paused 2026-09-16, after Phase 5
+>
+> Stopped at a clean boundary — gate green, nothing mid-edit. **Phase 5 is complete.**
+>
+> Every phase below is dated 2026-09-15 because that is when the work was done; the clock
+> rolled past midnight while pausing, which is the only reason this line reads a day later.
+>
+> **To resume:** read this file, then Phase 6 in the plan, then start. Nothing needs to be
+> decided first.
+>
+> ```powershell
+> cd D:\workspace\ETL_Local_Tool
+> cargo test --workspace                                            # expect 284 passing
+> .\target\debug\etl.exe components                                 # expect 40
+> .\target\debug\etl.exe run samples\pipelines\orders_enriched.json # expect 12/5/7/6/6
+> ```
+>
+> The phase's own acceptance criterion, which should print the same 12/6/6 twice into two
+> different directories:
+>
+> ```powershell
+> $c = "--contexts", "samples\contexts.json"
+> .\target\debug\etl.exe run samples\pipelines\orders_by_context.json @c
+> .\target\debug\etl.exe run samples\pipelines\orders_by_context.json @c --context prod
+> ```
+>
+> All five were run verbatim at the moment of pausing and printed exactly what is written
+> above. If any of them disagrees with this file later, trust the commands and fix the file.
+>
+> **State of the tree:** 42 files (32 staged, 10 untracked), **nothing committed** — git is
+> initialised on `master` with zero commits, so all work sits on disk. Committing was offered
+> on 2026-09-15 and declined for now, so this is a known state rather than an oversight — but
+> nothing here survives losing this directory. If this machine is not the one that resumes, or
+> if the work matters beyond this week, it is still the first thing to change.
+>
+> **Not backed up anywhere.** `tools/duckdb/` is git-ignored and holds the CLI (37 MB) plus 9
+> extension files (247 MB); both are reproducible with `.\scripts\fetch-duckdb.ps1` and
+> `.\scripts\fetch-duckdb-extensions.ps1`. Everything else exists only in this directory.
+
+## Where things stand
+
+- **Next phase:** Phase 6 — Quality nodes, reject ports, control flow
+- **In progress:** nothing
+- **Blocked on:** nothing.
+
+## What works today
+
+Phases 0–5 are complete, so there is a working CLI. From the repo root:
+
+```powershell
+cargo test --workspace        # 284 tests: 222 engine, 27 end-to-end, 20 secrets, 15 metadata
+.\target\debug\etl.exe run samples\pipelines\orders_enriched.json
+.\target\debug\etl.exe validate samples\pipelines\orders_enriched.json
+.\target\debug\etl.exe plan samples\pipelines\orders_enriched.json --script
+.\target\debug\etl.exe components              # the registry, listed
+.\target\debug\etl.exe components --manifest   # what the canvas will consume
+```
+
+The run prints `12 / 5 / 7 / 6 / 6` rows and writes `samples/out/orders_enriched.parquet`.
+
+**Forty components exist.** Sources: `src.cloud.http`, `src.cloud.s3`, `src.db.mysql`,
+`src.db.postgres`, `src.db.sqlite`, `src.file.csv`, `src.file.excel`, `src.file.json`,
+`src.file.jsonl`, `src.file.parquet`, `src.lake.delta`, `src.lake.iceberg`. Transforms:
+`xf.aggregate`, `xf.cast`, `xf.dedup`, `xf.derive`, `xf.distinct`, `xf.except`,
+`xf.filter`, `xf.intersect`, `xf.join`, `xf.limit`,
+`xf.pivot`, `xf.rename`, `xf.sample`, `xf.select`, `xf.sort`, `xf.sql`, `xf.union`,
+`xf.unpivot`, `xf.window`. Sinks: `snk.cloud.s3`, `snk.db.mysql`, `snk.db.postgres`,
+`snk.db.sqlite`, `snk.file.csv`, `snk.file.excel`, `snk.file.json`, `snk.file.jsonl`,
+`snk.file.parquet`. Everything else in the six namespaces compiles to `UnsupportedComponent`,
+by design.
+
+**Extensions are vendored**, not installed system-wide: `.\scripts\fetch-duckdb-extensions.ps1`
+puts them under `tools/duckdb/extensions/` and the executor points DuckDB at that directory. A
+component declares what it needs with `.requires_extension(...)`, and a plan emits a `LOAD`
+prelude for the union.
+
+**Adding a component** is a spec, a builder, a test, and one line in the registry inventory —
+see [adding_a_component.md](adding_a_component.md).
+
+**Pipelines are portable.** `${name}`, `${Context.name}`, `${ENV:KEY}`, `${workspace}` and
+`${date}` are substituted into node properties before compilation. Values come from `--param`,
+then the active context, then the parameter's declared default, then a built-in. Contexts live
+in `.etl/contexts.json`; `samples/contexts.json` is a committed example, because `.etl/` is
+git-ignored and so cannot hold one anybody else can read.
+
+```powershell
+.\target\debug\etl.exe contexts --contexts samples\contexts.json
+.\target\debug\etl.exe run samples\pipelines\orders_by_context.json --contexts samples\contexts.json --context prod
+.\target\debug\etl.exe run samples\pipelines\csv_to_parquet.json --param since=2026-03-01
+```
+
+**Secrets are encrypted at rest.** `etl secret init` makes a per-workspace AES-256-GCM key
+under `.etl/keys/`; `etl secret set NAME VALUE` stores a value in `.etl/secrets.json`; a pipeline
+reads it as `${SECRET:NAME}`. Values are masked everywhere a person could see them — the plan
+view, the run report, and DuckDB's own error output, which quotes a failed connection string
+back in full.
+
+```powershell
+.\target\debug\etl.exe secret init
+.\target\debug\etl.exe secret set pg_password --stdin --description "Analytics DB"
+.\target\debug\etl.exe secret list          # names and descriptions, never values
+```
+
+**Nodes can be materialised.** `"materialize": "auto" | "view" | "memory" | "disk"` on a node.
+`view` is the lazy default, `memory` a temp table, `disk` a Parquet spill under `.etl/tmp/` that
+the executor clears up afterwards. Every mode gives the same answer; there is a test that says
+so.
+
+**Deliberately not built in Phase 4:** XML (DuckDB has no core reader — only a community
+extension, which sits badly with Phase 9's vendored set) and DuckLake (a catalog format that
+needs its own design pass rather than a thirteenth copy of the ATTACH shape). Both are listed
+under Phase 4 in the plan, so both need a decision recorded there rather than quietly dropping.
+
+**Not built yet:** quality and control-flow nodes (Phase 6), the desktop app (Phase 7).
+
+## Phase status
+
+| # | Phase | Status | Date |
+|---|---|---|---|
+| — | Research: Duckle teardown ([ET_Local_Tool.md](ET_Local_Tool.md)) | done | 2026-09-15 |
+| — | Source verification against `D:\workspace\duckle-main` | done | 2026-09-15 |
+| — | Plan written and signed off | done | 2026-09-15 |
+| 0 | Workspace skeleton + pipeline document model | **done** | 2026-09-15 |
+| 1 | DAG validation + topological sort + plan skeleton | **done** | 2026-09-15 |
+| 2 | SQL lowering (8 components) + CLI executor | **done** | 2026-09-15 |
+| 3 | Component spec registry | **done** | 2026-09-15 |
+| 4 | Connector breadth wave 1 (~40 components) | **done** (40) | 2026-09-15 |
+| 5 | Parameters, contexts, secrets, materialization | **done** | 2026-09-15 |
+| 6 | Quality nodes, reject ports, control flow | not started | |
+| 7 | Desktop app (Tauri 2 + React 19 + xyflow) | not started | |
+| 8 | Headless runner: serve, scheduler, RBAC, incremental | not started | |
+| 9 | Standalone binary export + air-gapped packaging | not started | |
+| 10 | Rust-native connectors | not started | |
+| 11 | AI assistant + MCP server | not started | |
+| 12 | Benchmarks + parity audit | not started | |
+
+## Settled decisions
+
+1. **Crate naming** — `etl-` prefix mirroring Duckle's crate names, product binary `etl`.
+   Agreed 2026-09-15. Closed; reopening it after Phase 1 is expensive.
+2. **DuckDB version floor** — **stable v1.5.5**, not the LTS line. Agreed 2026-09-15; applied in
+   Phase 2 (`exec::PINNED_DUCKDB_VERSION`, and the default in `scripts/fetch-duckdb.ps1`).
+3. **Extensions are vendored into the project, not installed system-wide.** Agreed 2026-09-15,
+   the same call already made for the CLI binary. `scripts/fetch-duckdb-extensions.ps1` runs
+   `SET extension_directory=<project>; INSTALL <name>` so the files land under
+   `tools/duckdb/extensions/` and nothing outside the project changes. The executor finds that
+   directory the same way it finds the binary (explicit path, then `ETL_DUCKDB_EXTENSIONS`, then
+   a search upward) and emits `SET extension_directory=...` ahead of the `LOAD` prelude. This
+   makes Phase 9's air-gapped path the *only* path, exercised from now on rather than discovered
+   at the end.
+4. **Cryptography is RustCrypto's `aes-gcm`.** Agreed 2026-09-15. Pure Rust, so the Phase 9
+   cross-builds need no C toolchain. **Cargo resolved it to 0.10.3, not the current 0.11.1,**
+   because 0.11 declares `rust-version = 1.85` and this workspace declares 1.80 — MSRV-aware
+   resolution doing exactly its job, and 0.10.3 is the mature, widely-deployed line. Raising the
+   MSRV to get 0.11 would be a decision in its own right and has not been taken. 21 transitive
+   crates, all RustCrypto core plus `getrandom`/`libc`; the first dependencies this project has
+   taken beyond serde, clap and thiserror.
+
+## Open decisions
+
+None. (Resolved 2026-09-15: RustCrypto — see Settled decisions 4.)
+
+<details>
+<summary>Resolved: which cryptography dependency?</summary>
+
+1. **The secrets crate needs a cryptography dependency.** The plan specifies AES-256-GCM, and
+   hand-rolling that is not an option — the rest of this project has been kept dependency-light
+   deliberately (no `petgraph`, no date crate), but cryptography is the one place where writing
+   it yourself is the wrong call every time.
+
+   The obvious choice is RustCrypto's `aes-gcm` plus a key-derivation crate. That is a real
+   supply-chain decision rather than a technical one, so it is worth taking deliberately rather
+   than discovering in a diff. Alternatives: `ring` (fewer crates, C and assembly), or the OS
+   keychain (DPAPI on Windows), which moves the problem outside the project and breaks the
+   air-gapped, copy-the-folder story the rest of Phase 9 depends on.
+
+   **Chosen: RustCrypto `aes-gcm`.** See Settled decisions 4.
+
+</details>
+
+<details>
+<summary>Resolved: may DuckDB extensions be installed on this machine?</summary>
+
+1. **May DuckDB extensions be installed on this machine?** Every remaining Phase 4 family needs
+   one, and none are installed: `excel`, `postgres_scanner`, `mysql_scanner`, `sqlite_scanner`,
+   `iceberg`, `delta` and `ducklake` all report `installed = false`; `httpfs` is installed but
+   not loaded. `INSTALL` writes to `C:\Users\mr\.duckdb\extensions\`, which is outside the
+   project, so the workflow requires approval first.
+
+   Without it those components can still be **written** — the golden-SQL tests are string
+   comparisons and need no extension — but their SQL cannot be **verified against a real
+   DuckDB**, and that check has caught every real mistake so far. The PIVOT-in-a-view constraint
+   recorded below was found exactly that way, after the component had already been written and
+   its golden test was passing. Writing thirteen unverified connectors is the thing most likely
+   to produce work that looks finished and is not.
+
+   Options: install locally; vendor the extension files under `tools/duckdb/` so Phase 9's
+   air-gapped path is exercised from the start; or write them with golden tests only and mark
+   the execution tests ignored-by-default.
+
+   **Chosen: vendor into the project.** See Settled decisions 3.
+
+</details>
+
+## Environment
+
+- Repo: `d:\workspace\ETL_Local_Tool`, git initialised, branch `master`, **no commits yet**.
+- Duckle reference checkout: `D:\workspace\duckle-main` (read-only reference; clean-room rules
+  apply — architecture and behaviour, never source).
+- Toolchain verified 2026-09-15: **cargo/rustc 1.96.0**, **node v24.18.0**, **npm 11.16.0**.
+  `rust-toolchain.toml` pins 1.96.0 with rustfmt and clippy.
+- **DuckDB v1.5.5 (Variegata) vendored** at `tools/duckdb/duckdb.exe`, fetched by
+  `scripts/fetch-duckdb.ps1` (idempotent, pinned, re-runnable). Git-ignored — it is a 37 MB
+  build input, not source. **Not installed system-wide**, deliberately: the workflow requires
+  approval for global installs, and pinning locally means the version the project runs against
+  is the version it was tested against. `winget` is available if a global install is ever
+  wanted. Binary lookup order for the executor: `ETL_DUCKDB_BIN`, then `tools/duckdb/`,
+  then PATH.
+- **DuckDB extensions vendored** at `tools/duckdb/extensions/` (9 files, 247 MB), fetched by
+  `scripts/fetch-duckdb-extensions.ps1` — idempotent, re-runnable, and it verifies that each one
+  actually loads rather than only that it downloaded. Git-ignored, like the CLI, and installed
+  with `SET extension_directory` so nothing is written outside the project. Lookup order for the
+  executor: `RunOptions::extension_dir`, then `ETL_DUCKDB_EXTENSIONS`, then a search upward for
+  `tools/duckdb/extensions/`. Present: `avro`, `delta`, `ducklake`, `excel`, `httpfs`,
+  `iceberg`, `mysql_scanner`, `postgres_scanner`, `sqlite_scanner`.
+
+## Known gaps and discoveries
+
+- Six of Duckle's crates (`execution-core`, `runtime`, `workflow-engine`, `transform-engine`,
+  `stream-engine`, `slothdb-engine`) are **doc-comment stubs with zero implementation**. All
+  real code is in `duckdb-engine` (133k LOC) and `duckle-runner` (28k LOC). The plan
+  deliberately does not reproduce the stub crates.
+- **`ET_Local_Tool.md` has five source-verified errors.** Four are corrected at the top of the
+  plan: the node parameter key is `data.properties` (not `config`), component count is ~417 (not
+  385), there is no Zustand, and the crate layering is mostly aspirational. The fifth was found
+  during Phase 0: edges are plain ReactFlow
+  (`id`/`source`/`target`/`sourceHandle`/`targetHandle`), *not* the `"from": "n1.main"` form the
+  report shows. Treat the report as background, the plan as current.
+- Duckle's own open gaps we should not inherit: no versioned/migratable workspace format
+  (their issue #299 — we carry `formatVersion` from Phase 0), and `validate` not catching every
+  missing required property (fixed in our Phase 3).
+- **Divergence from Duckle, deliberate:** every struct carries a `#[serde(flatten)] extra` map,
+  so a document written by a newer version survives a load/save by an older one. Duckle drops
+  unrecognised keys. This costs nothing now and is very hard to retrofit later.
+
+### From Phase 1
+
+- **`StageKind` has five variants, not the three the plan text named.** `Source`, `Transform`,
+  `Sink`, `Quality`, `Control` — the namespace already tells us which, so classifying all six
+  namespaces now avoids a breaking change when `qa.*` and `ctl.*` arrive in Phase 6.
+- **Disabled nodes cascade.** Dropping a node drops everything downstream of it, because a
+  transform whose input was switched off would otherwise compile to SQL selecting a relation
+  that was never created — failing at runtime with a DuckDB "table not found" that says nothing
+  about the switch someone flipped. Each drop emits a warning naming the disabled node.
+- **Validation runs before the drop**, so a broken node that is switched off still reports its
+  error rather than going quiet until someone switches it back on.
+- **Topological ties break by document order.** Deliberate: Phase 4's golden-file SQL tests are
+  worthless if plan order can vary between runs. Covered by a test that compiles the same
+  document 16 times.
+- **`compile()` returns warnings as well as errors** — orphan nodes, disabled drops, and a
+  pipeline with no sink (which compiles fine and then does nothing, since every non-sink stage
+  is a lazy view). Warnings do not stop a run.
+- **`Stage::from` is the upstream node id, never the alias**, because the node id is the relation
+  the engine actually creates; the alias is an extra view on top.
+- No `petgraph` dependency — Kahn's algorithm is ~30 lines and hand-rolling it gave control over
+  deterministic tie-breaking and error messages that name the specific nodes in a cycle.
+
+## Session log
+
+### 2026-09-15 — Session 1
+Read the Duckle teardown report. Recorded the reference checkout path in the report. Verified
+the checkout at file level: workspace manifest, crate LOC, pipeline document model, component-id
+count, frontend dependencies, DuckDB CLI invocation. Wrote the plan and this tracker. No code
+written; nothing committed.
+
+### 2026-09-15 — Session 2 (Phase 0)
+Naming and DuckDB-version decisions settled; plan signed off. Verified the toolchain. Built the
+workspace skeleton and `etl-metadata`:
+
+- `Cargo.toml` (workspace, resolver 2), `rust-toolchain.toml` (1.96.0), `.gitignore`
+- `crates/metadata/src/lib.rs` — `PipelineDoc`, `PipelineNode`, `NodeData`, `PipelineEdge`,
+  `EdgeData`, `Position`, `Column`, `DataType`, `ParameterSpec`, `Schema`, `Extra`
+- `samples/pipelines/csv_to_parquet.json` — the 3-node sample Phase 2 will execute
+
+Gate green: `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo test --workspace` (8 passed). Nothing committed.
+
+### 2026-09-15 — Session 3 (Phase 1)
+Built `etl-duckdb-engine`: graph validation, deterministic topological sort, and the stage
+skeleton.
+
+- `crates/duckdb-engine/src/lib.rs` — `EngineError` (7 variants, each naming the node or edge
+  at fault) plus `node_id()` so the canvas can highlight the right box
+- `crates/duckdb-engine/src/plan/mod.rs` — `compile()`, `Plan`, `Stage`, `StageKind`, `Input`,
+  `Warning`
+- `crates/duckdb-engine/src/plan/tests.rs` — 30 tests
+
+Gate green: fmt clean, clippy clean with `-D warnings`, **38 tests passing** (30 engine,
+8 metadata). Nothing committed.
+
+`Stage.sql` is deliberately still empty — Phase 2 fills it.
+
+### 2026-09-15 — Session 4 (Phase 2 prerequisites)
+Cleared everything Phase 2 needs before it can start.
+
+- **DuckDB v1.5.5 vendored** to `tools/duckdb/`, with `scripts/fetch-duckdb.ps1` to reproduce it.
+- **`samples/data/orders.csv`** — the 12-row acceptance fixture the sample pipeline reads.
+- **Smoke-tested the CLI's real behaviour** and wrote it into the plan as a Phase 2 addendum.
+  Four findings change the executor's design, listed below.
+
+No code written. Nothing committed.
+
+#### Phase 2 design constraints, established by smoke test
+
+- **`-json` returns concatenated JSON arrays, one per statement** — not one array per batch. The
+  executor must stream-parse stdout; `serde_json::from_str` over the whole buffer will fail.
+- **`COPY` emits no row count.** Sink counts need an explicit `SELECT count(*)` against the
+  sink's `from` relation.
+- **A failed statement aborts the remainder of the batch** (exit 1, stderr). Batching the plan
+  into one `-c` gives fail-fast for free, and the number of JSON values on stdout pinpoints the
+  failing stage.
+- **Windows backslashes are a non-issue** — single-quoted literals do no escape processing, so
+  all three path spellings work. The real escaping risk is quotes: doubling `"` in identifiers
+  and `'` in literals, verified to fail loudly when omitted.
+
+### 2026-09-15 — Session 5 (Phase 2)
+The vertical slice: `etl run` now moves real data.
+
+- `crates/duckdb-engine/src/sql.rs` — `quote_identifier`, `quote_literal`, `quote_path`
+- `crates/duckdb-engine/src/plan/builders.rs` — the eight components, lowered
+- `crates/duckdb-engine/src/exec.rs` — binary discovery, one-script execution, stream parsing,
+  row counts, stage attribution, sink preparation
+- `crates/cli/` — the `etl` binary: `run`, `validate`, `plan`
+- `samples/data/customers.csv`, `samples/pipelines/orders_enriched.json` — acceptance fixture
+- `crates/duckdb-engine/tests/end_to_end.rs` — 8 tests against real DuckDB
+
+Gate green: fmt clean, clippy clean with `-D warnings`, **95 tests passing** (79 engine unit,
+8 end-to-end, 8 metadata). Nothing committed.
+
+**Acceptance, verified from a cold shell at the repo root:** 12 orders + 5 customers → filter
+keeps 7 → inner join keeps 6 (order 1010 drops, customer C006 is absent) → 6 rows written to
+Parquet with the 8-column merged schema. Content checksum `3a528b4e…` pinned in the test.
+
+#### From Phase 2
+
+- **Per-stage *timings* are not reported, only per-stage row counts.** In a plan of lazy views
+  every transform would report ~0 and the sink would report the whole pipeline's work, so a
+  per-stage number would be actively misleading. `RunReport::elapsed` is one honest wall-clock
+  figure. Real per-stage timing needs materialisation (Phase 5) or DuckDB profiling.
+- **Row counts are not free.** A `SELECT count(*)` probe forces its view to materialise, so
+  counts-on evaluates the lazy chain for the probe as well as for the sink. `--no-counts` exists
+  for the fastest path; counts are on by default because per-node counts are core to the canvas.
+- **Stage attribution falls out of the count probes.** Each stage emits exactly one JSON array,
+  so the number that arrived before a failure identifies the stage that failed. With
+  `--no-counts` there is nothing to count and errors stay unattributed — a real trade-off, and
+  the reason counts default on.
+- **Relative paths resolve from the current directory**, not from the pipeline file. `--workdir`
+  overrides. Phase 5's `${workspace}` is the real answer to portability; two competing rules in
+  the meantime would be worse than one plain one.
+- **`samples/pipelines/csv_to_parquet.json` does not run yet** — it uses `${workspace}` and
+  `${since}`, which land in Phase 5. It still *validates*, because validation is a compile check,
+  not a filesystem check. `orders_enriched.json` is the runnable Phase 2 sample.
+- **Exit codes are fixed:** 0 ok, 1 usage/IO, 2 invalid pipeline, 3 run failed.
+- **Sinks are prepared before DuckDB starts** — output directories are created, and
+  `error_if_exists` refuses without writing anything.
+
+### 2026-09-15 — Session 6 (Phase 3)
+The component registry: one table, and everything else derived from it.
+
+- `crates/metadata/src/component.rs` — `ComponentSpec`, `PropertySpec`, `PortSpec`,
+  `PropertyType`, `Namespace`. In the metadata crate so the desktop app can read specs without
+  depending on SQL generation.
+- `crates/duckdb-engine/src/plan/specs.rs` — the registry, property resolution, the manifest
+- `crates/duckdb-engine/src/plan/specs/tests.rs` — registry-wide invariants
+- `crates/cli` — `etl components [--namespace NS] [--manifest]`
+- `docs/adding_a_component.md`
+
+Gate green: fmt clean, clippy clean with `-D warnings`, **128 tests passing** (105 engine unit,
+8 end-to-end, 15 metadata). Nothing committed.
+
+#### From Phase 3
+
+- **There is no dispatch `match` anywhere in the engine.** The registry stores the builder as a
+  function pointer beside its spec, so a component cannot be half-registered — specced but not
+  buildable, or buildable but invisible to the canvas.
+- **The "done" criterion was verified, not assumed.** `src.file.jsonl` was added by following
+  `docs/adding_a_component.md`: three files touched (spec, builder, test), and the only test that
+  broke was the registry inventory, which is *designed* to break so that adding a component shows
+  up in a diff. The doc says three-plus-inventory rather than the three I first claimed.
+- **Builders no longer restate defaults.** Defaults live in the spec and are applied before
+  lowering. The old `.unwrap_or(true)` / `.unwrap_or("zstd")` were second copies waiting to
+  drift.
+- **Every required property is now checked, by name.** Previously only the ones a builder
+  happened to read were — which is exactly Duckle's open gap. A component that gains a required
+  property gains the check for free.
+- **The spec expresses per-property rules only.** `xf.join` needing `keys` *or* `condition`
+  spans two properties, so it stays in the builder. A test
+  (`a_rule_spanning_two_properties_stays_in_the_builder`) pins that division so it stays
+  deliberate.
+- **An unknown property is a warning, not an error**, and is carried through rather than
+  dropped. It is usually a typo, but it is also what a document from a newer version looks like,
+  and refusing to run someone's pipeline over an extra key would be the wrong trade.
+- **Two golden-SQL changes, both from spec defaults:** the CSV sink now always writes
+  `DELIMITER ','` (a sink must choose a delimiter; a source can sniff one), and an invalid join
+  type is now caught by the spec's enum with a message listing the valid options, rather than by
+  the builder.
+- **Clippy caught an MSRV violation** — `is_none_or` is stable in 1.82 but the workspace declares
+  1.80. Rewritten rather than bumping the declared MSRV.
+
+### From Phase 4 (part done)
+
+- **A PIVOT cannot live in a view unless its values are listed.** DuckDB refuses outright:
+  "PIVOT statements with pivot elements extracted from the data cannot be used in views." Every
+  stage in a plan *is* a view, so `xf.pivot` has a **required** `values` property, which no
+  other pivot UI asks for. Found by execution test, after the golden test was already green —
+  the clearest argument yet for running the SQL rather than only comparing it.
+- **`LOAD` on an uninstalled extension fails hard, even with autoinstall on.** DuckDB's
+  `autoinstall_known_extensions` and `autoload_known_extensions` are both `true` by default,
+  but they trigger on *use* of a function, never on an explicit `LOAD`. So the prelude is
+  strictly more brittle than relying on autoload — and that is the point: a run must fail
+  loudly and early rather than quietly downloading an extension mid-pipeline, which is exactly
+  what Phase 9 forbids.
+- **The prelude needs a probe.** `LOAD` returns no rows, so it prints no JSON, so a failed
+  prelude and a failed first stage looked identical to the executor: nothing arrived either way.
+  `PRELUDE_PROBE` (`SELECT 0 AS n;`) is emitted after the LOADs when counts are on, so "nothing
+  arrived" now means the prelude and only the prelude. `ExecError::ExtensionLoadFailed` names
+  the extensions rather than blaming an innocent stage.
+- **`Plan::extensions()` is derived, not stored.** It is the sorted union over the stages'
+  specs, computed on demand, so it cannot disagree with the components actually in the plan.
+- **`PropertyType` grew a `Map`,** as Phase 3 predicted it would. `xf.rename` (old name to new)
+  and `xf.cast` (column to type) both need ordered string pairs. Order is preserved because
+  `serde_json` is built with `preserve_order`, and it has to be: the pairs become SQL in the
+  order they were entered.
+- **A SQL type name is the one document string that reaches a statement unquoted.** Quoting it
+  would break `DECIMAL(10,2)` and `VARCHAR[]`. `type_name()` restricts it to the characters a
+  type can be spelled with instead, and a test fires `INT); DROP TABLE orders; --` at it.
+- **A percentage sample must say `reservoir`.** DuckDB's default system sampler works a row
+  group at a time and returns *nothing at all* from a small input, which reads as a broken
+  pipeline rather than as a choice of sampling method.
+- **The Excel sink writes no header unless told to**, and `read_xlsx(header=true)` then eats the
+  first row of real data — a 12-row write came back as 11. Caught by the round-trip execution
+  test; a golden test comparing strings could not have seen it. `snk.file.excel` now defaults
+  `header` to true, matching `snk.file.csv`.
+- **`INSERT INTO` fails when the table is not there**, so an appending pipeline failed on its
+  first run and worked ever after — the worst shape a bug can take. `append` now emits
+  `CREATE TABLE IF NOT EXISTS <t> AS SELECT ... WHERE false;` ahead of the insert; it is
+  idempotent and costs nothing on later runs. Also caught by an execution test.
+- **A pipeline that reads and writes the same database table sees its own writes.** Every stage
+  is a lazy view, so the count probe re-evaluates the source view *after* the insert and reports
+  the post-write total. Not a bug to fix — it falls out of laziness, and Phase 5's
+  materialisation is what would change it — but surprising enough to be worth knowing.
+- **Nothing creates the output directory for a database sink.** `prepare_sinks` works from the
+  `path` property and a database sink carries a `connection` string instead. Harmless against a
+  server, but `snk.db.sqlite` pointed at a file in a directory that does not exist fails at
+  ATTACH. Worth fixing when Phase 5 gives connections a real shape.
+- **No XML component, deliberately.** DuckDB has no core XML reader; the only route is a
+  community extension, which sits badly with Phase 9's vendored, air-gapped extension set. The
+  plan text lists XML under Phase 4 — that line needs revisiting rather than quietly satisfying.
+
+### From Phase 5
+
+- **Substitution is single-pass, deliberately.** A value that is substituted in is never itself
+  scanned for `${...}`. That rules out runaway expansion, and it rules out the uglier case: a
+  `--param` value containing `${ENV:AWS_SECRET_ACCESS_KEY}` that would otherwise read the
+  environment of the process that ran it. A test pins it.
+- **Only node properties are interpolated** — not labels, ids or positions. A parameter belongs
+  in a node's configuration, not in its name on the canvas.
+- **`--workdir` became `--workspace`, and now means both things.** It is what `${workspace}`
+  expands to *and* where relative paths resolve from. Two flags for those would eventually
+  disagree, and a pipeline whose interpolated paths and relative paths point at different roots
+  is very hard to debug. `--workdir` is kept as an alias.
+- **A required parameter with an empty value is rejected**, because `--param since=` is a slip
+  rather than a deliberate empty string, and a required *property* is already refused the same
+  way. An optional parameter may still be empty.
+- **A required parameter *may* have a default, unlike a required property.** The property rule
+  (required or default, never both) is enforced by a test; for parameters the two mean different
+  things, because `required` also tells the canvas to prompt, which is worth saying even when
+  there is something to prompt with.
+- **No date crate.** `${date}` needs today's date, which is Howard Hinnant's `civil_from_days` in
+  about fifteen lines — the same call as hand-rolling Kahn's algorithm in Phase 1. Tested
+  against the cases that actually catch mistakes: 2000 has a 29th of February, 1900 does not.
+- **A misspelled `--context` is an error, never a fallback.** Running against dev because "prod"
+  was typed "prd" is the worst outcome available. An `active` naming a context that is not
+  defined is likewise caught when the file loads, rather than silently meaning "no context".
+- **`.etl/` is git-ignored, so it cannot hold a shareable example.** `samples/contexts.json` is
+  committed as the thing to copy; the real file lives at `.etl/contexts.json`.
+- **An unknown materialisation mode is a warning, not an error.** The mode changes how the work
+  is done and never what the answer is, so falling back to `auto` is safe — which is not true of
+  an unknown component, and the difference is why the two are handled differently.
+- **A spill path is relative and derived from the node id**, so [`compile`] stays pure: the path
+  in the generated SQL is the path that will be written, with nothing substituted in later. The
+  cost: two concurrent runs of the same pipeline in the same directory would share spill files.
+  Fine for a CLI; **Phase 8's scheduler will have to give each run an id.**
+- **Spill cleanup is best-effort and reported as a count.** A scratch file that will not delete
+  should not fail a run that otherwise succeeded, so `RunReport::spilled` says how many were
+  actually cleared rather than promising that none remain.
+- **Materialisation does not change what downstream nodes select from.** The relation is named
+  after the node whichever way it is realised, so switching a node to `memory` changes one
+  statement and nothing else. There is a test for that, because it is the property that makes
+  the mode safe to change.
+
+#### From the secrets crate
+
+- **`PropertyType` did not need a `Secret` variant after all.** The Phase 4 note predicted one.
+  It is unnecessary because the *reference* is what lives in the document — a `connection`
+  property holds `password=${SECRET:pg}`, which is ordinary text and safe to commit. Only the
+  resolved value is sensitive, and that never reaches the document at all. A `Secret` property
+  type would have been a second mechanism doing the first one's job.
+- **DuckDB quotes the whole connection string back in its errors.** A failed `ATTACH` reports
+  `Unable to connect to Postgres at "dbname=... password=hunter2"`, and that text goes straight
+  into `ExecError` and out to a terminal. Redacting the generated script alone would have looked
+  complete and leaked anyway; the executor masks stderr too, and there is an end-to-end test
+  that fails a real connection on purpose to prove it.
+- **The mask has to survive being displayed, not just be removed.** `redact` replaces the value
+  with `********` rather than deleting it, so `password=********` still reads as a password that
+  was set. The tests assert the mask is present, not merely that the plaintext is absent.
+- **An empty secret would mask everything.** `"".replace()` inserts the replacement between
+  every character, so an empty value is skipped explicitly. Found by writing the test, not by
+  the failure.
+- **The secret's name is the AEAD associated data.** Renaming an entry inside `secrets.json`, or
+  swapping the dev and prod passwords by editing the file, breaks decryption. Without that the
+  swap would succeed silently and every check would still pass.
+- **`open` and `open_existing` are deliberately different.** A *run* uses `open_existing` and
+  refuses when there is no key; only `etl secret init`/`set` will create one. A run that quietly
+  minted a key would then fail to decrypt everything, and "wrong key" is a far clearer thing to
+  be told than "your secret is not there".
+- **`SecretStore`'s `Debug` is hand-written.** Everything else in this workspace derives it; here
+  a derive would print the key, so it prints `<redacted>` and there is a test that greps its own
+  `Debug` output for the key.
+- **Clippy caught a second MSRV violation** — `usize::is_multiple_of` is stable in 1.87, the
+  workspace declares 1.80. Rewritten as `% 2 != 0` rather than bumping the floor, the same call
+  as Phase 3's `is_none_or`.
+- **The threat model is written into the crate's own docs**, because it is easy to overstate:
+  the key sits beside the secrets, so anyone who can read `.etl/` can read them. What it buys is
+  that `secrets.json` alone is useless — the file that gets pasted into an issue, committed by
+  accident, or synced to a backup leaks nothing. `.etl/keys/` wants treating like an SSH key.
+
+**Known gap:** the key and decrypted values are not zeroized in memory. `aes-gcm` has a
+`zeroize` feature that is not enabled. Worth doing, but it is a smaller hole than the process
+holding plaintext in a `String` anyway, and it needs care rather than a feature flag.
+
+## Picking up Phase 6
+
+Phase 6 is the `qa.*` and `ctl.*` namespaces — quality nodes with reject ports, and control
+flow. Read it in the plan. What Phases 1–5 already put in place for it:
+
+- **`StageKind::Quality` and `StageKind::Control` have existed since Phase 1**, and every
+  namespace already classifies. That was done deliberately then so this phase would not be a
+  breaking change.
+- **Ports are already per-node and named.** `PortSpec` and the edge's `source_handle` are what a
+  reject port needs; `xf.join`'s two named inputs are the working example to copy.
+- **`adding_a_component.md` is still the whole procedure**, and a `qa.*` component is a spec, a
+  builder and a test like any other — the new part is the second output, not the registration.
+- **Watch the count probes.** `count_probe` assumes one relation per stage; a quality node with
+  an accepted and a rejected output has two, so `Stage::count_sql` will need to grow before the
+  row counts mean anything for `qa.*`.
+
+### 2026-09-15 — Session 7 (Phase 4, part 1: extensions, transforms, JSON)
+
+Built the extension mechanism first, because it is the thing the whole rest of Phase 4 hangs
+off, then the two families that need no extension.
+
+- `crates/metadata/src/component.rs` — `ComponentSpec::requires_extension`, `PropertyType::Map`
+- `crates/duckdb-engine/src/plan/mod.rs` — `Stage::requires_extensions`, `Plan::extensions()`,
+  `Plan::stages_needing()`, `Plan::has_prelude_probe()`, `PRELUDE_PROBE`, the `LOAD` prelude
+- `crates/duckdb-engine/src/exec.rs` — prelude-aware count attribution,
+  `ExecError::ExtensionLoadFailed`
+- `crates/duckdb-engine/src/plan/builders.rs` — 18 new builders, plus shared `column_list`,
+  `non_empty_map`, `map_entries`, `non_negative` and `type_name` helpers; `xf.select` moved onto
+  the shared column helper rather than keeping its own copy
+- `crates/duckdb-engine/src/plan/specs.rs` — 18 new specs
+- `crates/duckdb-engine/src/plan/builder_tests.rs` — golden SQL for all 18
+- `crates/duckdb-engine/tests/end_to_end.rs` — 4 execution tests: a derive/aggregate/sort chain
+  checked against a direct query, a union of two filters, pivot-and-dedup inside views, and a
+  CSV to JSON and back round trip
+- `docs/adding_a_component.md` — the `map` type and the extension section
+
+**Components: 9 to 27.** Transforms `xf.aggregate`, `xf.cast`, `xf.dedup`, `xf.derive`,
+`xf.distinct`, `xf.except`, `xf.intersect`, `xf.limit`, `xf.pivot`, `xf.rename`, `xf.sample`,
+`xf.sort`, `xf.union`, `xf.unpivot`, `xf.window`; files `src.file.json`, `snk.file.json`,
+`snk.file.jsonl`.
+
+Gate green: fmt clean, clippy clean with `-D warnings`, **164 tests passing** (137 engine unit,
+12 end-to-end, 15 metadata). The acceptance run still prints 12/5/7/6/6. Nothing committed.
+
+Stopped here rather than starting the database family, because verifying it needs an extension
+install outside the project — see **Open decisions**.
+
+### 2026-09-15 — Session 8 (Phase 4, part 2: extensions vendored, connectors)
+
+Settled the open decision — extensions are vendored into the project rather than installed
+system-wide — and then finished the phase.
+
+- `scripts/fetch-duckdb-extensions.ps1` — `SET extension_directory` + `INSTALL`, so the files
+  land in `tools/duckdb/extensions/` and nothing outside the project changes. Verifies each
+  extension loads, not merely that it downloaded. 9 files, 247 MB.
+- `crates/duckdb-engine/src/exec.rs` — `RunOptions::extension_dir`, `locate_extension_dir`,
+  and `SET extension_directory=...` prepended ahead of the LOAD prelude
+- `crates/duckdb-engine/src/plan/builders.rs` — 13 connector builders, plus `attach_database`
+  and `qualified_table` shared by the six database components
+- `crates/duckdb-engine/src/plan/specs.rs` — 13 specs, plus `cloud_format`, `database_read`
+  and `database_write` written once rather than six times
+- `crates/duckdb-engine/src/plan/builder_tests.rs` — golden SQL for all 13, and the prelude
+  tests that now have real extensions to assert about
+- `crates/duckdb-engine/tests/end_to_end.rs` — an Excel round trip, a SQLite round trip
+  covering both write modes, and a run against an empty extension directory that must report
+  `ExtensionLoadFailed` rather than blaming the first stage
+
+**Components: 27 to 40. Phase 4 is done.**
+
+Two real bugs found by the execution tests, both of which would have shipped under golden tests
+alone: the Excel sink wrote no header (losing a row on read-back), and `append` could not create
+a table that did not exist yet (so an appending pipeline failed on its first run and worked
+thereafter). Both recorded above.
+
+Gate green: fmt clean, clippy clean with `-D warnings`, **183 tests passing** (153 engine unit,
+15 end-to-end, 15 metadata). The acceptance run still prints 12/5/7/6/6. Nothing committed.
+
+### 2026-09-15 — Session 9 (Phase 5, part 1: parameters, contexts, materialisation)
+
+Three of Phase 5's four parts. The acceptance criterion is met: the same document, unedited,
+runs in two contexts and lands in two places.
+
+- `crates/duckdb-engine/src/params.rs` — `${...}` interpolation, the `Resolver` and its
+  precedence chain, the parameter contract, and `civil_from_days` for `${date}`
+- `crates/duckdb-engine/src/context.rs` — `.etl/contexts.json`, loading and applying
+- `crates/metadata/src/lib.rs` — `NodeData::materialize`
+- `crates/duckdb-engine/src/plan/mod.rs` — `Materialize`, `Stage::spill_path`, `Plan::spills`,
+  the `UnknownMaterialize` warning
+- `crates/duckdb-engine/src/plan/builders.rs` — `create_view` now emits a view, a temp table or
+  a Parquet spill, so the modes live in one place rather than in twenty-five builders
+- `crates/duckdb-engine/src/exec.rs` — spill preparation and best-effort cleanup,
+  `RunReport::spilled`
+- `crates/cli/src/main.rs` — the shared `Settings` group: `--param`, `--context`, `--workspace`,
+  `--contexts`; plus an `etl contexts` command
+- `samples/contexts.json`, `samples/pipelines/orders_by_context.json` — the acceptance fixture
+- 48 new unit tests and 7 new end-to-end tests
+
+**`samples/pipelines/csv_to_parquet.json` runs for the first time.** It has been committed and
+unrunnable since Phase 2 because it uses `${workspace}` and `${since}`; there is now a test
+whose name says exactly that.
+
+Gate green: fmt clean, clippy clean with `-D warnings`, **252 tests passing** (213 engine unit,
+24 end-to-end, 15 metadata). The Phase 4 acceptance run still prints 12/5/7/6/6. Nothing
+committed.
+
+Stopped before the secrets crate: it needs a cryptography dependency, which is worth deciding
+deliberately rather than slipping into a diff.
+
+### 2026-09-15 — Session 10 (Phase 5, part 2: secrets)
+
+The last quarter of Phase 5, after the dependency question was settled in favour of RustCrypto.
+
+- `crates/secrets/` — `SecretStore`, AES-256-GCM, a per-workspace key under `.etl/keys/`,
+  values in `.etl/secrets.json`, hand-rolled hex so no encoding dependency is needed
+- `crates/duckdb-engine/src/params.rs` — the `${SECRET:name}` reference form, `Resolved::redact`,
+  and `used` recording the mask rather than the value
+- `crates/duckdb-engine/src/exec.rs` — `RunOptions::redact`, applied to the reported script and
+  to DuckDB's stderr
+- `crates/cli/src/main.rs` — `etl secret init | set | list | remove`; the shared settings are
+  now `global` so `--workspace` works before or after a subcommand
+- 20 secrets tests, 10 parameter tests, 3 end-to-end tests
+
+**Phase 5 is done.** Gate green: fmt clean, clippy clean with `-D warnings`, **284 tests
+passing** (222 engine, 27 end-to-end, 20 secrets, 15 metadata). Both acceptance runs still
+print what they should. Nothing committed — asked, and the answer was "not yet".
+

@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = ["crates/metadata", "crates/secrets", "crates/duckdb-engine", "crates/cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+rust-version = "1.80"
+
+[workspace.dependencies]
+# Internal
+etl-metadata = { path = "crates/metadata", version = "0.1.0" }
+etl-secrets = { path = "crates/secrets", version = "0.1.0" }
+etl-duckdb-engine = { path = "crates/duckdb-engine", version = "0.1.0" }
+
+# External
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+thiserror = "2"
+clap = { version = "4", features = ["derive"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

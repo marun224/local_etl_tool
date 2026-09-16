@@ -1,0 +1,80 @@
+{
+  "formatVersion": 1,
+  "name": "csv_to_parquet",
+  "nodes": [
+    {
+      "id": "read_orders",
+      "type": "source",
+      "position": {
+        "x": 0.0,
+        "y": 0.0
+      },
+      "data": {
+        "label": "Orders CSV",
+        "componentId": "src.file.csv",
+        "properties": {
+          "path": "${workspace}/samples/data/orders.csv",
+          "header": true,
+          "delimiter": ","
+        },
+        "alias": "orders"
+      }
+    },
+    {
+      "id": "filter_recent",
+      "type": "transform",
+      "position": {
+        "x": 280.0,
+        "y": 0.0
+      },
+      "data": {
+        "label": "Recent orders",
+        "componentId": "xf.filter",
+        "properties": {
+          "predicate": "order_ts >= '${since}'"
+        }
+      }
+    },
+    {
+      "id": "write_parquet",
+      "type": "sink",
+      "position": {
+        "x": 560.0,
+        "y": 0.0
+      },
+      "data": {
+        "label": "Orders Parquet",
+        "componentId": "snk.file.parquet",
+        "properties": {
+          "path": "${workspace}/samples/out/orders.parquet",
+          "mode": "overwrite",
+          "compression": "zstd"
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "source": "read_orders",
+      "target": "filter_recent",
+      "sourceHandle": "main",
+      "targetHandle": "in"
+    },
+    {
+      "id": "e2",
+      "source": "filter_recent",
+      "target": "write_parquet",
+      "sourceHandle": "main",
+      "targetHandle": "in"
+    }
+  ],
+  "parameters": {
+    "since": {
+      "type": "string",
+      "required": true,
+      "default": "2026-01-01",
+      "description": "Only orders at or after this timestamp are loaded."
+    }
+  }
+}

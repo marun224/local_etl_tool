@@ -1,0 +1,17 @@
+[package]
+name = "etl-duckdb-engine"
+description = "Compiles a pipeline document into an ordered plan of DuckDB SQL stages."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+etl-metadata.workspace = true
+etl-secrets.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+etl-secrets.workspace = true

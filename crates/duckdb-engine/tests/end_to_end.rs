@@ -1,0 +1,1246 @@
+//! End-to-end: compile a pipeline, run it against a real DuckDB, verify the
+//! bytes that came out.
+//!
+//! These are the tests that would have caught every mistake the unit tests
+//! cannot — that the generated SQL is not merely well-formed but correct, and
+//! that the executor reads DuckDB's output the way DuckDB actually writes it.
+//!
+//! They need the DuckDB binary. It is vendored at `tools/duckdb/` by
+//! `scripts/fetch-duckdb.ps1`; without it these skip rather than fail, so a
+//! fresh checkout is not red for a reason that has nothing to do with the code.
+
+use etl_duckdb_engine::{compile, run, Contexts, ExecError, Resolver, RunOptions};
+use etl_metadata::PipelineDoc;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+/// The repository root, found from this crate's manifest.
+fn repo_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("crates/<name>/ sits two levels under the root")
+        .to_path_buf()
+}
+
+fn duckdb_binary() -> Option<PathBuf> {
+    let options = RunOptions {
+        working_dir: Some(repo_root()),
+        ..Default::default()
+    };
+
+    etl_duckdb_engine::exec::locate_duckdb(&options).ok()
+}
+
+/// Give each test its own output directory, so they cannot tread on each other.
+fn output_dir(name: &str) -> PathBuf {
+    let directory = repo_root().join("target").join("test-out").join(name);
+
+    let _ = std::fs::remove_dir_all(&directory);
+    directory
+}
+
+/// Query the result independently of the code under test.
+fn query(binary: &Path, sql: &str) -> String {
+    let output = Command::new(binary)
+        .arg("-json")
+        .arg("-c")
+        .arg(sql)
+        .current_dir(repo_root())
+        .output()
+        .expect("duckdb runs");
+
+    assert!(
+        output.status.success(),
+        "verification query failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+/// The five-stage sample, rewritten to write into `out`.
+fn orders_enriched(out: &Path) -> PipelineDoc {
+    let text = std::fs::read_to_string(repo_root().join("samples/pipelines/orders_enriched.json"))
+        .expect("sample pipeline is committed");
+
+    let mut document = PipelineDoc::from_json(&text).expect("sample parses");
+
+    for node in &mut document.nodes {
+        if node.data.component_id.as_deref() == Some("snk.file.parquet") {
+            let properties = node.data.properties.as_mut().expect("sink has properties");
+            properties["path"] = serde_json::json!(out
+                .join("orders_enriched.parquet")
+                .to_string_lossy()
+                .to_string());
+        }
+    }
+
+    document
+}
+
+fn options() -> RunOptions {
+    RunOptions {
+        working_dir: Some(repo_root()),
+        ..Default::default()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The happy path
+// ---------------------------------------------------------------------------
+
+#[test]
+fn csv_filter_join_parquet_produces_the_expected_rows_and_bytes() {
+    let Some(binary) = duckdb_binary() else {
+        eprintln!("skipping: no DuckDB binary; run scripts/fetch-duckdb.ps1");
+        return;
+    };
+
+    let out = output_dir("happy_path");
+    let plan = compile(&orders_enriched(&out)).expect("sample compiles");
+
+    let report = run(&plan, &options()).expect("sample runs");
+
+    // 12 orders in, 5 customers; the 2026 filter keeps 7; the inner join drops
+    // order 1010 because customer C006 is not in the customer file.
+    let rows: Vec<Option<u64>> = report.stages.iter().map(|s| s.rows).collect();
+    assert_eq!(
+        rows,
+        [Some(12), Some(5), Some(7), Some(6), Some(6)],
+        "stage row counts"
+    );
+
+    let parquet = out.join("orders_enriched.parquet");
+    assert!(parquet.is_file(), "the sink wrote nothing");
+
+    let path = parquet.to_string_lossy().replace('\\', "/");
+
+    assert_eq!(
+        query(&binary, &format!("SELECT count(*) AS n FROM '{path}';")),
+        r#"[{"n":6}]"#
+    );
+
+    // A content checksum rather than a file hash: Parquet embeds metadata that
+    // need not be byte-stable between writes, but the data must be.
+    assert_eq!(
+        query(
+            &binary,
+            &format!(
+                "SELECT md5(string_agg(order_id || '|' || customer_id || '|' || amount || '|' \
+                 || name, ',' ORDER BY order_id)) AS checksum FROM '{path}';"
+            )
+        ),
+        r#"[{"checksum":"3a528b4e19a789ba324972a2c082bda8"}]"#,
+        "the joined data changed"
+    );
+}
+
+#[test]
+fn the_join_merges_both_schemas() {
+    if duckdb_binary().is_none() {
+        return;
+    }
+
+    let out = output_dir("schema");
+    let plan = compile(&orders_enriched(&out)).expect("compiles");
+    run(&plan, &options()).expect("runs");
+
+    let binary = duckdb_binary().unwrap();
+    let path = out
+        .join("orders_enriched.parquet")
+        .to_string_lossy()
+        .replace('\\', "/");
+
+    let columns = query(
+        &binary,
+        &format!(
+            "SELECT string_agg(column_name, ',') AS c FROM (DESCRIBE SELECT * FROM '{path}');"
+        ),
+    );
+
+    // USING merges the key, so it appears once rather than twice.
+    assert_eq!(
+        columns,
+        r#"[{"c":"order_id,customer_id,order_ts,amount,status,name,segment,country"}]"#
+    );
+}
+
+#[test]
+fn a_missing_output_directory_is_created() {
+    if duckdb_binary().is_none() {
+        return;
+    }
+
+    let out = output_dir("nested").join("deeply").join("nested");
+    assert!(!out.exists());
+
+    let plan = compile(&orders_enriched(&out)).expect("compiles");
+    run(&plan, &options()).expect("runs");
+
+    assert!(out.join("orders_enriched.parquet").is_file());
+}
+
+#[test]
+fn a_run_without_counts_still_writes_the_output() {
+    if duckdb_binary().is_none() {
+        return;
+    }
+
+    let out = output_dir("no_counts");
+    let plan = compile(&orders_enriched(&out)).expect("compiles");
+
+    let report = run(
+        &plan,
+        &RunOptions {
+            counts: false,
+            ..options()
+        },
+    )
+    .expect("runs");
+
+    assert!(
+        report.stages.iter().all(|s| s.rows.is_none()),
+        "counts were switched off"
+    );
+    assert!(out.join("orders_enriched.parquet").is_file());
+}
+
+// ---------------------------------------------------------------------------
+// Failures
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_failure_is_attributed_to_the_stage_that_caused_it() {
+    if duckdb_binary().is_none() {
+        return;
+    }
+
+    let out = output_dir("attribution");
+    let mut document = orders_enriched(&out);
+
+    // Break the filter — the third of five stages, so a naive implementation
+    // that always blamed the first or last stage would be caught here.
+    for node in &mut document.nodes {
+        if node.id == "filter_recent" {
+            node.data.properties.as_mut().unwrap()["predicate"] =
+                serde_json::json!("no_such_column > 1");
+        }
+    }
+
+    let plan = compile(&document).expect("still compiles: the SQL is only checked by DuckDB");
+    let error = run(&plan, &options()).expect_err("the run must fail");
+
+    match error {
+        ExecError::StageFailed {
+            node_id, message, ..
+        } => {
+            assert_eq!(node_id, "filter_recent");
+            assert!(message.contains("no_such_column"), "{message}");
+        }
+        other => panic!("expected a stage failure, got {other:?}"),
+    }
+
+    assert!(
+        !out.join("orders_enriched.parquet").exists(),
+        "a failed run must not leave output behind"
+    );
+}
+
+#[test]
+fn error_if_exists_refuses_before_anything_runs() {
+    if duckdb_binary().is_none() {
+        return;
+    }
+
+    let out = output_dir("no_clobber");
+    std::fs::create_dir_all(&out).unwrap();
+
+    let target = out.join("orders_enriched.parquet");
+    std::fs::write(&target, b"existing content").unwrap();
+
+    let mut document = orders_enriched(&out);
+    for node in &mut document.nodes {
+        if node.data.component_id.as_deref() == Some("snk.file.parquet") {
+            node.data.properties.as_mut().unwrap()["mode"] = serde_json::json!("error_if_exists");
+        }
+    }
+
+    let plan = compile(&document).expect("compiles");
+    let error = run(&plan, &options()).expect_err("must refuse");
+
+    assert!(matches!(error, ExecError::OutputExists { .. }), "{error:?}");
+    assert_eq!(
+        std::fs::read(&target).unwrap(),
+        b"existing content",
+        "the existing file must be untouched"
+    );
+}
+
+#[test]
+fn overwrite_is_the_default() {
+    if duckdb_binary().is_none() {
+        return;
+    }
+
+    let out = output_dir("overwrite");
+    std::fs::create_dir_all(&out).unwrap();
+
+    let target = out.join("orders_enriched.parquet");
+    std::fs::write(&target, b"stale").unwrap();
+
+    let plan = compile(&orders_enriched(&out)).expect("compiles");
+    run(&plan, &options()).expect("runs");
+
+    assert_ne!(std::fs::read(&target).unwrap(), b"stale");
+}
+
+// ---------------------------------------------------------------------------
+// The script itself
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_report_carries_the_script_that_ran() {
+    if duckdb_binary().is_none() {
+        return;
+    }
+
+    let out = output_dir("script");
+    let plan = compile(&orders_enriched(&out)).expect("compiles");
+    let report = run(&plan, &options()).expect("runs");
+
+    assert_eq!(report.script, plan.script(true));
+    assert!(report.script.contains("CREATE OR REPLACE TEMP VIEW"));
+    assert!(report.script.contains("COPY ("));
+}
+
+// ---------------------------------------------------------------------------
+// Transforms, against real data
+//
+// One representative per family. The golden-SQL tests prove the statement is
+// the one intended; these prove DuckDB agrees it is valid and that it means
+// what we think — which is the part a string comparison cannot check.
+// ---------------------------------------------------------------------------
+
+/// Build a document from JSON, with `{out}` replaced by a forward-slashed
+/// output path. Going through the JSON keeps these tests on the same path a
+/// real pipeline file takes.
+fn document_with_out(json: &str, out: &Path) -> PipelineDoc {
+    let path = out.to_string_lossy().replace('\\', "/");
+    PipelineDoc::from_json(&json.replace("{out}", &path)).expect("document parses")
+}
+
+#[test]
+fn a_derive_aggregate_sort_chain_runs_and_agrees_with_a_direct_query() {
+    let Some(binary) = duckdb_binary() else {
+        eprintln!("skipping: no DuckDB binary; run scripts/fetch-duckdb.ps1");
+        return;
+    };
+
+    let out = output_dir("transform_chain");
+    let document = document_with_out(
+        r#"{
+          "formatVersion": 1,
+          "nodes": [
+            {"id": "orders", "position": {"x": 0, "y": 0}, "data": {
+              "label": "Orders", "componentId": "src.file.csv",
+              "properties": {"path": "samples/data/orders.csv"}}},
+            {"id": "with_tax", "position": {"x": 1, "y": 0}, "data": {
+              "label": "With tax", "componentId": "xf.derive",
+              "properties": {"expressions": "amount * 1.2 AS gross"}}},
+            {"id": "per_customer", "position": {"x": 2, "y": 0}, "data": {
+              "label": "Per customer", "componentId": "xf.aggregate",
+              "properties": {"group_by": ["customer_id"],
+                             "aggregations": "sum(amount) AS total, count(*) AS orders"}}},
+            {"id": "ordered", "position": {"x": 3, "y": 0}, "data": {
+              "label": "Ordered", "componentId": "xf.sort",
+              "properties": {"by": "customer_id"}}},
+            {"id": "sink", "position": {"x": 4, "y": 0}, "data": {
+              "label": "Totals", "componentId": "snk.file.csv",
+              "properties": {"path": "{out}/totals.csv"}}}
+          ],
+          "edges": [
+            {"id": "e1", "source": "orders", "target": "with_tax"},
+            {"id": "e2", "source": "with_tax", "target": "per_customer"},
+            {"id": "e3", "source": "per_customer", "target": "ordered"},
+            {"id": "e4", "source": "ordered", "target": "sink"}
+          ]
+        }"#,
+        &out,
+    );
+
+    let plan = compile(&document).expect("compiles");
+    let report = run(&plan, &options()).expect("runs");
+
+    // 12 orders, unchanged by the derive, grouped into 6 customers.
+    let rows: Vec<Option<u64>> = report.stages.iter().map(|s| s.rows).collect();
+    assert_eq!(rows, [Some(12), Some(12), Some(6), Some(6), Some(6)]);
+
+    let written = out.join("totals.csv").to_string_lossy().replace('\\', "/");
+
+    // Compare against the same question asked directly of the source file, so
+    // the assertion is not a second copy of the pipeline's own arithmetic.
+    assert_eq!(
+        query(
+            &binary,
+            &format!(
+                "SELECT count(*) AS mismatched FROM '{written}' w FULL OUTER JOIN (SELECT \
+                 customer_id, sum(amount) AS total, count(*) AS orders FROM \
+                 read_csv('samples/data/orders.csv', header=true) GROUP BY customer_id) d USING \
+                 (customer_id) WHERE w.total IS DISTINCT FROM d.total OR w.orders IS DISTINCT \
+                 FROM d.orders;"
+            )
+        ),
+        r#"[{"mismatched":0}]"#,
+        "the pipeline and a direct query disagree"
+    );
+}
+
+#[test]
+fn a_union_of_two_filters_runs() {
+    let Some(_) = duckdb_binary() else {
+        eprintln!("skipping: no DuckDB binary; run scripts/fetch-duckdb.ps1");
+        return;
+    };
+
+    let out = output_dir("transform_union");
+    let document = document_with_out(
+        r#"{
+          "formatVersion": 1,
+          "nodes": [
+            {"id": "orders", "position": {"x": 0, "y": 0}, "data": {
+              "label": "Orders", "componentId": "src.file.csv",
+              "properties": {"path": "samples/data/orders.csv"}}},
+            {"id": "shipped", "position": {"x": 1, "y": 0}, "data": {
+              "label": "Shipped", "componentId": "xf.filter",
+              "properties": {"predicate": "status = 'shipped'"}}},
+            {"id": "pending", "position": {"x": 1, "y": 1}, "data": {
+              "label": "Pending", "componentId": "xf.filter",
+              "properties": {"predicate": "status = 'pending'"}}},
+            {"id": "both", "position": {"x": 2, "y": 0}, "data": {
+              "label": "Both", "componentId": "xf.union", "properties": {}}},
+            {"id": "sink", "position": {"x": 3, "y": 0}, "data": {
+              "label": "Open orders", "componentId": "snk.file.csv",
+              "properties": {"path": "{out}/open.csv"}}}
+          ],
+          "edges": [
+            {"id": "e1", "source": "orders", "target": "shipped"},
+            {"id": "e2", "source": "orders", "target": "pending"},
+            {"id": "e3", "source": "shipped", "target": "both", "targetHandle": "left"},
+            {"id": "e4", "source": "pending", "target": "both", "targetHandle": "right"},
+            {"id": "e5", "source": "both", "target": "sink"}
+          ]
+        }"#,
+        &out,
+    );
+
+    let plan = compile(&document).expect("compiles");
+    let report = run(&plan, &options()).expect("runs");
+
+    let rows: Vec<Option<u64>> = report.stages.iter().map(|s| s.rows).collect();
+
+    // 7 shipped + 3 pending, stacked.
+    assert_eq!(
+        rows,
+        [Some(12), Some(7), Some(3), Some(10), Some(10)],
+        "stage row counts"
+    );
+    assert!(out.join("open.csv").is_file());
+}
+
+#[test]
+fn pivot_and_dedup_survive_being_wrapped_in_a_view() {
+    // The reason this test exists: every stage in a plan is a view, and DuckDB
+    // refuses to build a view around a PIVOT whose result columns it would have
+    // to learn by reading the data. That is why `values` is a required
+    // property, and this is the test that keeps it that way.
+    let Some(_) = duckdb_binary() else {
+        eprintln!("skipping: no DuckDB binary; run scripts/fetch-duckdb.ps1");
+        return;
+    };
+
+    let out = output_dir("transform_pivot");
+    let document = document_with_out(
+        r#"{
+          "formatVersion": 1,
+          "nodes": [
+            {"id": "orders", "position": {"x": 0, "y": 0}, "data": {
+              "label": "Orders", "componentId": "src.file.csv",
+              "properties": {"path": "samples/data/orders.csv"}}},
+            {"id": "newest", "position": {"x": 1, "y": 0}, "data": {
+              "label": "Newest per customer", "componentId": "xf.dedup",
+              "properties": {"keys": ["customer_id"], "order_by": "order_ts DESC"}}},
+            {"id": "by_status", "position": {"x": 2, "y": 0}, "data": {
+              "label": "By status", "componentId": "xf.pivot",
+              "properties": {"on": ["status"],
+                             "values": ["shipped", "pending", "returned", "cancelled"],
+                             "using": "sum(amount)",
+                             "group_by": ["customer_id"]}}},
+            {"id": "sink", "position": {"x": 3, "y": 0}, "data": {
+              "label": "Matrix", "componentId": "snk.file.parquet",
+              "properties": {"path": "{out}/by_status.parquet"}}}
+          ],
+          "edges": [
+            {"id": "e1", "source": "orders", "target": "newest"},
+            {"id": "e2", "source": "newest", "target": "by_status"},
+            {"id": "e3", "source": "by_status", "target": "sink"}
+          ]
+        }"#,
+        &out,
+    );
+
+    let plan = compile(&document).expect("compiles");
+    let report = run(&plan, &options()).expect("runs");
+
+    // One row per customer after the dedup, and the pivot keeps that shape.
+    let rows: Vec<Option<u64>> = report.stages.iter().map(|s| s.rows).collect();
+    assert_eq!(rows, [Some(12), Some(6), Some(6), Some(6)]);
+    assert!(out.join("by_status.parquet").is_file());
+}
+
+#[test]
+fn csv_out_to_json_and_back_in_round_trips() {
+    let Some(_) = duckdb_binary() else {
+        eprintln!("skipping: no DuckDB binary; run scripts/fetch-duckdb.ps1");
+        return;
+    };
+
+    let out = output_dir("json_round_trip");
+
+    // Write the orders out as JSON, then read that file back and write it again
+    // as Parquet. If the writer and the reader disagree about the shape of a
+    // JSON file, the second stage is where it shows.
+    let document = document_with_out(
+        r#"{
+          "formatVersion": 1,
+          "nodes": [
+            {"id": "orders", "position": {"x": 0, "y": 0}, "data": {
+              "label": "Orders", "componentId": "src.file.csv",
+              "properties": {"path": "samples/data/orders.csv"}}},
+            {"id": "as_json", "position": {"x": 1, "y": 0}, "data": {
+              "label": "As JSON", "componentId": "snk.file.json",
+              "properties": {"path": "{out}/orders.json"}}}
+          ],
+          "edges": [{"id": "e1", "source": "orders", "target": "as_json"}]
+        }"#,
+        &out,
+    );
+
+    let report = run(&compile(&document).expect("compiles"), &options()).expect("write runs");
+    assert_eq!(report.total_rows_written(), Some(12));
+
+    let back = document_with_out(
+        r#"{
+          "formatVersion": 1,
+          "nodes": [
+            {"id": "json_in", "position": {"x": 0, "y": 0}, "data": {
+              "label": "Orders JSON", "componentId": "src.file.json",
+              "properties": {"path": "{out}/orders.json"}}},
+            {"id": "sink", "position": {"x": 1, "y": 0}, "data": {
+              "label": "Parquet", "componentId": "snk.file.parquet",
+              "properties": {"path": "{out}/orders.parquet"}}}
+          ],
+          "edges": [{"id": "e1", "source": "json_in", "target": "sink"}]
+        }"#,
+        &out,
+    );
+
+    let report = run(&compile(&back).expect("compiles"), &options()).expect("read-back runs");
+
+    assert_eq!(
+        report.stages.iter().map(|s| s.rows).collect::<Vec<_>>(),
+        [Some(12), Some(12)],
+        "every row that was written came back"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Connectors that need an extension
+//
+// These are the tests the vendored tools/duckdb/extensions/ exists for. They
+// exercise the whole prelude — SET extension_directory, LOAD, the probe — as
+// well as the connector's own SQL. Excel and SQLite are the two families that
+// need no running server, so they stand in for the rest.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn an_excel_round_trip_loads_the_extension_and_moves_the_rows() {
+    let Some(_) = duckdb_binary() else {
+        eprintln!("skipping: no DuckDB binary; run scripts/fetch-duckdb.ps1");
+        return;
+    };
+
+    let out = output_dir("excel_round_trip");
+
+    let write = document_with_out(
+        r#"{
+          "formatVersion": 1,
+          "nodes": [
+            {"id": "orders", "position": {"x": 0, "y": 0}, "data": {
+              "label": "Orders", "componentId": "src.file.csv",
+              "properties": {"path": "samples/data/orders.csv"}}},
+            {"id": "book", "position": {"x": 1, "y": 0}, "data": {
+              "label": "Workbook", "componentId": "snk.file.excel",
+              "properties": {"path": "{out}/orders.xlsx", "sheet": "Orders"}}}
+          ],
+          "edges": [{"id": "e1", "source": "orders", "target": "book"}]
+        }"#,
+        &out,
+    );
+
+    let plan = compile(&write).expect("compiles");
+    assert_eq!(
+        plan.extensions(),
+        ["excel"],
+        "the sink declares its extension"
+    );
+
+    let report = run(&plan, &options()).expect("excel write runs");
+    assert_eq!(report.total_rows_written(), Some(12));
+    assert!(
+        report.script.contains("LOAD excel;"),
+        "the prelude should load excel:\n{}",
+        report.script
+    );
+
+    let read_back = document_with_out(
+        r#"{
+          "formatVersion": 1,
+          "nodes": [
+            {"id": "book", "position": {"x": 0, "y": 0}, "data": {
+              "label": "Workbook", "componentId": "src.file.excel",
+              "properties": {"path": "{out}/orders.xlsx", "sheet": "Orders"}}},
+            {"id": "sink", "position": {"x": 1, "y": 0}, "data": {
+              "label": "Parquet", "componentId": "snk.file.parquet",
+              "properties": {"path": "{out}/from_excel.parquet"}}}
+          ],
+          "edges": [{"id": "e1", "source": "book", "target": "sink"}]
+        }"#,
+        &out,
+    );
+
+    let report = run(&compile(&read_back).expect("compiles"), &options()).expect("excel read runs");
+
+    assert_eq!(
+        report.stages.iter().map(|s| s.rows).collect::<Vec<_>>(),
+        [Some(12), Some(12)],
+        "every row written to the workbook came back"
+    );
+}
+
+#[test]
+fn a_sqlite_round_trip_attaches_writes_and_reads_back() {
+    let Some(_) = duckdb_binary() else {
+        eprintln!("skipping: no DuckDB binary; run scripts/fetch-duckdb.ps1");
+        return;
+    };
+
+    let out = output_dir("sqlite_round_trip");
+
+    // A database sink has a connection string rather than a path, so nothing
+    // creates the directory for it the way it would for a file sink.
+    std::fs::create_dir_all(&out).expect("output directory");
+
+    let write = document_with_out(
+        r#"{
+          "formatVersion": 1,
+          "nodes": [
+            {"id": "orders", "position": {"x": 0, "y": 0}, "data": {
+              "label": "Orders", "componentId": "src.file.csv",
+              "properties": {"path": "samples/data/orders.csv"}}},
+            {"id": "shipped", "position": {"x": 1, "y": 0}, "data": {
+              "label": "Shipped", "componentId": "xf.filter",
+              "properties": {"predicate": "status = 'shipped'"}}},
+            {"id": "db", "position": {"x": 2, "y": 0}, "data": {
+              "label": "SQLite", "componentId": "snk.db.sqlite",
+              "properties": {"connection": "{out}/orders.db", "table": "shipped_orders"}}}
+          ],
+          "edges": [
+            {"id": "e1", "source": "orders", "target": "shipped"},
+            {"id": "e2", "source": "shipped", "target": "db"}
+          ]
+        }"#,
+        &out,
+    );
+
+    let plan = compile(&write).expect("compiles");
+    assert_eq!(plan.extensions(), ["sqlite"]);
+
+    let report = run(&plan, &options()).expect("sqlite write runs");
+    assert_eq!(
+        report.stages.iter().map(|s| s.rows).collect::<Vec<_>>(),
+        [Some(12), Some(7), Some(7)]
+    );
+    assert!(
+        out.join("orders.db").is_file(),
+        "no database file was created"
+    );
+
+    // Read it back through the source component and append into a *second*
+    // table, so both write modes are exercised.
+    //
+    // Deliberately not the same table: every stage is a lazy view, so a
+    // pipeline that appends to the table it reads from would re-read its own
+    // writes when the count probe evaluated the view, and report 14.
+    let read_back = document_with_out(
+        r#"{
+          "formatVersion": 1,
+          "nodes": [
+            {"id": "db", "position": {"x": 0, "y": 0}, "data": {
+              "label": "SQLite", "componentId": "src.db.sqlite",
+              "properties": {"connection": "{out}/orders.db", "table": "shipped_orders"}}},
+            {"id": "again", "position": {"x": 1, "y": 0}, "data": {
+              "label": "Append", "componentId": "snk.db.sqlite",
+              "properties": {"connection": "{out}/orders.db", "table": "archive",
+                             "mode": "append"}}}
+          ],
+          "edges": [{"id": "e1", "source": "db", "target": "again"}]
+        }"#,
+        &out,
+    );
+
+    let report =
+        run(&compile(&read_back).expect("compiles"), &options()).expect("sqlite read runs");
+
+    assert_eq!(
+        report.stages.iter().map(|s| s.rows).collect::<Vec<_>>(),
+        [Some(7), Some(7)],
+        "the seven rows written came back out"
+    );
+
+    assert!(
+        out.join("orders.db").is_file(),
+        "the database should still be there after the append"
+    );
+}
+
+#[test]
+fn a_missing_extension_is_reported_as_a_missing_extension() {
+    // Point the executor at an empty extension directory. The prelude then
+    // fails before any stage runs, and the error must say so rather than
+    // blaming the first stage, which has done nothing wrong.
+    let Some(_) = duckdb_binary() else {
+        eprintln!("skipping: no DuckDB binary; run scripts/fetch-duckdb.ps1");
+        return;
+    };
+
+    let out = output_dir("missing_extension");
+    std::fs::create_dir_all(&out).expect("output directory");
+
+    let document = document_with_out(
+        r#"{
+          "formatVersion": 1,
+          "nodes": [
+            {"id": "orders", "position": {"x": 0, "y": 0}, "data": {
+              "label": "Orders", "componentId": "src.file.csv",
+              "properties": {"path": "samples/data/orders.csv"}}},
+            {"id": "book", "position": {"x": 1, "y": 0}, "data": {
+              "label": "Workbook", "componentId": "snk.file.excel",
+              "properties": {"path": "{out}/orders.xlsx"}}}
+          ],
+          "edges": [{"id": "e1", "source": "orders", "target": "book"}]
+        }"#,
+        &out,
+    );
+
+    let empty = out.join("no-extensions-here");
+    std::fs::create_dir_all(&empty).expect("empty extension directory");
+
+    let error = run(
+        &compile(&document).expect("compiles"),
+        &RunOptions {
+            extension_dir: Some(empty),
+            ..options()
+        },
+    )
+    .expect_err("an empty extension directory should fail the run");
+
+    assert!(
+        matches!(error, ExecError::ExtensionLoadFailed { .. }),
+        "expected ExtensionLoadFailed, got: {error}"
+    );
+    assert!(
+        error.to_string().contains("excel"),
+        "the message should name the extension: {error}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Parameters and contexts
+//
+// Phase 5's goal is that one unedited document runs in more than one place.
+// These run the committed sample the way the CLI does — resolve, then compile,
+// then execute — because resolution is a separate step and the seam between it
+// and compilation is where a mistake would hide.
+// ---------------------------------------------------------------------------
+
+/// The committed sample that takes its output directory from a context.
+fn by_context() -> PipelineDoc {
+    let text =
+        std::fs::read_to_string(repo_root().join("samples/pipelines/orders_by_context.json"))
+            .expect("sample pipeline is committed");
+
+    PipelineDoc::from_json(&text).expect("sample parses")
+}
+
+/// A context whose only variable is where to write.
+fn writing_to(directory: &Path) -> etl_duckdb_engine::Context {
+    etl_duckdb_engine::Context {
+        description: None,
+        variables: [(
+            "out_dir".to_string(),
+            directory.to_string_lossy().replace('\\', "/"),
+        )]
+        .into(),
+        extra: Default::default(),
+    }
+}
+
+#[test]
+fn the_committed_contexts_sample_still_defines_the_two_it_documents() {
+    // The sample file is what someone copies to make their own; if it stops
+    // parsing or loses a context, the documentation around it is wrong.
+    let contexts = Contexts::load(&repo_root().join("samples/contexts.json")).expect("loads");
+
+    assert_eq!(contexts.names(), ["dev", "prod"]);
+    assert_eq!(contexts.active.as_deref(), Some("dev"));
+    assert!(contexts.contexts["dev"].variables.contains_key("out_dir"));
+    assert!(contexts.contexts["prod"].variables.contains_key("out_dir"));
+}
+
+#[test]
+fn the_same_document_runs_in_two_contexts_and_lands_in_two_places() {
+    let Some(_) = duckdb_binary() else {
+        eprintln!("skipping: no DuckDB binary; run scripts/fetch-duckdb.ps1");
+        return;
+    };
+
+    let out = output_dir("two_contexts");
+    let document = by_context();
+
+    // Two contexts differing in one variable, pointing at this test's own
+    // directories rather than the sample's, so nothing is shared.
+    let contexts = Contexts {
+        format_version: 1,
+        active: Some("dev".to_string()),
+        contexts: [
+            ("dev".to_string(), writing_to(&out.join("dev"))),
+            ("prod".to_string(), writing_to(&out.join("prod"))),
+        ]
+        .into(),
+        extra: Default::default(),
+    };
+
+    let mut counts = Vec::new();
+
+    for name in ["dev", "prod"] {
+        let resolver = contexts
+            .apply(Resolver::new(repo_root()), Some(name))
+            .expect("context applies");
+
+        let resolved = etl_duckdb_engine::resolve(&document, &resolver).expect("resolves");
+        let plan = compile(&resolved.document).expect("compiles");
+        let report = run(&plan, &options()).expect("runs");
+
+        counts.push(report.stages.iter().map(|s| s.rows).collect::<Vec<_>>());
+    }
+
+    // Identical work, both times: that is what "the same pipeline" means.
+    assert_eq!(counts[0], counts[1], "the two contexts did different work");
+    assert_eq!(counts[0], [Some(12), Some(6), Some(6)]);
+
+    // In two different places: that is what the context changed.
+    assert!(out.join("dev").join("large_orders.parquet").is_file());
+    assert!(out.join("prod").join("large_orders.parquet").is_file());
+}
+
+#[test]
+fn the_workspace_built_in_makes_a_pipeline_portable() {
+    // `${workspace}` is what lets the sample name its input without hard-coding
+    // the checkout directory. Resolve it against the repo root and the source
+    // path must come out absolute and real.
+    let Some(_) = duckdb_binary() else {
+        eprintln!("skipping: no DuckDB binary; run scripts/fetch-duckdb.ps1");
+        return;
+    };
+
+    let out = output_dir("workspace_builtin");
+    let resolver =
+        Resolver::new(repo_root()).bind("out_dir", &out.to_string_lossy().replace('\\', "/"));
+
+    let resolved = etl_duckdb_engine::resolve(&by_context(), &resolver).expect("resolves");
+    let source = resolved.document.nodes[0].data.properties.as_ref().unwrap()["path"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    assert!(
+        !source.contains("${"),
+        "nothing should be left to expand: {source}"
+    );
+    assert!(Path::new(&source).is_file(), "{source} should exist");
+
+    let plan = compile(&resolved.document).expect("compiles");
+    assert_eq!(
+        run(&plan, &options()).expect("runs").total_rows_written(),
+        Some(6)
+    );
+}
+
+#[test]
+fn a_parameter_supplied_on_the_command_line_changes_the_run() {
+    let Some(_) = duckdb_binary() else {
+        eprintln!("skipping: no DuckDB binary; run scripts/fetch-duckdb.ps1");
+        return;
+    };
+
+    let out = output_dir("param_override");
+    let document = by_context();
+
+    let resolver = |floor: &str| {
+        Resolver::new(repo_root())
+            .bind("out_dir", &out.to_string_lossy().replace('\\', "/"))
+            .bind("floor", floor)
+    };
+
+    // The declared default is 100, which keeps 6 of the 12 orders.
+    let rows = |floor: &str| {
+        let resolved = etl_duckdb_engine::resolve(&document, &resolver(floor)).expect("resolves");
+        let plan = compile(&resolved.document).expect("compiles");
+
+        run(&plan, &options()).expect("runs").total_rows_written()
+    };
+
+    assert_eq!(rows("0"), Some(12), "nothing is filtered out at zero");
+    assert_eq!(rows("300"), Some(3));
+}
+
+#[test]
+fn the_parameterised_sample_from_phase_two_finally_runs() {
+    // `samples/pipelines/csv_to_parquet.json` has been unrunnable since Phase 2
+    // because it uses ${workspace} and ${since}. This is the test that says it
+    // is not any more.
+    let Some(_) = duckdb_binary() else {
+        eprintln!("skipping: no DuckDB binary; run scripts/fetch-duckdb.ps1");
+        return;
+    };
+
+    let out = output_dir("csv_to_parquet_params");
+    let text = std::fs::read_to_string(repo_root().join("samples/pipelines/csv_to_parquet.json"))
+        .expect("sample is committed");
+
+    let mut document = PipelineDoc::from_json(&text).expect("sample parses");
+
+    // Redirect the sink into this test's directory; everything else, including
+    // both ${...} references, is left exactly as committed.
+    for node in &mut document.nodes {
+        if node.data.component_id.as_deref() == Some("snk.file.parquet") {
+            node.data.properties.as_mut().unwrap()["path"] = serde_json::json!(format!(
+                "{}/orders.parquet",
+                out.to_string_lossy().replace('\\', "/")
+            ));
+        }
+    }
+
+    let resolved =
+        etl_duckdb_engine::resolve(&document, &Resolver::new(repo_root())).expect("resolves");
+    let report = run(&compile(&resolved.document).expect("compiles"), &options()).expect("runs");
+
+    // The declared default of 2026-01-01 keeps 7 of the 12 orders.
+    assert_eq!(
+        report.stages.iter().map(|s| s.rows).collect::<Vec<_>>(),
+        [Some(12), Some(7), Some(7)]
+    );
+    assert_eq!(resolved.used["since"], "2026-01-01");
+}
+
+#[test]
+fn an_unresolved_parameter_is_caught_before_anything_touches_the_disk() {
+    // No skip guard: resolution never spawns DuckDB, which is the property
+    // being relied on here.
+    let error = etl_duckdb_engine::resolve(&by_context(), &Resolver::new(repo_root()))
+        .expect_err("out_dir is required and nothing provides it");
+
+    assert!(
+        matches!(&error, etl_duckdb_engine::ParamError::MissingRequired { name } if name == "out_dir"),
+        "{error:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Materialisation, against real data
+//
+// The golden tests pin the statement shapes. These prove the three modes agree
+// on the answer, which is the property that matters: materialising is a choice
+// about how the work is done, never about what comes out.
+// ---------------------------------------------------------------------------
+
+/// The orders pipeline with its middle stage set to one materialisation mode.
+fn filtered_with_mode(mode: &str, out: &Path) -> PipelineDoc {
+    let json = r#"{
+      "formatVersion": 1,
+      "nodes": [
+        {"id": "orders", "position": {"x": 0, "y": 0}, "data": {
+          "label": "Orders", "componentId": "src.file.csv",
+          "properties": {"path": "samples/data/orders.csv"}}},
+        {"id": "shipped", "position": {"x": 1, "y": 0}, "data": {
+          "label": "Shipped", "componentId": "xf.filter",
+          "materialize": "MODE",
+          "properties": {"predicate": "status = 'shipped'"}}},
+        {"id": "sink", "position": {"x": 2, "y": 0}, "data": {
+          "label": "Out", "componentId": "snk.file.parquet",
+          "properties": {"path": "{out}/MODE.parquet"}}}
+      ],
+      "edges": [
+        {"id": "e1", "source": "orders", "target": "shipped"},
+        {"id": "e2", "source": "shipped", "target": "sink"}
+      ]
+    }"#
+    .replace("MODE", mode);
+
+    document_with_out(&json, out)
+}
+
+#[test]
+fn every_materialisation_mode_gives_the_same_answer() {
+    let Some(_) = duckdb_binary() else {
+        eprintln!("skipping: no DuckDB binary; run scripts/fetch-duckdb.ps1");
+        return;
+    };
+
+    let out = output_dir("materialize_modes");
+
+    for mode in ["auto", "view", "memory", "disk"] {
+        let plan = compile(&filtered_with_mode(mode, &out)).expect("compiles");
+        let report = run(&plan, &options()).expect("runs");
+
+        assert_eq!(
+            report.stages.iter().map(|s| s.rows).collect::<Vec<_>>(),
+            [Some(12), Some(7), Some(7)],
+            "mode {mode} disagreed"
+        );
+        assert!(out.join(format!("{mode}.parquet")).is_file(), "mode {mode}");
+    }
+}
+
+#[test]
+fn a_disk_stage_writes_a_spill_reads_it_back_and_clears_it_up() {
+    let Some(_) = duckdb_binary() else {
+        eprintln!("skipping: no DuckDB binary; run scripts/fetch-duckdb.ps1");
+        return;
+    };
+
+    let out = output_dir("materialize_spill");
+    let plan = compile(&filtered_with_mode("disk", &out)).expect("compiles");
+
+    assert_eq!(plan.spills(), [".etl/tmp/shipped.parquet"]);
+
+    // The spill is relative to the working directory, which is the repo root.
+    let spill = repo_root().join(".etl/tmp/shipped.parquet");
+    let _ = std::fs::remove_file(&spill);
+
+    let report = run(&plan, &options()).expect("runs");
+
+    // The rows came back through the Parquet file, not out of a lazy view.
+    assert_eq!(
+        report.stages.iter().map(|s| s.rows).collect::<Vec<_>>(),
+        [Some(12), Some(7), Some(7)]
+    );
+    assert!(
+        report
+            .script
+            .contains("COPY (SELECT * FROM \"orders\" WHERE status = 'shipped') TO"),
+        "the spill should be written by a COPY:\n{}",
+        report.script
+    );
+
+    assert_eq!(report.spilled, 1, "one spill file should have been cleared");
+    assert!(
+        !spill.exists(),
+        "the spill file should not be left behind: {}",
+        spill.display()
+    );
+}
+
+#[test]
+fn a_view_stage_leaves_no_spill_behind_to_clear() {
+    let Some(_) = duckdb_binary() else {
+        eprintln!("skipping: no DuckDB binary; run scripts/fetch-duckdb.ps1");
+        return;
+    };
+
+    let out = output_dir("materialize_no_spill");
+    let plan = compile(&filtered_with_mode("view", &out)).expect("compiles");
+
+    assert!(plan.spills().is_empty());
+    assert_eq!(run(&plan, &options()).expect("runs").spilled, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Secrets, against real data
+//
+// The property being tested is the awkward one: the true value has to reach
+// DuckDB, because DuckDB needs the real password, while never reaching
+// anything a person reads. Proving both halves at once needs a real run.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_secret_reaches_duckdb_but_not_the_report() {
+    let Some(_) = duckdb_binary() else {
+        eprintln!("skipping: no DuckDB binary; run scripts/fetch-duckdb.ps1");
+        return;
+    };
+
+    let out = output_dir("secret_redaction");
+    let workspace = out.join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+
+    let mut store = etl_secrets::SecretStore::open(&workspace).expect("opens");
+    store
+        .set("target_status", "shipped", None)
+        .expect("encrypts");
+
+    let document = document_with_out(
+        r#"{
+          "formatVersion": 1,
+          "nodes": [
+            {"id": "orders", "position": {"x": 0, "y": 0}, "data": {
+              "label": "Orders", "componentId": "src.file.csv",
+              "properties": {"path": "samples/data/orders.csv"}}},
+            {"id": "picked", "position": {"x": 1, "y": 0}, "data": {
+              "label": "Picked", "componentId": "xf.filter",
+              "properties": {"predicate": "status = '${SECRET:target_status}'"}}},
+            {"id": "sink", "position": {"x": 2, "y": 0}, "data": {
+              "label": "Out", "componentId": "snk.file.parquet",
+              "properties": {"path": "{out}/picked.parquet"}}}
+          ],
+          "edges": [
+            {"id": "e1", "source": "orders", "target": "picked"},
+            {"id": "e2", "source": "picked", "target": "sink"}
+          ]
+        }"#,
+        &out,
+    );
+
+    let resolver = Resolver::new(repo_root()).secrets(store);
+    let resolved = etl_duckdb_engine::resolve(&document, &resolver).expect("resolves");
+    let plan = compile(&resolved.document).expect("compiles");
+
+    let report = run(
+        &plan,
+        &RunOptions {
+            redact: resolved.secret_values(),
+            ..options()
+        },
+    )
+    .expect("runs");
+
+    // The real value reached DuckDB: seven orders have status 'shipped', and
+    // no other value would give that number.
+    assert_eq!(
+        report.stages.iter().map(|s| s.rows).collect::<Vec<_>>(),
+        [Some(12), Some(7), Some(7)]
+    );
+
+    // And it is nowhere in what the report carries.
+    assert!(
+        !report.script.contains("shipped"),
+        "the secret is in the reported script:\n{}",
+        report.script
+    );
+    assert!(
+        report.script.contains("status = '********'"),
+        "the secret should be masked, not removed:\n{}",
+        report.script
+    );
+}
+
+#[test]
+fn a_secret_is_masked_in_duckdbs_own_error_output() {
+    // The real leak path: a failed ATTACH quotes the whole connection string
+    // back, password and all, and that text goes straight into ExecError.
+    let Some(_) = duckdb_binary() else {
+        eprintln!("skipping: no DuckDB binary; run scripts/fetch-duckdb.ps1");
+        return;
+    };
+
+    let out = output_dir("secret_error_redaction");
+    let workspace = out.join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+
+    let mut store = etl_secrets::SecretStore::open(&workspace).expect("opens");
+    store
+        .set("pg_password", "correct-horse-battery", None)
+        .expect("encrypts");
+
+    let document = document_with_out(
+        r#"{
+          "formatVersion": 1,
+          "nodes": [
+            {"id": "orders", "position": {"x": 0, "y": 0}, "data": {
+              "label": "Orders", "componentId": "src.db.postgres",
+              "properties": {
+                "connection": "dbname=a host=127.0.0.1 port=1 password=${SECRET:pg_password}",
+                "table": "orders"}}},
+            {"id": "sink", "position": {"x": 1, "y": 0}, "data": {
+              "label": "Out", "componentId": "snk.file.parquet",
+              "properties": {"path": "{out}/never.parquet"}}}
+          ],
+          "edges": [{"id": "e1", "source": "orders", "target": "sink"}]
+        }"#,
+        &out,
+    );
+
+    let resolver = Resolver::new(repo_root()).secrets(store);
+    let resolved = etl_duckdb_engine::resolve(&document, &resolver).expect("resolves");
+    let plan = compile(&resolved.document).expect("compiles");
+
+    let error = run(
+        &plan,
+        &RunOptions {
+            redact: resolved.secret_values(),
+            ..options()
+        },
+    )
+    .expect_err("there is no server on port 1");
+
+    let message = error.to_string();
+
+    assert!(
+        !message.contains("correct-horse-battery"),
+        "the password is in the error:\n{message}"
+    );
+    assert!(
+        message.contains("********"),
+        "the error should carry the mask, proving it went through redaction:\n{message}"
+    );
+}
+
+#[test]
+fn a_pipeline_that_needs_a_secret_will_not_run_without_the_key() {
+    // Fails closed, and says which secret it wanted rather than reporting an
+    // unresolved parameter.
+    let out = output_dir("secret_no_key");
+
+    let document = document_with_out(
+        r#"{
+          "formatVersion": 1,
+          "nodes": [
+            {"id": "orders", "position": {"x": 0, "y": 0}, "data": {
+              "label": "Orders", "componentId": "src.file.csv",
+              "properties": {"path": "${SECRET:somewhere}/orders.csv"}}}
+          ],
+          "edges": []
+        }"#,
+        &out,
+    );
+
+    let error = etl_duckdb_engine::resolve(&document, &Resolver::new(repo_root()))
+        .expect_err("there is no store");
+
+    assert!(
+        matches!(&error, etl_duckdb_engine::ParamError::NoSecretStore { name, .. }
+            if name == "somewhere"),
+        "{error:?}"
+    );
+}

@@ -1,0 +1,84 @@
+{
+  "formatVersion": 1,
+  "name": "orders_by_context",
+  "nodes": [
+    {
+      "id": "read_orders",
+      "type": "source",
+      "position": {
+        "x": 0.0,
+        "y": 0.0
+      },
+      "data": {
+        "label": "Orders CSV",
+        "componentId": "src.file.csv",
+        "properties": {
+          "path": "${workspace}/samples/data/orders.csv",
+          "header": true
+        },
+        "alias": "orders"
+      }
+    },
+    {
+      "id": "large_orders",
+      "type": "transform",
+      "position": {
+        "x": 280.0,
+        "y": 0.0
+      },
+      "data": {
+        "label": "Large orders",
+        "componentId": "xf.filter",
+        "properties": {
+          "predicate": "amount >= ${floor}"
+        }
+      }
+    },
+    {
+      "id": "write_parquet",
+      "type": "sink",
+      "position": {
+        "x": 560.0,
+        "y": 0.0
+      },
+      "data": {
+        "label": "Large orders Parquet",
+        "componentId": "snk.file.parquet",
+        "properties": {
+          "path": "${out_dir}/large_orders.parquet",
+          "mode": "overwrite",
+          "compression": "zstd"
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "source": "read_orders",
+      "target": "large_orders",
+      "sourceHandle": "main",
+      "targetHandle": "in"
+    },
+    {
+      "id": "e2",
+      "source": "large_orders",
+      "target": "write_parquet",
+      "sourceHandle": "main",
+      "targetHandle": "in"
+    }
+  ],
+  "parameters": {
+    "floor": {
+      "type": "number",
+      "required": true,
+      "default": 100,
+      "description": "Only orders at or above this amount are kept."
+    },
+    "out_dir": {
+      "type": "string",
+      "required": true,
+      "description": "Where to write. Supplied by the active context, so the same pipeline lands in a different place in dev and in prod."
+    }
+  }
+}

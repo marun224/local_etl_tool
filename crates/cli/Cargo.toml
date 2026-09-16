@@ -1,0 +1,18 @@
+[package]
+name = "etl-cli"
+description = "Command-line runner for pipelines."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "etl"
+path = "src/main.rs"
+
+[dependencies]
+etl-duckdb-engine.workspace = true
+etl-metadata.workspace = true
+etl-secrets.workspace = true
+clap.workspace = true
+serde_json.workspace = true
