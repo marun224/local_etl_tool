@@ -3,24 +3,28 @@
 **State only.** Design lives in [PLAN_duckle_parity.md](PLAN_duckle_parity.md). Read this file
 first when picking the project back up.
 
-> ## ⏸ Paused 2026-09-16, after Phase 7d
+> ## ⏸ Paused 2026-09-16, after Phase 8b
 >
-> Stopped at a clean boundary — gate green, nothing mid-edit. **Phase 7 is complete**, 7a
-> through 7d. There is a desktop studio you can build, run, inspect and debug a pipeline in.
+> Stopped at a clean boundary — gate green, nothing mid-edit. **Phase 7 is complete** (a
+> desktop studio you can build, run and debug a pipeline in) and **Phase 8 is half done**:
+> 8a gave sources watermark incremental loading, 8b gave every run a record and the workspace
+> a lineage command.
 >
 > Phases 0–5 are dated 2026-09-15 because that is when the work was done; the clock rolled
 > past midnight while pausing, which is the only reason those lines read a day later.
 >
-> **To resume:** read this file, then Phase 8 in the plan — the headless runner: `serve`, a
-> scheduler, RBAC, and watermark incremental loads. It is the first phase since 0 with no GUI
-> in it, and the first that needs a story for state that outlives a run.
+> **To resume:** read this file, then Phase 8 in the plan, then start **8c** — the scheduler:
+> interval and cron in UTC, and file-watch by polling `mtime`. Both dependency questions it
+> used to carry are settled (Settled decisions 6 and 7), so it needs nothing new. The one
+> thing it has to face rather than assume is concurrency: `crates/state` says out loud that it
+> has no locking and that single-writer is the assumption "until a scheduler exists to break
+> it". 8c is that scheduler.
 >
 > ```powershell
 > cd D:\workspace\ETL_Local_Tool
 > cargo test --workspace                                            # expect 378 passing
 > npm --prefix frontend run test                                    # expect 114 passing
 > npm --prefix frontend run typecheck                               # expect clean
-> npm --prefix frontend run test                                    # expect 80 passing
 > npm --prefix frontend run build                                   # expect clean
 > .\target\debug\etl.exe components                                 # expect 54
 > .\target\debug\etl.exe run samples\pipelines\orders_enriched.json # expect 12/5/7/6/6
@@ -28,8 +32,8 @@ first when picking the project back up.
 > .\target\debug\etl.exe run samples\pipelines\orders_guarded.json  # expect 12 through, branch taken
 > ```
 >
-> The phase's own acceptance criterion, which should print the same 12/6/6 twice into two
-> different directories:
+> Phase 7's acceptance criterion, which should print the same 12/6/6 twice into two different
+> directories:
 >
 > ```powershell
 > $c = "--contexts", "samples\contexts.json"
@@ -37,13 +41,33 @@ first when picking the project back up.
 > .\target\debug\etl.exe run samples\pipelines\orders_by_context.json @c --context prod
 > ```
 >
+> Phase 8a's, which is the whole point of a watermark — **run it twice**:
+>
+> ```powershell
+> .\target\debug\etl.exe run samples\pipelines\orders_incremental.json  # 12 rows, mark recorded
+> .\target\debug\etl.exe run samples\pipelines\orders_incremental.json  # 0 rows, nothing new
+> .\target\debug\etl.exe state list
+> ```
+>
+> And 8b's:
+>
+> ```powershell
+> .\target\debug\etl.exe runs list --limit 5
+> .\target\debug\etl.exe lineage samples\pipelines\orders_checked.json
+> ```
+>
 > All of these were run verbatim at the moment of pausing and printed exactly what is written
 > above. If any of them disagrees with this file later, trust the commands and fix the file.
 >
-> **State of the tree:** clean, committed and pushed — 7 commits on `main` at
-> `github.com/marun224/local_etl_tool` (private), the last being Phase 7c. The branch was
-> renamed from `master` on 2026-09-16, since the remote was empty and nothing depended on
-> the old name.
+> **`.etl/` was reset before those runs**, so the incremental sample really did start from
+> nothing. It is git-ignored local state; a fresh clone starts empty anyway, and
+> `etl state forget` and `etl runs prune` are how you get back here deliberately.
+>
+> **State of the tree:** clean and committed — 12 commits on `main`, the last being Phase 8b.
+> **Three are unpushed.** `origin/main` at `github.com/marun224/local_etl_tool` (private) is at
+> `63d50bf`, Phase 8a's state store; the three after it — 8a's watermark loading, the Phase 8
+> decisions, and 8b — exist only on this machine. Pushing is the first thing to do on
+> resuming, or before if this machine is not the only copy that matters.
 >
 > **Phases 0–5 are one commit, not six.** The phases happened on the dates recorded below;
 > the commits did not exist, and dating them after the fact would have git assert a history
