@@ -155,7 +155,16 @@ pre {
   color: var(--muted);
 }
 
+/* A palette entry is a button, so it is reachable from a keyboard, but it must
+   not look like one. */
 .palette-item {
+  width: 100%;
+  background: none;
+  border: 0;
+  border-radius: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -497,4 +506,113 @@ pre.sql {
   border: 1px solid var(--line);
   border-radius: 6px;
   padding: 12px;
+}
+
+/* --------------------------------------------------------------------- */
+/* Generated property forms (7c)                                          */
+/*                                                                        */
+/* Nine controls, one per PropertyType, and no per-component styling —     */
+/* the same reason the panel itself has no per-component React.           */
+/* --------------------------------------------------------------------- */
+
+.inspector input,
+.inspector select,
+.inspector textarea {
+  width: 100%;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 4px 6px;
+  font: inherit;
+  font-size: 12px;
+}
+
+.inspector input:focus,
+.inspector select:focus,
+.inspector textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.inspector textarea.code,
+.inspector input.code {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 11.5px;
+}
+
+.inspector textarea.code {
+  resize: vertical;
+  min-height: 46px;
+}
+
+/* A checkbox that stretched to the panel width would be absurd. */
+.inspector input.check {
+  width: auto;
+}
+
+.row-field {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.field.is-missing input,
+.field.is-missing textarea,
+.field.is-missing select {
+  border-color: var(--error);
+}
+
+.help {
+  margin: 3px 0 0;
+  color: var(--muted);
+  font-size: 10.5px;
+  line-height: 1.35;
+}
+
+/* A value that is only there because the spec says so reads the same as one
+   somebody chose, and the difference matters when working out what a run did. */
+.default-tag {
+  margin-left: 5px;
+  padding: 0 4px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  color: var(--muted);
+  font-size: 9px;
+  font-style: normal;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.row {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.row input.key {
+  flex: 0 0 40%;
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+button.tiny {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 3px 7px;
+  border-radius: 5px;
+  font-size: 11px;
+  line-height: 1;
+}
+
+button.tiny.wide {
+  width: 100%;
+  color: var(--muted);
 }

@@ -28,7 +28,13 @@ function Glyph({ name }: { name: string | undefined }) {
   return <Icon size={14} strokeWidth={2} aria-hidden />;
 }
 
-export function Palette({ manifest }: { manifest: Manifest | null }) {
+export interface PaletteProps {
+  manifest: Manifest | null;
+  /** Add this component without dragging. See the note on the click handler. */
+  onAdd: (componentId: string) => void;
+}
+
+export function Palette({ manifest, onAdd }: PaletteProps) {
   const [search, setSearch] = useState("");
 
   const groups = useMemo(() => {
@@ -78,11 +84,17 @@ export function Palette({ manifest }: { manifest: Manifest | null }) {
           <h3>{TITLES[namespace]}</h3>
 
           {list.map((spec) => (
-            <div
+            <button
               key={spec.id}
+              type="button"
               className={`palette-item palette-${namespace}`}
               draggable
               title={spec.description ?? spec.id}
+              // Dragging is the obvious gesture, but it must not be the only
+              // one: it is unreachable from a keyboard, and there are places a
+              // webview will not start an HTML5 drag at all. Clicking drops the
+              // node in the middle of the canvas instead.
+              onClick={() => onAdd(spec.id)}
               onDragStart={(event) => {
                 // The component id is all the canvas needs; it looks the rest
                 // up in the same manifest.
@@ -97,7 +109,7 @@ export function Palette({ manifest }: { manifest: Manifest | null }) {
                   ext
                 </span>
               )}
-            </div>
+            </button>
           ))}
         </section>
       ))}

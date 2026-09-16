@@ -478,6 +478,43 @@ That file carries the command to regenerate its list.
 **Not in 7b:** the property panel is 7c's — the inspector shows a node's values read-only until
 then — and the run view is 7d's. i18next and Vega remain uninstalled.
 
+**7c done 2026-09-16.** `Inspector.tsx` holds nine controls, one per `PropertyType`, and no
+knowledge of any component: a spec it has never seen gets a working form. The node's own fields —
+name, label, alias, materialize, disabled — sit above the properties, because they are how a node
+is *run* rather than what its component does and every component has them.
+
+Two rules run through it, both now tested:
+
+- **Absent and empty are different.** A property the document does not hold takes the spec's
+  default; one set to `""` is an empty string the engine complains about by name. So clearing a
+  field *removes the key* rather than writing a blank, which is what makes "leave it unset and
+  the default applies" work as written. The panel also marks which values are only there because
+  the spec says so — a defaulted `true` reads identically to a chosen one, and the difference
+  matters when working out what a run did.
+- **A typo is not a value.** `fromText` returns `undefined` rather than `NaN` for a number that
+  will not parse, because `NaN` serialises to `null` and would turn a slip into something the
+  engine has to interpret. An integer field refuses `1.5` instead of rounding it: silently
+  changing a number someone typed is worse than ignoring it.
+
+Renaming a node moves its edges with it, since the id is the relation name in the generated SQL
+and what every edge refers to. It refuses a duplicate, a blank, and the reserved `__rejected`
+suffix, and says which — committed on blur rather than per keystroke, so a half-typed name is not
+checked against a collision.
+
+**Clicking a palette entry adds the node too.** Dragging is the obvious gesture but must not be
+the only one: it is unreachable from a keyboard, and a webview will not always start an HTML5
+drag — which is exactly what happened when this was driven with synthetic mouse input, and is a
+fair proxy for the people who will hit it for other reasons.
+
+**Verified by rendering, not by screenshot.** 25 tests hand the panel a made-up component using
+all nine property types and check what comes out: the control chosen for each type, what editing
+writes, what is marked required, what is marked default. A screenshot would show one component's
+form on one day; these keep showing that the mapping holds. jsdom and Testing Library arrive with
+them.
+
+**Not in 7c:** per-stage policy (`retryAttempts` and the rest) has no panel yet — it is 6b's
+feature and belongs with the run view in 7d, where a retry is something you watch happen.
+
 ### Phase 8 — Headless runner: serve, scheduler, RBAC, incremental
 
 **Goal.** Production execution without the desktop app.

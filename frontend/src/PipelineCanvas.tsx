@@ -62,6 +62,22 @@ export function PipelineCanvas(props: CanvasProps) {
   );
 }
 
+/**
+ * Where a click-to-add node should land.
+ *
+ * Laid out left to right in the order they were added, so a pipeline built by
+ * clicking reads the way a pipeline built by dragging does rather than piling
+ * everything on one spot.
+ */
+export function nextPosition(count: number): { x: number; y: number } {
+  const perRow = 4;
+
+  return {
+    x: (count % perRow) * 220,
+    y: Math.floor(count / perRow) * 130,
+  };
+}
+
 function Canvas({
   document,
   specs,

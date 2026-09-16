@@ -3,23 +3,23 @@
 **State only.** Design lives in [PLAN_duckle_parity.md](PLAN_duckle_parity.md). Read this file
 first when picking the project back up.
 
-> ## ⏸ Paused 2026-09-16, after Phase 7b
+> ## ⏸ Paused 2026-09-16, after Phase 7c
 >
-> Stopped at a clean boundary — gate green, nothing mid-edit. **Phase 7b is complete.**
+> Stopped at a clean boundary — gate green, nothing mid-edit. **Phase 7c is complete.**
 >
 > Phases 0–5 are dated 2026-09-15 because that is when the work was done; the clock rolled
 > past midnight while pausing, which is the only reason those lines read a day later.
 >
-> **To resume:** read this file, then Phase 7 in the plan, then start **7c** — the
-> manifest-driven property panel. The inspector is already in place and shows a node's values
-> read-only; 7c makes them editable, with forms generated from the property schema and no
-> per-component React.
+> **To resume:** read this file, then Phase 7 in the plan, then start **7d** — the run view:
+> per-node row counts and timings on the canvas, live data preview, and a Plan tab showing the
+> generated SQL. Rough versions of all three already exist in the bottom panel; 7d is making
+> them good, and is where per-stage policy (retry, continueOnFailure) finally gets a panel.
 >
 > ```powershell
 > cd D:\workspace\ETL_Local_Tool
 > cargo test --workspace                                            # expect 335 passing
 > npm --prefix frontend run typecheck                               # expect clean
-> npm --prefix frontend run test                                    # expect 36 passing
+> npm --prefix frontend run test                                    # expect 80 passing
 > npm --prefix frontend run build                                   # expect clean
 > .\target\debug\etl.exe components                                 # expect 54
 > .\target\debug\etl.exe run samples\pipelines\orders_enriched.json # expect 12/5/7/6/6
@@ -57,10 +57,9 @@ first when picking the project back up.
 
 ## Where things stand
 
-- **Next phase:** Phase 7c — the manifest-driven property panel: forms generated from each
-  component's property schema, with no per-component React. `propertiesOf()` in
-  `frontend/src/document.ts` already returns the schema for a node; the inspector renders it
-  read-only today.
+- **Next phase:** Phase 7d — the run view: per-node row counts and timings, live data preview,
+  and a Plan tab showing the generated SQL, Prism-highlighted. Rough versions exist already; 7d
+  makes them good and gives per-stage policy a panel.
 - **In progress:** nothing
 - **Blocked on:** nothing.
 
@@ -75,7 +74,7 @@ pass), `ctl.throttle` (nothing to throttle until Phase 10 has a row cursor).
 
 ## What works today
 
-Phases 0–6 are complete and 7a–7b are done, so there is a working CLI **and a canvas you can
+Phases 0–6 are complete and 7a–7c are done, so there is a working CLI **and a canvas you can
 build a pipeline on**. From the repo root:
 
 ```powershell
@@ -185,8 +184,23 @@ every key, every value, every ordering, including fields this version does not u
 formatting normalises once on first save and never moves again, so a canvas-written file
 re-saves with no diff. Tested against all five committed samples.
 
-**What 7b is not:** properties are read-only in the inspector until 7c, and the run view is
-7d's.
+**Properties are edited in a generated form.** Nine controls, one per property type, and no
+React written for any component — a spec the panel has never seen gets a working form. Required
+properties that are unanswered are marked; a value that is only there because the spec declares
+a default is labelled as such, because it otherwise reads identically to one somebody chose.
+
+Clearing a field **removes** the property rather than writing `""`, which is what makes "leave it
+unset and the default applies" true. A number that will not parse is not written at all, so a
+typo never becomes a value.
+
+Renaming a node moves its edges with it — the id is the relation name in the SQL — and refuses a
+duplicate, a blank, or the reserved `__rejected` suffix.
+
+Palette entries can be **clicked** as well as dragged. Dragging is unreachable from a keyboard,
+and a webview will not always start an HTML5 drag.
+
+**What 7c is not:** the run view is 7d's, and per-stage policy (retry, continueOnFailure) has no
+panel yet — it belongs with the run view, where a retry is something you watch happen.
 
 **Extensions are vendored**, not installed system-wide: `.\scripts\fetch-duckdb-extensions.ps1`
 puts them under `tools/duckdb/extensions/` and the executor points DuckDB at that directory. A
@@ -230,7 +244,7 @@ extension, which sits badly with Phase 9's vendored set) and DuckLake (a catalog
 needs its own design pass rather than a thirteenth copy of the ATTACH shape). Both are listed
 under Phase 4 in the plan, so both need a decision recorded there rather than quietly dropping.
 
-**Not built yet:** the property panel (7c), the run view (7d), the headless runner (Phase 8),
+**Not built yet:** the run view (7d), the headless runner (Phase 8),
 and the three control components deferred out of 6b — see the top of this file. i18next and Vega
 are in the plan's stack note and stay uninstalled until the thing that needs them exists;
 lucide-react arrived with the palette in 7b.

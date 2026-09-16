@@ -800,3 +800,32 @@ Four things worth remembering:
   present-but-undefined are different things to it; use a conditional spread.
 - **`it.each(files)` does not typecheck under this tsconfig.** A plain `for` loop around `it()`
   does, and reads no worse.
+
+## 2026-09-16 — Phase 7c: the generated property panel
+
+```powershell
+npm --prefix frontend install -D jsdom @testing-library/react @testing-library/dom
+npm --prefix frontend run typecheck
+npm --prefix frontend run test            # 80 passing, up from 36
+npm --prefix frontend run build
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace                    # 335 passing, unchanged
+```
+
+Four things worth remembering:
+
+- **A webview will not always start an HTML5 drag from synthetic mouse input.** Driving the
+  palette with real `mouse_event` calls moved the cursor and never produced a node, which is a
+  fair proxy for the people who will hit the same wall for other reasons. Clicking a palette
+  entry now adds the node too — and that is the better feature anyway, because dragging is
+  unreachable from a keyboard.
+- **Verify a generated form by rendering it, not by photographing it.** A screenshot shows one
+  component on one day. 25 tests hand the panel a made-up component using all nine property
+  types and check the control chosen for each, what editing writes, and what gets marked. That
+  is what actually pins "no per-component React".
+- **`environmentMatchGlobs` is gone in vitest 5.** A `@vitest-environment jsdom` pragma at the
+  top of the file that needs a DOM does the same job and says so where you can see it.
+- **Testing Library only unmounts automatically when vitest globals are on.** Without an explicit
+  `cleanup()` every render piles into the same document, and the second test onward finds two of
+  everything — which reads as a component bug for a good few minutes.

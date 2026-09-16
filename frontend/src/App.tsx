@@ -6,21 +6,22 @@
  * and it is the same shape the CLI reads. That is what makes the round-trip
  * promise structural rather than something to remember.
  *
- * Phase 7b. The property panel on the right is 7c's and shows a node's current
- * values read-only until then; the run view is 7d's.
+ * The run view is 7d's; everything else here is in place.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 
+import { Inspector } from "./Inspector";
 import { Palette } from "./Palette";
-import { PipelineCanvas } from "./PipelineCanvas";
+import { PipelineCanvas, nextPosition } from "./PipelineCanvas";
 import {
+  addNode,
   emptyDocument,
+  newNode,
   parseDocument,
   serializeDocument,
   specsById,
-  propertiesOf,
   type PipelineDoc,
 } from "./document";
 import {
@@ -224,7 +225,22 @@ export default function App() {
       </header>
 
       <div className="body">
-        <Palette manifest={manifest} />
+        <Palette
+          manifest={manifest}
+          onAdd={(componentId) => {
+            const spec = specs.get(componentId);
+            if (!spec) return;
+
+            const node = newNode(
+              spec,
+              nextPosition(document.nodes.length),
+              document.nodes.map((existing) => existing.id),
+            );
+
+            edit(addNode(document, node));
+            setSelected(node.id);
+          }}
+        />
 
         <PipelineCanvas
           document={document}
@@ -237,41 +253,14 @@ export default function App() {
           onRefused={setToast}
         />
 
-        <aside className="inspector">
-          <h3>Node</h3>
-          {selectedNode === null ? (
-            <p className="muted">Nothing selected.</p>
-          ) : (
-            <>
-              <div className="field">
-                <span>id</span>
-                <code>{selectedNode.id}</code>
-              </div>
-              <div className="field">
-                <span>component</span>
-                <code>{selectedNode.data.componentId}</code>
-              </div>
-
-              {/* 7c replaces this with generated inputs. Until then it shows
-                  what the node holds, so a loaded file is legible. */}
-              <h3>Properties</h3>
-              {propertiesOf(selectedNode, specs).length === 0 ? (
-                <p className="muted">This component takes none.</p>
-              ) : (
-                propertiesOf(selectedNode, specs).map((property) => (
-                  <div className="field" key={property.name}>
-                    <span title={property.help}>
-                      {property.label}
-                      {property.required && <b className="req">*</b>}
-                    </span>
-                    <code>{format(selectedNode.data.properties?.[property.name])}</code>
-                  </div>
-                ))
-              )}
-              <p className="muted small">Editing arrives in 7c.</p>
-            </>
-          )}
-        </aside>
+        <Inspector
+          document={document}
+          node={selectedNode}
+          specs={specs}
+          onChange={edit}
+          onRenamed={setSelected}
+          onError={setToast}
+        />
       </div>
 
       <section className="panel">
