@@ -327,6 +327,14 @@ pub struct Stage {
     pub control: Option<Control>,
     /// How this stage loads only what is new, for an incremental source.
     pub incremental: Option<StageIncremental>,
+    /// What this stage reads from or writes to *outside* the pipeline: a file
+    /// path, an S3 URI, a database table. `None` for a transform, whose inputs
+    /// are all other stages.
+    ///
+    /// Deliberately never the connection string. A table name is what lineage
+    /// is asking about, and a connection string is the one property most
+    /// likely to hold a password.
+    pub external: Option<String>,
 }
 
 /// An incremental source, resolved against what the workspace remembers.
@@ -1015,6 +1023,23 @@ fn build_stages(
                 )?),
             };
 
+            // Where this stage touches the world. Files name a path, databases
+            // name a table; a transform names nothing, because everything it
+            // reads is another stage.
+            let external = match kind {
+                StageKind::Source | StageKind::Sink => {
+                    let read = |key: &str| properties.get(key).and_then(JsonValue::as_str);
+
+                    read("path").map(str::to_string).or_else(|| {
+                        read("table").map(|table| match read("schema") {
+                            Some(schema) => format!("{schema}.{table}"),
+                            None => table.to_string(),
+                        })
+                    })
+                }
+                _ => None,
+            };
+
             let (sink_path, sink_mode) = if kind == StageKind::Sink {
                 let read = |key: &str| {
                     properties
@@ -1046,6 +1071,7 @@ fn build_stages(
                 materialize,
                 spill_path,
                 incremental,
+                external,
             })
         })
         .collect()

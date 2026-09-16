@@ -657,6 +657,47 @@ list|forget` is the surface for looking at and resetting what is remembered.
 untouched, but there is no panel for it. It belongs with a Phase 8 that has a runner to schedule,
 and is noted in the tracker rather than left to be discovered.
 
+**8b done 2026-09-16.** The runner, as Settled decision 5 shaped it: subcommands on `etl`, not
+a second binary. `etl run --json`, run history under `.etl/runs/`, `etl runs list|show|prune`,
+and `etl lineage`.
+
+- **The structured log and the history are one record.** What `--json` prints is byte-for-byte
+  what gets appended to history, so a CI job parsing stdout and a person running `etl runs show`
+  are reading the same thing rather than two renderings that drift. `--json` is the *whole* of
+  stdout when asked for, so nothing has to be stripped off the front.
+- **A run is recorded whether it succeeded or not**, including one that failed before producing
+  a report at all. History that only remembers successes cannot answer the question anybody
+  actually has. The one exception is a missing DuckDB binary, which is a broken installation
+  rather than a failed pipeline.
+- **History is append-only and never pruned behind your back.** One JSON object per line, opened
+  for append, so a crash can cost the record being written and nothing before it. `etl runs
+  prune` exists and only a person runs it. A record is a few hundred bytes; silently discarding
+  the history of a pipeline that turns out to have been wrong for a month is a worse failure
+  than a large file.
+- **A corrupt history line is skipped; a corrupt watermark is fatal.** Opposite calls, on
+  purpose. A bad watermark silently changes what the next run *loads*, so it has to stop
+  everything. A bad history line costs one record of hindsight, and refusing to show the other
+  nine hundred over it would be the wrong trade.
+- **Failing to record does not fail the run.** The exit code belongs to the pipeline, not to the
+  bookkeeping — again the opposite of watermark state, where failing to save *is* a failure
+  because the next run would silently reload from the old mark.
+- **Lineage is derived from the plan, so it needs no run.** It can go in review beside the diff
+  rather than being learned after a pipeline wrote somewhere unexpected. It is **node-level, not
+  column-level**, and says so: column lineage needs schemas this engine does not collect, and
+  `columns` is absent rather than `[]` so a consumer cannot read "not collected" as "none".
+- **Lineage never carries a connection string.** A database source contributes `schema.table`;
+  the connection string is the one property most likely to hold a password, and lineage is the
+  output most likely to be pasted into a ticket. Output is redacted the same way the script is.
+  Two tests assert a password cannot appear.
+
+**Verify.** 378 Rust tests (254 engine lib incl. 7 lineage, 51 e2e, 28 state incl. 10 history,
+20 secrets, 15 metadata, 10 desktop), 114 frontend, fmt and clippy clean. Exercised by hand: a
+failing pipeline lands in history as `failed`; `etl run --json` parses as a single JSON document;
+`etl runs list|show` read it back.
+
+**Not in 8b:** no `serve`, no scheduling — those are 8c and 8d. The desktop app does not read
+history yet; it has no panel for it and none is planned before the phase is done.
+
 ### Phase 9 — Standalone binary export + air-gapped packaging
 
 **Goal.** "Build Pipeline" produces one self-contained executable, cross-OS.

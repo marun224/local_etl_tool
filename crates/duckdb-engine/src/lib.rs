@@ -12,6 +12,7 @@
 
 pub mod context;
 pub mod exec;
+pub mod lineage;
 pub mod params;
 pub mod plan;
 pub mod session;
@@ -24,6 +25,7 @@ pub use exec::{
     preview, run, ExecError, Preview, RunOptions, RunReport, SkipReason, StageFailure,
     StageOutcome, Watermark,
 };
+pub use lineage::{lineage, Lineage};
 pub use params::{resolve, ParamError, ParamWarning, Resolved, Resolver};
 pub use plan::specs::{registry, Component, Registry};
 pub use plan::{

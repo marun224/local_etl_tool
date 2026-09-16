@@ -17,7 +17,7 @@ first when picking the project back up.
 >
 > ```powershell
 > cd D:\workspace\ETL_Local_Tool
-> cargo test --workspace                                            # expect 361 passing
+> cargo test --workspace                                            # expect 378 passing
 > npm --prefix frontend run test                                    # expect 114 passing
 > npm --prefix frontend run typecheck                               # expect clean
 > npm --prefix frontend run test                                    # expect 80 passing
@@ -57,12 +57,10 @@ first when picking the project back up.
 ## Where things stand
 
 - **Next phase:** Phase 8, split into 8a–8d in the plan on 2026-09-16 before starting.
-- **In progress:** nothing. **8a is complete** (2026-09-16). Next is **8b** — the runner:
-  `run`/`validate` as a headless binary, run history, structured logs, lineage JSON. It needs
-  one decision of its own: a separate `etl-runner` binary as the plan names, or subcommands on
-  the existing `etl`.
-- **Blocked on:** nothing. 8c and 8d need a dependency decision (see Open decisions); 8b does
-  not and goes first regardless.
+- **In progress:** nothing. **8a and 8b are complete** (2026-09-16). Next is **8c** — the
+  scheduler: interval and UTC cron, file-watch by polling `mtime`. The dependency questions it
+  used to carry are settled (decisions 6 and 7), so it needs nothing new.
+- **Blocked on:** nothing.
 
 Phase 6 was split into 6a and 6b on 2026-09-16 before starting; **both are complete**
 (2026-09-16). The execution-model decision 6b turned on is recorded in
@@ -79,7 +77,7 @@ Phases 0–6 are complete and 7a–7c are done, so there is a working CLI **and 
 build a pipeline on**. From the repo root:
 
 ```powershell
-cargo test --workspace        # 361 tests: 251 engine, 51 e2e, 20 secrets, 15 metadata, 10 desktop, 18 state
+cargo test --workspace        # 378 tests: 254 engine, 51 e2e, 28 state, 20 secrets, 15 metadata, 10 desktop
 .\target\debug\etl.exe run samples\pipelines\orders_enriched.json
 .\target\debug\etl.exe validate samples\pipelines\orders_enriched.json
 .\target\debug\etl.exe plan samples\pipelines\orders_enriched.json --script
@@ -255,6 +253,36 @@ back in full.
 .\target\debug\etl.exe secret list          # names and descriptions, never values
 ```
 
+**Every run is recorded, and `--json` prints exactly what was recorded.** History lives in
+`.etl/runs/<pipeline>.jsonl`, one JSON object per line, appended.
+
+```powershell
+.\target\debug\etl.exe run samples\pipelines\orders_enriched.json --json
+.\target\debug\etl.exe runs list --limit 5
+.\target\debug\etl.exe runs show <id>
+.\target\debug\etl.exe runs prune orders_enriched --keep 100
+```
+
+A **failed** run is recorded too — history that only remembers successes cannot answer the
+question anybody has. Nothing prunes behind your back; `runs prune` is something a person runs.
+A corrupt history line is skipped rather than fatal, which is the **opposite** of the call made
+for watermark state: a bad watermark silently changes what the next run loads, a bad history
+line costs one record of hindsight. Failing to record does not fail the run, for the same
+reason in reverse — the exit code belongs to the pipeline, not the bookkeeping.
+
+**Lineage needs no run.** It is derived from the compiled plan, so it can go in review beside
+the diff.
+
+```powershell
+.\target\debug\etl.exe lineage samples\pipelines\orders_checked.json
+.\target\debug\etl.exe lineage samples\pipelines\orders_checked.json --json
+```
+
+It is **node-level, not column-level**, and the shape says so: `columns` is absent rather than
+`[]`, so nobody can read "not collected" as "none". A dead-letter edge is marked `[rejected]`,
+because reading it as the main flow gets the meaning backwards. A database source contributes
+`schema.table` and **never** its connection string.
+
 **A source can load only what is new.** An `incremental` block on a source node names a column
 to watch; the workspace remembers the highest value loaded, and the next run reads past it.
 
@@ -293,7 +321,7 @@ extension, which sits badly with Phase 9's vendored set) and DuckLake (a catalog
 needs its own design pass rather than a thirteenth copy of the ATTACH shape). Both are listed
 under Phase 4 in the plan, so both need a decision recorded there rather than quietly dropping.
 
-**Not built yet:** the rest of Phase 8 (8b–8d) and the three control components deferred out
+**Not built yet:** the rest of Phase 8 (8c–8d) and the three control components deferred out
 of 6b. **The canvas cannot edit an `incremental` block** — it survives a GUI round trip
 untouched, but there is no panel for it; that belongs with a Phase 8 that has a runner to
 schedule — see the top of this file. i18next and Vega are in the plan's stack note and stay
@@ -327,7 +355,7 @@ fail the run. That is `ctl.fail`'s shape and it needs 6b's execution-model decis
 | 7d | — the run view, Plan tab, and the policy panel | **done** | 2026-09-16 |
 | 8 | Headless runner: serve, scheduler, RBAC, incremental | **in progress** | |
 | 8a | — watermark incremental loading | **done** | 2026-09-16 |
-| 8b | — the runner: run/validate, history, logs, lineage | not started | |
+| 8b | — the runner: history, `--json`, lineage | **done** | 2026-09-16 |
 | 8c | — scheduler: interval, cron, file-watch | not started | |
 | 8d | — web console: serve, token auth, roles | not started | |
 | 9 | Standalone binary export + air-gapped packaging | not started | |

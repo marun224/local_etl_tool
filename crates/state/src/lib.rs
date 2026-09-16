@@ -1,8 +1,15 @@
-//! What a pipeline remembers between runs.
+//! What the workspace remembers.
 //!
-//! Today that is one thing: a **watermark** per incremental source — the
-//! highest value this pipeline has already loaded from that node, so the next
-//! run can ask for only what came after it.
+//! Two things, kept apart because they answer different questions and deserve
+//! different care:
+//!
+//! * **Watermarks** ([`Store`]) — the highest value each incremental source has
+//!   already loaded, so the next run can ask for only what came after it. This
+//!   changes what the next run *does*, so it is written atomically and a
+//!   corrupt file is a hard error.
+//! * **Run history** ([`runs`]) — a record of what happened, appended one line
+//!   per run. This is hindsight: it changes nothing, so it is append-only and
+//!   a corrupt line costs that record rather than stopping the world.
 //!
 //! Two properties are the whole point of this crate, and both are about not
 //! losing rows:
@@ -23,6 +30,10 @@
 //! pipeline at once will race and the second to finish wins. Single-writer is
 //! the assumption until a scheduler exists to break it, and 8c is where that
 //! gets faced rather than assumed away.
+
+pub mod runs;
+
+pub use runs::{History, Outcome, RunRecord, StageRecord, WatermarkRecord};
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -333,7 +344,7 @@ fn sanitise(key: &str) -> String {
 /// `key_for` already sanitises, but `Store` is public and a caller can hand it
 /// anything. Checking here means the guarantee holds at the boundary that
 /// actually touches the disk rather than at the one that happens to be used.
-fn check_key(key: &str) -> Result<(), StateError> {
+pub(crate) fn check_key(key: &str) -> Result<(), StateError> {
     let bad = |reason: &str| {
         Err(StateError::BadKey {
             key: key.to_string(),

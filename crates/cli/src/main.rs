@@ -7,7 +7,7 @@
 
 use clap::{Args, Parser, Subcommand};
 use etl_duckdb_engine::{
-    compile_with, params, registry, run, CompileOptions, Contexts, EngineError, ExecError,
+    compile_with, lineage, params, registry, run, CompileOptions, Contexts, EngineError, ExecError,
     ParamWarning, Plan, Resolved, Resolver, RunOptions, RunReport, Warning,
 };
 use etl_metadata::Namespace;
@@ -175,6 +175,12 @@ enum Command {
         #[arg(long)]
         show_sql: bool,
 
+        /// Emit the run record as JSON instead of a table. The same shape
+        /// that is written to history, so what a script parses is what was
+        /// kept.
+        #[arg(long)]
+        json: bool,
+
         #[command(flatten)]
         settings: Settings,
     },
@@ -215,6 +221,28 @@ enum Command {
         manifest: bool,
     },
 
+    /// Look at what past runs did.
+    Runs {
+        #[command(subcommand)]
+        action: RunsAction,
+
+        #[command(flatten)]
+        settings: Settings,
+    },
+
+    /// Print where this pipeline's data comes from and where it goes.
+    Lineage {
+        /// The pipeline JSON file.
+        pipeline: PathBuf,
+
+        /// Emit JSON rather than an outline.
+        #[arg(long)]
+        json: bool,
+
+        #[command(flatten)]
+        settings: Settings,
+    },
+
     /// Inspect or reset what incremental sources remember.
     State {
         #[command(subcommand)]
@@ -252,14 +280,23 @@ fn main() -> ExitCode {
             duckdb,
             no_counts,
             show_sql,
+            json,
             settings,
-        } => command_run(&pipeline, duckdb, !no_counts, show_sql, &settings),
+        } => command_run(&pipeline, duckdb, !no_counts, show_sql, json, &settings),
 
         Command::Validate { pipeline, settings } => command_validate(&pipeline, &settings),
 
         Command::Contexts { settings } => command_contexts(&settings),
 
         Command::State { action, settings } => command_state(action, &settings),
+
+        Command::Runs { action, settings } => command_runs(action, &settings),
+
+        Command::Lineage {
+            pipeline,
+            json,
+            settings,
+        } => command_lineage(&pipeline, json, &settings),
 
         Command::Secret { action, settings } => command_secret(action, &settings),
 
@@ -288,6 +325,7 @@ fn command_run(
     duckdb: Option<PathBuf>,
     counts: bool,
     show_sql: bool,
+    json: bool,
     settings: &Settings,
 ) -> u8 {
     let Loaded {
@@ -319,8 +357,35 @@ fn command_run(
         println!("{}", resolved.redact(&plan.script(counts)));
     }
 
+    // Stamped before the run rather than after, so the record says when the
+    // work started -- which is what you want when reading back a run that
+    // took an hour.
+    let started = state::now_utc();
+    let id = state::runs::id_for_now(std::process::id() as u64);
+
     match run(&plan, &options) {
         Ok(report) => {
+            let record = record_of(id, &state_key, pipeline, started, &report);
+            remember(settings, &state_key, &record);
+
+            // JSON is the whole of stdout when it is asked for, so a script can
+            // parse it without stripping a table off the front.
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&record).expect("a record serialises")
+                );
+
+                return if report.failed() {
+                    exit::FAILED
+                } else {
+                    match save_watermarks(settings, &state_key, &report, true) {
+                        Ok(()) => exit::OK,
+                        Err(code) => code,
+                    }
+                };
+            }
+
             let width = report
                 .stages
                 .iter()
@@ -389,7 +454,7 @@ fn command_run(
                 }
                 exit::FAILED
             } else {
-                match save_watermarks(settings, &state_key, &report) {
+                match save_watermarks(settings, &state_key, &report, false) {
                     Ok(()) => exit::OK,
                     Err(code) => code,
                 }
@@ -397,14 +462,114 @@ fn command_run(
         }
 
         Err(error) => {
-            eprintln!("error: {error}");
-
+            // A pipeline that could not run at all is a thing that happened,
+            // and is exactly what someone asks history about the next morning.
+            // The one exception is a missing DuckDB, which is a broken
+            // installation rather than a failed pipeline.
             if let ExecError::DuckdbNotFound { .. } = error {
+                eprintln!("error: {error}");
                 return exit::USAGE;
             }
+
+            let record = failed_record(id, &state_key, pipeline, started, error.to_string());
+            remember(settings, &state_key, &record);
+
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&record).expect("a record serialises")
+                );
+            } else {
+                eprintln!("error: {error}");
+            }
+
             exit::FAILED
         }
     }
+}
+
+fn command_lineage(pipeline: &Path, json: bool, settings: &Settings) -> u8 {
+    let Loaded { plan, resolved, .. } = match load_and_compile(pipeline, settings) {
+        Ok(loaded) => loaded,
+        Err(code) => return code,
+    };
+
+    let found = lineage(&plan);
+
+    if json {
+        let text = serde_json::to_string_pretty(&found).expect("lineage serialises");
+        // Redacted for the same reason the script is: a resolved path can hold
+        // a secret, and lineage is the output most likely to be pasted into a
+        // ticket.
+        println!("{}", resolved.redact(&text));
+        return exit::OK;
+    }
+
+    println!("{}", pipeline.display());
+
+    println!(
+        "
+Reads:"
+    );
+    if found.inputs.is_empty() {
+        println!("  (nothing outside the pipeline)");
+    }
+    for input in &found.inputs {
+        println!(
+            "  {}  ({})  via {}",
+            resolved.redact(&input.name),
+            input.component_id,
+            input.node_id
+        );
+    }
+
+    println!(
+        "
+Writes:"
+    );
+    if found.outputs.is_empty() {
+        // Every non-sink stage is a lazy view, so this pipeline computes
+        // nothing when it runs. Worth saying plainly.
+        println!("  (nothing — this pipeline has no sink)");
+    }
+    for output in &found.outputs {
+        println!(
+            "  {}  ({})  via {}",
+            resolved.redact(&output.name),
+            output.component_id,
+            output.node_id
+        );
+    }
+
+    println!(
+        "
+Flow:"
+    );
+    for edge in &found.edges {
+        // The dead-letter branch is called out, because reading it as the main
+        // flow gets the meaning backwards: those are the rows that failed.
+        let port = if edge.port == "main" {
+            String::new()
+        } else {
+            format!("  [{}]", edge.port)
+        };
+        println!("  {} → {}{}", edge.from, edge.to, port);
+    }
+
+    for node in found
+        .nodes
+        .iter()
+        .filter(|n| n.incremental_column.is_some())
+    {
+        println!(
+            "
+'{}' loads incrementally on '{}', so a run reads only what is new.",
+            node.id,
+            node.incremental_column.as_deref().unwrap_or_default()
+        );
+    }
+
+    exit::OK
 }
 
 fn command_validate(pipeline: &Path, settings: &Settings) -> u8 {
@@ -445,7 +610,12 @@ Resolved:"
 /// the run is not repeatable-from-here if nobody recorded where here is, and
 /// the next run would silently reload from the old mark. Saying so loudly is
 /// the only way that gets noticed.
-fn save_watermarks(settings: &Settings, key: &str, report: &RunReport) -> Result<(), u8> {
+fn save_watermarks(
+    settings: &Settings,
+    key: &str,
+    report: &RunReport,
+    quiet: bool,
+) -> Result<(), u8> {
     let advancing: Vec<&etl_duckdb_engine::Watermark> = report
         .watermarks
         .iter()
@@ -466,14 +636,18 @@ fn save_watermarks(settings: &Settings, key: &str, report: &RunReport) -> Result
     for watermark in &advancing {
         let value = watermark.value.as_deref().unwrap_or_default();
         stored.advance(&watermark.node_id, &watermark.column, value);
-        println!("  · {} watermark now {}", watermark.node_id, value);
+        if !quiet {
+            println!("  · {} watermark now {}", watermark.node_id, value);
+        }
     }
 
     // A source that loaded nothing keeps the mark it had; saying so is worth a
     // line, because "nothing happened" is the normal outcome of an incremental
     // pipeline and should not look like a broken one.
-    for watermark in report.watermarks.iter().filter(|w| w.value.is_none()) {
-        println!("  · {} had nothing new", watermark.node_id);
+    if !quiet {
+        for watermark in report.watermarks.iter().filter(|w| w.value.is_none()) {
+            println!("  · {} had nothing new", watermark.node_id);
+        }
     }
 
     if advancing.is_empty() {
@@ -1009,5 +1183,291 @@ fn report_warnings(plan: &Plan) {
         };
 
         eprintln!("warning: {text}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Run history
+// ---------------------------------------------------------------------------
+
+#[derive(Subcommand, Debug)]
+enum RunsAction {
+    /// The most recent runs, newest first.
+    List {
+        /// Only this pipeline. Defaults to every pipeline with history.
+        #[arg(long, value_name = "KEY")]
+        pipeline: Option<String>,
+
+        /// How many to show per pipeline.
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+    },
+
+    /// Everything recorded about one run.
+    Show {
+        /// The run id, as `runs list` prints it.
+        id: String,
+
+        /// Emit the record as JSON, which is exactly what was stored.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Drop all but the most recent runs of one pipeline.
+    ///
+    /// Nothing does this on your behalf: history is append-only and is only
+    /// ever shortened deliberately.
+    Prune {
+        /// The pipeline's key.
+        pipeline: String,
+
+        /// How many of the most recent runs to keep.
+        #[arg(long, default_value_t = 100)]
+        keep: usize,
+    },
+}
+
+fn command_runs(action: RunsAction, settings: &Settings) -> u8 {
+    let history = state::History::at(settings.workspace_root());
+
+    match action {
+        RunsAction::List { pipeline, limit } => {
+            let keys = match pipeline {
+                Some(one) => vec![one],
+                None => match history.keys() {
+                    Ok(keys) => keys,
+                    Err(error) => {
+                        eprintln!("error: {error}");
+                        return exit::USAGE;
+                    }
+                },
+            };
+
+            if keys.is_empty() {
+                println!("No pipeline in this workspace has run yet.");
+                return exit::OK;
+            }
+
+            for key in keys {
+                let records = match history.recent(&key, limit) {
+                    Ok(records) => records,
+                    Err(error) => {
+                        eprintln!("error: {error}");
+                        return exit::INVALID;
+                    }
+                };
+
+                println!("{key}");
+                if records.is_empty() {
+                    println!("  (no runs recorded)");
+                }
+
+                for record in records {
+                    let rows = match record.rows_written() {
+                        Some(rows) => format!("{rows} rows"),
+                        None => "-".to_string(),
+                    };
+
+                    println!(
+                        "  {}  {:9}  {:>12}  {:.2}s",
+                        record.id,
+                        record.outcome.name(),
+                        rows,
+                        record.elapsed_ms as f64 / 1000.0
+                    );
+                }
+            }
+
+            exit::OK
+        }
+
+        RunsAction::Show { id, json } => {
+            let found = match history.find(None, &id) {
+                Ok(found) => found,
+                Err(error) => {
+                    eprintln!("error: {error}");
+                    return exit::INVALID;
+                }
+            };
+
+            let Some(record) = found else {
+                eprintln!("error: no run with id '{id}'");
+                return exit::USAGE;
+            };
+
+            if json {
+                // The stored record, not a rendering of it: the point of
+                // `--json` is that what you parse is what was kept.
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&record).expect("a record serialises")
+                );
+                return exit::OK;
+            }
+
+            println!("{}  {}", record.id, record.pipeline);
+            if let Some(path) = &record.path {
+                println!("  document   {path}");
+            }
+            println!("  started    {}", record.started);
+            println!("  elapsed    {:.2}s", record.elapsed_ms as f64 / 1000.0);
+            println!("  outcome    {}", record.outcome.name());
+
+            if !record.stages.is_empty() {
+                println!();
+                let width = record
+                    .stages
+                    .iter()
+                    .map(|stage| stage.label.chars().count())
+                    .max()
+                    .unwrap_or(0);
+
+                for stage in &record.stages {
+                    let rows = match (&stage.skipped, stage.rows) {
+                        (Some(reason), _) => reason.clone(),
+                        (None, Some(rows)) => format!("{rows} rows"),
+                        (None, None) => "-".to_string(),
+                    };
+
+                    println!(
+                        "  {:width$}  {:>12}  {}",
+                        stage.label, rows, stage.component_id
+                    );
+                }
+            }
+
+            for watermark in &record.watermarks {
+                match &watermark.value {
+                    Some(value) => println!("  · {} watermark {}", watermark.node_id, value),
+                    None => println!("  · {} had nothing new", watermark.node_id),
+                }
+            }
+
+            for note in &record.notes {
+                println!("  · {note}");
+            }
+
+            for failure in &record.failures {
+                println!("  ! {failure}");
+            }
+
+            exit::OK
+        }
+
+        RunsAction::Prune { pipeline, keep } => {
+            match history.prune(&pipeline, keep) {
+                Ok(0) => {
+                    println!("'{pipeline}' has {keep} or fewer runs recorded; nothing dropped.");
+                    exit::OK
+                }
+                Ok(dropped) => {
+                    println!("Dropped {dropped} run(s) from '{pipeline}', keeping the most recent {keep}.");
+                    exit::OK
+                }
+                Err(error) => {
+                    eprintln!("error: {error}");
+                    exit::FAILED
+                }
+            }
+        }
+    }
+}
+
+/// Turn a finished run into the record that is stored and printed.
+///
+/// One shape for both, deliberately: a CI job parsing stdout and a person
+/// running `etl runs show` are then looking at the same record rather than two
+/// renderings that drift apart.
+fn record_of(
+    id: String,
+    key: &str,
+    pipeline: &Path,
+    started: String,
+    report: &RunReport,
+) -> state::RunRecord {
+    state::RunRecord {
+        format_version: state::runs::CURRENT_FORMAT_VERSION,
+        id,
+        pipeline: key.to_string(),
+        path: Some(pipeline.display().to_string()),
+        started,
+        elapsed_ms: report.elapsed.as_millis(),
+        outcome: if report.failed() {
+            state::Outcome::Failed
+        } else {
+            state::Outcome::Succeeded
+        },
+        stages: report
+            .stages
+            .iter()
+            .map(|stage| state::StageRecord {
+                node_id: stage.node_id.clone(),
+                label: stage.label.clone(),
+                component_id: stage.component_id.clone(),
+                rows: stage.rows,
+                rejected: stage.rejected,
+                skipped: stage.skipped.as_ref().map(|reason| reason.describe()),
+                elapsed_ms: stage.elapsed.map(|elapsed| elapsed.as_millis()),
+            })
+            .collect(),
+        notes: report.notes.clone(),
+        failures: report
+            .failures
+            .iter()
+            .map(|failure| {
+                format!(
+                    "{} ({}): {}",
+                    failure.label, failure.node_id, failure.message
+                )
+            })
+            .collect(),
+        watermarks: report
+            .watermarks
+            .iter()
+            .map(|watermark| state::WatermarkRecord {
+                node_id: watermark.node_id.clone(),
+                column: watermark.column.clone(),
+                value: watermark.value.clone(),
+            })
+            .collect(),
+        extra: Default::default(),
+    }
+}
+
+/// A record for a run that did not get far enough to produce a report.
+fn failed_record(
+    id: String,
+    key: &str,
+    pipeline: &Path,
+    started: String,
+    message: String,
+) -> state::RunRecord {
+    state::RunRecord {
+        format_version: state::runs::CURRENT_FORMAT_VERSION,
+        id,
+        pipeline: key.to_string(),
+        path: Some(pipeline.display().to_string()),
+        started,
+        elapsed_ms: 0,
+        outcome: state::Outcome::Failed,
+        stages: Vec::new(),
+        notes: Vec::new(),
+        failures: vec![message],
+        watermarks: Vec::new(),
+        extra: Default::default(),
+    }
+}
+
+/// Append a run to history, complaining but not failing if it cannot.
+///
+/// A run that worked must not be reported as failed because its *diary* could
+/// not be written. The exit code belongs to the pipeline, not to the
+/// bookkeeping — which is the opposite call from watermark state, where the
+/// bookkeeping decides what the next run reads.
+fn remember(settings: &Settings, key: &str, record: &state::RunRecord) {
+    let history = state::History::at(settings.workspace_root());
+
+    if let Err(error) = history.append(key, record) {
+        eprintln!("warning: the run happened but was not recorded: {error}");
     }
 }
