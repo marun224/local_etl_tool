@@ -32,15 +32,21 @@ first when picking the project back up.
 > All five were run verbatim at the moment of pausing and printed exactly what is written
 > above. If any of them disagrees with this file later, trust the commands and fix the file.
 >
-> **State of the tree:** 42 files (32 staged, 10 untracked), **nothing committed** — git is
-> initialised on `master` with zero commits, so all work sits on disk. Committing was offered
-> on 2026-09-15 and declined for now, so this is a known state rather than an oversight — but
-> nothing here survives losing this directory. If this machine is not the one that resumes, or
-> if the work matters beyond this week, it is still the first thing to change.
+> **State of the tree:** committed and pushed on 2026-09-16 — this paragraph used to say
+> "nothing committed", which was true for every phase up to that point and is not any more.
+> All 42 files are one commit on `main` at `github.com/marun224/local_etl_tool` (private).
+> The branch was renamed from `master` on the way, since the remote was empty and nothing
+> depended on the old name.
 >
-> **Not backed up anywhere.** `tools/duckdb/` is git-ignored and holds the CLI (37 MB) plus 9
-> extension files (247 MB); both are reproducible with `.\scripts\fetch-duckdb.ps1` and
-> `.\scripts\fetch-duckdb-extensions.ps1`. Everything else exists only in this directory.
+> **Phases 0–5 are one commit, not six.** The phases happened on the dates recorded below;
+> the commits did not exist, and dating them after the fact would have git assert a history
+> it never saw. Phase 6 onward can commit per phase, now that there is something to commit
+> onto.
+>
+> **`tools/` is still not backed up, deliberately.** It is git-ignored and holds the DuckDB
+> CLI (37 MB) plus 9 extension files (247 MB) — 284 MB that does not belong in a repo and is
+> reproducible with `.\scripts\fetch-duckdb.ps1` and `.\scripts\fetch-duckdb-extensions.ps1`.
+> A fresh clone needs both scripts run before the tests will pass.
 
 ## Where things stand
 
