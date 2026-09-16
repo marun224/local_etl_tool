@@ -594,7 +594,12 @@ taken deliberately. Ordered so that each one has something real underneath it:
 - **8d — Web console: `serve`, shared-token auth, roles.** Last, because it is a view over what
   8b and 8c produce. One dependency: an HTTP server.
 
-**Open before 8c and 8d — the dependency posture.** This workspace has four external crates
+**Settled 2026-09-16 — the dependency posture and the runner's shape.** 8b is subcommands on
+`etl` rather than a second binary; schedules are UTC and interval only, with a `tz` field
+refused rather than approximated; file-watch polls `mtime`; the 8d console uses `tiny_http`.
+Reasons in the tracker's Settled decisions 5–8. Net new dependencies for the whole phase: one.
+
+**Originally open, kept for the reasoning — the dependency posture.** This workspace has four external crates
 (`serde`, `serde_json`, `thiserror`, `clap`) plus RustCrypto, and has hand-rolled a topological
 sort and a civil-date conversion rather than take `petgraph` or a date crate. Phase 8 asks for
 three things where that stance has a real cost: **cron with timezone** (a timezone database is

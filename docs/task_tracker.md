@@ -357,33 +357,40 @@ fail the run. That is `ctl.fail`'s shape and it needs 6b's execution-model decis
    crates, all RustCrypto core plus `getrandom`/`libc`; the first dependencies this project has
    taken beyond serde, clap and thiserror.
 
+5. **The runner is subcommands on `etl`, not a separate `etl-runner` binary.** Agreed
+   2026-09-16, diverging from the plan's wording for Phase 8. `etl` already has `run` and
+   `validate`; a second binary with its own copies is two code paths that have to agree about
+   the same file forever, which is the thing Phase 7 spent its effort *avoiding* between the
+   GUI and the CLI. 8b adds `--json` output and run history to what is there. The `etl-runner`
+   name is reserved for Phase 9's standalone export, which is a genuinely different artifact:
+   one self-contained file with a pipeline baked into it.
+
+6. **Schedules are UTC and interval only; no timezone database.** Agreed 2026-09-16. The cron
+   *expression* is parsed by hand — it is a short, well-understood grammar, the same call made
+   for the topological sort and civil dates. The **timezone database** is not, and must not be:
+   it changes several times a year, and a stale copy is wrong *silently*, at 2am, twice a year.
+   A `tz` field is **refused with an error** rather than accepted and approximated, because a
+   schedule that quietly runs an hour off is worse than one that will not start. Revisit only
+   when someone actually needs local-time scheduling, and take `jiff` if so.
+
+7. **File-watch schedules poll `mtime`; no `notify`.** Agreed 2026-09-16. The only thing native
+   events buy is latency, and for "a file landed, run the pipeline" a ten-second poll is
+   indistinguishable from instant. Native events are also genuinely unreliable on network and
+   virtual filesystems, which is where a watched inbox most often lives — so the dependency
+   would buy speed in the easy case and nothing in the hard one.
+
+8. **The 8d console uses `tiny_http`.** Agreed 2026-09-16. Small and blocking, with no async
+   runtime; a console serving a handful of local requests needs nothing more, and routing for
+   ~8 endpoints is less code than wiring a framework. `axum` was the alternative and brings
+   tokio, tower and hyper into a workspace that has four external crates. **Hand-rolling HTTP
+   was considered and rejected** — unlike the topological sort and the date conversion, this one
+   parses untrusted input off a socket and checks auth tokens, which is a different risk class,
+   and "write your own HTTP server" is the wrong instinct there.
+
 ## Open decisions
 
-1. **What dependencies may Phase 8c and 8d take?** This workspace has four external crates
-   (`serde`, `serde_json`, `thiserror`, `clap`) plus RustCrypto, and has hand-rolled a
-   topological sort and civil-date conversion rather than take `petgraph` or a date crate. 8a
-   and 8b need nothing new. The last two slices each need something:
-
-   - **Cron with a timezone (8c).** The cron *expression* is easy to parse by hand; the
-     **timezone database** is not, and must not be — it changes several times a year and being
-     wrong is silent. Either take `chrono-tz`/`jiff`, or restrict schedules to UTC and interval,
-     which needs no database at all and covers most of what a local tool schedules.
-   - **File-watching (8c).** Platform-specific enough that `notify` is the only sane answer;
-     the alternative is polling `mtime`, which is genuinely fine for a watched directory and
-     costs nothing but latency.
-   - **An HTTP server (8d).** The console needs one. `axum` brings `tokio` and a large tree;
-     `tiny_http` is small and blocking. A hand-rolled HTTP/1.1 server is possible and is
-     probably a bad idea for something that accepts connections and checks tokens.
-
-   Not urgent — 8a and 8b come first — but worth taking deliberately rather than discovering in
-   a diff, which is the same call made for cryptography in Settled decisions 4.
-
-<details>
-<summary>Resolved: which cryptography dependency? (2026-09-15)</summary>
-
-See Settled decisions 4 — RustCrypto `aes-gcm`.
-
-</details>
+None. (Resolved 2026-09-16: the Phase 8 dependency posture and the runner's shape — see
+Settled decisions 5–8.)
 
 <details>
 <summary>Resolved: which cryptography dependency?</summary>
