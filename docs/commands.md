@@ -640,3 +640,66 @@ Two things worth remembering, because both cost time:
 - **The expected row counts in the first e2e test were wrong, not the code.** `shipped` is 7
   rows in orders.csv, not 6 — counted by hand and miscounted. `awk -F, 'NR>1{c[$5]++} END{...}'`
   settled it in one line. Count the fixture, do not remember it.
+
+## 2026-09-16 — Phase 6b: the execution-model decision, then control flow
+
+The phase opened with the decision the plan said it had to. Three options were written up in
+[DECISION_execution_model.md](DECISION_execution_model.md) and measured against the vendored
+DuckDB rather than reasoned about, using throwaway probe scripts:
+
+```powershell
+# Can the CLI be driven as a read-eval loop, or does it buffer until EOF?
+# Send a statement, read the result, branch on it, send another.
+python probe_interactive.py      # verdict: read-eval loop works
+
+# What does a round trip actually cost, measured with a sentinel not a timeout?
+python probe_latency.py          # 0.54 ms warm session vs 41.45 ms per spawn - 77x
+
+# Does a failed statement kill a driven session? (continue_on_failure depends on it)
+python probe_errors.py           # no: temp views survive, new state can still be made
+
+# .bail on|off
+printf ".bail on`nSELECT * FROM nope;`nSELECT 'reached';`n" | .\tools\duckdb\duckdb.exe -json
+```
+
+`.bail on` turned out to terminate the **session**, not just the batch, so fail-fast has to be
+the driver's decision. That is where per-stage `continueOnFailure` needs it anyway.
+
+Chosen: **option A, persistent session, dual path** — a plan earns a session by holding a control
+node or a stage policy; everything else keeps the one-script transport.
+
+Then the build, and the gate:
+
+```powershell
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace                          # 326 passing, up from 300
+.\target\debug\etl.exe components               # 54, up from 47
+
+.\target\debug\etl.exe run samples\pipelines\orders_guarded.json
+```
+
+Negative paths checked by hand before they were written as tests, each against a sed-edited copy
+of the sample:
+
+```powershell
+# branch not taken -> downstream skipped, exit 0 (not a failure)
+# row_count min 999 -> exit 3, names the node and the message
+# a column renamed to "nope" -> exit 3, node message AND DuckDB's candidate list
+# continueOnFailure -> broken fails, its dependent is skipped, the independent branch still runs
+```
+
+Three things cost real time and are worth not rediscovering:
+
+- **The stderr grace period was on the happy path.** A `CREATE VIEW` returns no rows whether it
+  worked or not, so "no rows means look for an error message" put 250 ms on *every* stage: the
+  seven-stage sample took 2.00 s instead of 0.18 s. The verdict belongs to the count probes;
+  stderr is only asked for the message once something is already known to have failed.
+- **The first failure message named the symptom.** When a stage's `CREATE VIEW` fails, the count
+  probe after it fails too — complaining the view does not exist. Reporting the probe's message
+  hid the actual cause. Keep the statement's own stderr and prefer it.
+- **A bounded-window assertion caught a bad scripted edit.** A find/replace meant to delete one
+  enum variant deleted 400 lines, because the variant was last in the enum and the closing
+  pattern matched far below. `exec.rs` was restored from HEAD and the patches re-applied. Any
+  scripted deletion that searches for its own end needs a sanity check on how much it is about
+  to remove.

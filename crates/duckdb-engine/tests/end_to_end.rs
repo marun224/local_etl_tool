@@ -9,7 +9,9 @@
 //! `scripts/fetch-duckdb.ps1`; without it these skip rather than fail, so a
 //! fresh checkout is not red for a reason that has nothing to do with the code.
 
-use etl_duckdb_engine::{compile, run, Contexts, ExecError, Resolver, RunOptions};
+use etl_duckdb_engine::{
+    compile, run, Contexts, ExecError, Resolver, RunOptions, RunReport, SkipReason,
+};
 use etl_metadata::PipelineDoc;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -1510,5 +1512,426 @@ fn counts_stay_attributed_correctly_after_a_validator() {
             ("check", Some(6), Some(6)),
             ("big", Some(2), None),
         ]
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Control flow and per-stage policy (Phase 6b)
+//
+// These all take the session path rather than the one-script path, which is the
+// thing worth checking as much as the features themselves: the two transports
+// must agree about everything except how the statements get there.
+// ---------------------------------------------------------------------------
+
+/// `orders` feeding one node, with whatever properties and policy are given.
+fn guarded(component_id: &str, properties: &str, policy: &str) -> PipelineDoc {
+    let policy = if policy.is_empty() {
+        String::new()
+    } else {
+        format!(r#", "policy": {policy}"#)
+    };
+
+    let json = format!(
+        r#"{{
+          "formatVersion": 1,
+          "nodes": [
+            {{"id": "orders", "type": "source", "position": {{"x": 0, "y": 0}},
+             "data": {{"label": "Orders", "componentId": "src.file.csv",
+                      "properties": {{"path": "samples/data/orders.csv"}}}}}},
+            {{"id": "gate", "type": "transform", "position": {{"x": 200, "y": 0}},
+             "data": {{"label": "Gate", "componentId": "{component_id}",
+                      "properties": {properties}{policy}}}}},
+            {{"id": "after", "type": "transform", "position": {{"x": 400, "y": 0}},
+             "data": {{"label": "After", "componentId": "xf.filter",
+                      "properties": {{"predicate": "amount > 100"}}}}}}
+          ],
+          "edges": [
+            {{"id": "e1", "source": "orders", "target": "gate",
+             "sourceHandle": "main", "targetHandle": "in"}},
+            {{"id": "e2", "source": "gate", "target": "after",
+             "sourceHandle": "main", "targetHandle": "in"}}
+          ]
+        }}"#
+    );
+
+    PipelineDoc::from_json(&json).expect("document parses")
+}
+
+fn stage<'a>(report: &'a RunReport, node_id: &str) -> &'a etl_duckdb_engine::StageOutcome {
+    report
+        .stages
+        .iter()
+        .find(|s| s.node_id == node_id)
+        .unwrap_or_else(|| panic!("{node_id} is in the report"))
+}
+
+#[test]
+fn a_plan_earns_a_session_rather_than_always_getting_one() {
+    // The dual path, asserted rather than assumed. A plan with no control node
+    // and no policy must keep the transport all 47 components were built
+    // against; adding either is what switches it.
+    let plain = compile(&guarded("xf.distinct", "{}", "")).expect("compiles");
+    assert!(
+        !plain.needs_session(),
+        "an ordinary plan stays on one script"
+    );
+
+    let with_control = compile(&guarded("ctl.log", r#"{"message": "hello"}"#, "")).expect("ok");
+    assert!(with_control.needs_session());
+    assert_eq!(with_control.session_reasons(), ["gate"]);
+
+    let with_policy = compile(&guarded(
+        "xf.distinct",
+        "{}",
+        r#"{"continueOnFailure": true}"#,
+    ))
+    .expect("ok");
+    assert!(with_policy.needs_session(), "a policy needs one too");
+
+    // An all-default policy says nothing, so it must not tip the plan over.
+    let empty_policy = compile(&guarded("xf.distinct", "{}", "{}")).expect("ok");
+    assert!(!empty_policy.needs_session());
+}
+
+#[test]
+fn a_control_node_passes_its_rows_through_unchanged() {
+    if duckdb_binary().is_none() {
+        return;
+    }
+
+    // A ctl.log in the middle of a chain must not break the chain. Before 6b
+    // control nodes produced no relation at all, which would have made them
+    // unusable exactly where anyone would put one.
+    let plan = compile(&guarded("ctl.log", r#"{"message": "went past"}"#, "")).expect("compiles");
+    let report = run(&plan, &options()).expect("runs");
+
+    assert_eq!(stage(&report, "orders").rows, Some(12));
+    assert_eq!(stage(&report, "gate").rows, Some(12), "unchanged");
+    assert_eq!(stage(&report, "after").rows, Some(6), "and still flows on");
+
+    assert!(
+        report.notes.iter().any(|n| n.contains("went past")),
+        "the message is reported: {:?}",
+        report.notes
+    );
+}
+
+#[test]
+fn a_branch_that_is_not_taken_skips_what_follows() {
+    if duckdb_binary().is_none() {
+        return;
+    }
+
+    let plan = compile(&guarded(
+        "ctl.branch",
+        r#"{"predicate": "amount > 99999", "message": "nothing that large"}"#,
+        "",
+    ))
+    .expect("compiles");
+
+    let report = run(&plan, &options()).expect("a branch not taken is not a failure");
+
+    assert_eq!(stage(&report, "gate").rows, Some(12));
+    assert_eq!(
+        stage(&report, "after").skipped,
+        Some(SkipReason::NotTaken {
+            node_id: "gate".to_string()
+        })
+    );
+    assert!(
+        !report.failed(),
+        "the pipeline said this might not run, and it did not"
+    );
+}
+
+#[test]
+fn a_branch_that_is_taken_lets_what_follows_run() {
+    if duckdb_binary().is_none() {
+        return;
+    }
+
+    let plan = compile(&guarded(
+        "ctl.branch",
+        r#"{"predicate": "amount > 400"}"#,
+        "",
+    ))
+    .expect("compiles");
+
+    let report = run(&plan, &options()).expect("runs");
+
+    assert_eq!(stage(&report, "after").rows, Some(6));
+    assert_eq!(stage(&report, "after").skipped, None);
+}
+
+#[test]
+fn a_row_count_assertion_fails_the_run_by_name() {
+    if duckdb_binary().is_none() {
+        return;
+    }
+
+    let plan = compile(&guarded(
+        "qa.row_count",
+        r#"{"min": 999, "message": "not enough orders"}"#,
+        "",
+    ))
+    .expect("compiles");
+
+    match run(&plan, &options()) {
+        Err(ExecError::StageFailed {
+            node_id, message, ..
+        }) => {
+            assert_eq!(node_id, "gate");
+            assert!(message.contains("not enough orders"), "{message}");
+        }
+        other => panic!("expected the assertion to stop the run, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_row_count_assertion_that_holds_lets_the_run_through() {
+    if duckdb_binary().is_none() {
+        return;
+    }
+
+    let plan = compile(&guarded("qa.row_count", r#"{"min": 1, "max": 100}"#, "")).expect("ok");
+    let report = run(&plan, &options()).expect("runs");
+
+    assert_eq!(stage(&report, "gate").rows, Some(12));
+    assert_eq!(stage(&report, "after").rows, Some(6));
+}
+
+#[test]
+fn a_missing_column_is_named_by_the_schema_assertion() {
+    if duckdb_binary().is_none() {
+        return;
+    }
+
+    let plan = compile(&guarded(
+        "qa.schema_match",
+        r#"{"columns": ["order_id", "nope"], "message": "the file changed shape"}"#,
+        "",
+    ))
+    .expect("compiles");
+
+    match run(&plan, &options()) {
+        Err(ExecError::StageFailed { message, .. }) => {
+            // Both halves: the node's own message says why the check is there,
+            // DuckDB's says which column is missing.
+            assert!(message.contains("the file changed shape"), "{message}");
+            assert!(message.contains("nope"), "{message}");
+        }
+        other => panic!("expected a failure naming the column, got {other:?}"),
+    }
+}
+
+#[test]
+fn ctl_fail_stops_the_run_only_when_its_condition_holds() {
+    if duckdb_binary().is_none() {
+        return;
+    }
+
+    // No row is negative, so this one passes straight through.
+    let quiet = compile(&guarded(
+        "ctl.fail",
+        r#"{"when": "amount < 0", "message": "negative amounts found"}"#,
+        "",
+    ))
+    .expect("compiles");
+
+    let report = run(&quiet, &options()).expect("nothing matched, so nothing failed");
+    assert_eq!(stage(&report, "after").rows, Some(6));
+
+    // Three orders are pending, so this one stops the run.
+    let loud = compile(&guarded(
+        "ctl.fail",
+        r#"{"when": "status = 'pending'", "message": "pending orders found"}"#,
+        "",
+    ))
+    .expect("compiles");
+
+    match run(&loud, &options()) {
+        Err(ExecError::StageFailed { message, .. }) => {
+            assert!(message.contains("pending orders found"), "{message}");
+            assert!(message.contains('3'), "it says how many matched: {message}");
+        }
+        other => panic!("expected a failure, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_wait_holds_for_as_long_as_it_says() {
+    if duckdb_binary().is_none() {
+        return;
+    }
+
+    let plan = compile(&guarded("ctl.wait", r#"{"ms": 300}"#, "")).expect("compiles");
+    let report = run(&plan, &options()).expect("runs");
+
+    assert!(
+        report.elapsed >= std::time::Duration::from_millis(300),
+        "the run took {:?}, which is less than it was told to wait",
+        report.elapsed
+    );
+    assert_eq!(stage(&report, "after").rows, Some(6), "and rows still flow");
+}
+
+#[test]
+fn continue_on_failure_runs_the_rest_and_still_fails() {
+    let Some(_) = duckdb_binary() else {
+        return;
+    };
+
+    // `broken` fails; `downstream` reads it and cannot run; `independent` has
+    // nothing to do with either and must still run. The run ends failed.
+    let json = r#"{
+      "formatVersion": 1,
+      "nodes": [
+        {"id": "orders", "type": "source", "position": {"x": 0, "y": 0},
+         "data": {"label": "Orders", "componentId": "src.file.csv",
+                  "properties": {"path": "samples/data/orders.csv"}}},
+        {"id": "broken", "type": "transform", "position": {"x": 200, "y": 0},
+         "data": {"label": "Broken", "componentId": "xf.sql",
+                  "properties": {"query": "SELECT * FROM does_not_exist"},
+                  "policy": {"continueOnFailure": true}}},
+        {"id": "downstream", "type": "transform", "position": {"x": 400, "y": 0},
+         "data": {"label": "Downstream", "componentId": "xf.distinct", "properties": {}}},
+        {"id": "independent", "type": "transform", "position": {"x": 200, "y": 150},
+         "data": {"label": "Independent", "componentId": "xf.filter",
+                  "properties": {"predicate": "amount > 100"}}}
+      ],
+      "edges": [
+        {"id": "e1", "source": "orders", "target": "broken",
+         "sourceHandle": "main", "targetHandle": "in"},
+        {"id": "e2", "source": "broken", "target": "downstream",
+         "sourceHandle": "main", "targetHandle": "in"},
+        {"id": "e3", "source": "orders", "target": "independent",
+         "sourceHandle": "main", "targetHandle": "in"}
+      ]
+    }"#;
+
+    let plan = compile(&PipelineDoc::from_json(json).expect("parses")).expect("compiles");
+
+    // A report, not an error: the whole point of carrying on is to be able to
+    // see what happened, and an error would throw that away.
+    let report = run(&plan, &options()).expect("the run reaches the end");
+
+    assert!(report.failed(), "reaching the end is not succeeding");
+    assert_eq!(report.failures.len(), 1);
+    assert_eq!(report.failures[0].node_id, "broken");
+
+    // The real cause, not the count probe complaining that "broken" is missing.
+    assert!(
+        report.failures[0].message.contains("does_not_exist"),
+        "the message names the actual cause: {}",
+        report.failures[0].message
+    );
+
+    assert_eq!(stage(&report, "broken").skipped, Some(SkipReason::Failed));
+    assert_eq!(
+        stage(&report, "downstream").skipped,
+        Some(SkipReason::UpstreamFailed {
+            node_id: "broken".to_string()
+        })
+    );
+    assert_eq!(
+        stage(&report, "independent").rows,
+        Some(6),
+        "a branch with nothing to do with the failure still ran"
+    );
+}
+
+#[test]
+fn without_continue_on_failure_the_run_stops_at_the_first_failure() {
+    if duckdb_binary().is_none() {
+        return;
+    }
+
+    // The same pipeline, minus the policy — but with a retry policy so it still
+    // takes the session path. Fail-fast must mean the same thing on both.
+    let json = r#"{
+      "formatVersion": 1,
+      "nodes": [
+        {"id": "orders", "type": "source", "position": {"x": 0, "y": 0},
+         "data": {"label": "Orders", "componentId": "src.file.csv",
+                  "properties": {"path": "samples/data/orders.csv"}}},
+        {"id": "broken", "type": "transform", "position": {"x": 200, "y": 0},
+         "data": {"label": "Broken", "componentId": "xf.sql",
+                  "properties": {"query": "SELECT * FROM does_not_exist"},
+                  "policy": {"retryAttempts": 1, "retryBackoffMs": 1}}}
+      ],
+      "edges": [
+        {"id": "e1", "source": "orders", "target": "broken",
+         "sourceHandle": "main", "targetHandle": "in"}
+      ]
+    }"#;
+
+    let plan = compile(&PipelineDoc::from_json(json).expect("parses")).expect("compiles");
+
+    match run(&plan, &options()) {
+        Err(ExecError::StageFailed { node_id, .. }) => assert_eq!(node_id, "broken"),
+        other => panic!("expected the run to stop, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_retry_policy_does_not_disturb_a_stage_that_works() {
+    if duckdb_binary().is_none() {
+        return;
+    }
+
+    // Retries are for the stage that fails. One that succeeds must run once and
+    // report the same numbers it would without a policy at all.
+    let plan = compile(&guarded(
+        "xf.distinct",
+        "{}",
+        r#"{"retryAttempts": 3, "retryBackoffMs": 5000}"#,
+    ))
+    .expect("compiles");
+
+    assert!(plan.needs_session());
+
+    let report = run(&plan, &options()).expect("runs");
+
+    assert_eq!(stage(&report, "gate").rows, Some(12));
+    assert!(
+        report.elapsed < std::time::Duration::from_secs(5),
+        "a working stage must not have waited on a backoff: {:?}",
+        report.elapsed
+    );
+}
+
+#[test]
+fn both_transports_agree_on_the_same_pipeline() {
+    if duckdb_binary().is_none() {
+        return;
+    }
+
+    // The dual path's one real risk: two transports that quietly disagree. The
+    // same work, once batched and once driven, must give the same numbers.
+    let batched = compile(&guarded("xf.distinct", "{}", "")).expect("compiles");
+    let driven = compile(&guarded(
+        "xf.distinct",
+        "{}",
+        r#"{"continueOnFailure": true}"#,
+    ))
+    .expect("compiles");
+
+    assert!(!batched.needs_session() && driven.needs_session());
+
+    let one = run(&batched, &options()).expect("runs");
+    let other = run(&driven, &options()).expect("runs");
+
+    let rows = |report: &RunReport| -> Vec<(String, Option<u64>)> {
+        report
+            .stages
+            .iter()
+            .map(|s| (s.node_id.clone(), s.rows))
+            .collect()
+    };
+
+    assert_eq!(
+        rows(&one),
+        rows(&other),
+        "the transport must not change the answer"
     );
 }

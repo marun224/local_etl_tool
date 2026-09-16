@@ -154,6 +154,39 @@ fourth argument and it is projected away.
 The row counts follow automatically: a component whose spec has a `rejected`
 port gets two count probes, and the executor reports both.
 
+### Control components
+
+A `ctl.*` component, and the two `qa.*` assertions, do something a single
+batched script cannot express. They declare it on the spec with
+`.control(ControlKind::…)`, and that one call is what makes a plan containing
+them run through a persistent session instead:
+
+```rust
+ComponentSpec::new("ctl.wait", "Wait")
+    .control(ControlKind::Wait)
+    .properties(vec![PropertySpec::integer("ms").required()]),
+builders::control_passthrough,
+```
+
+All of them share one builder. `control_passthrough` emits a view equal to the
+input and nothing else — a control node must not change what the data *is*, only
+what happens around it, and a node that broke the chain it sits in would be
+unusable where anyone would put one.
+
+What the node actually *does* is built by `control_for` in `builders.rs`, from
+the kind and the properties. Most of it is not SQL — a duration, a message, a
+decision — which is why it is not a builder's job. The part that is SQL is a
+**probe**: a query the executor runs to decide something, whose meaning depends
+on the kind (a match count for `Fail` and `Branch`, a single `ok` boolean for
+`Assert`).
+
+Adding a control component therefore touches one more place than an ordinary
+one: a `ControlKind` arm in `control_for`, and, if the kind is new, an arm in
+`exec::act` that says what to do with the answer. Both are `match`es on an enum,
+not on a component id — the registry's no-dispatch rule still holds.
+
+See `docs/DECISION_execution_model.md` for why a session exists at all.
+
 ### What the spec cannot express
 
 Per-property rules only. A constraint spanning two properties — `xf.join` needing

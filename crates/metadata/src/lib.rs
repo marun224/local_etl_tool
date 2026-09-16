@@ -20,7 +20,8 @@
 pub mod component;
 
 pub use component::{
-    ComponentSpec, Namespace, PortSpec, PropertySpec, PropertyType, MAIN_PORT, REJECTED_PORT,
+    ComponentSpec, ControlKind, Namespace, PortSpec, PropertySpec, PropertyType, MAIN_PORT,
+    REJECTED_PORT,
 };
 
 use serde::{Deserialize, Serialize};
@@ -192,8 +193,66 @@ pub struct NodeData {
     /// keys off the node id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alias: Option<String>,
+    /// How this node behaves when it fails, and what it is allowed to consume.
+    ///
+    /// Beside `materialize` rather than inside `properties` for the same
+    /// reason: this is how the node is *run*, not what the component does, and
+    /// every component takes the same four settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<NodePolicy>,
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: Extra,
+}
+
+/// How a node behaves when it fails, and what it may consume.
+///
+/// A node carrying any of these is asking to be run on its own rather than as
+/// part of one batched script — retrying a stage means addressing that stage —
+/// so a plan holding one of these runs through a session. See
+/// `docs/DECISION_execution_model.md`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct NodePolicy {
+    /// How many times to run this stage again if it fails. Zero, the default,
+    /// means run it once.
+    #[serde(
+        default,
+        rename = "retryAttempts",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub retry_attempts: Option<u32>,
+    /// How long to wait before the first retry, doubling each time after.
+    #[serde(
+        default,
+        rename = "retryBackoffMs",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub retry_backoff_ms: Option<u64>,
+    /// Let the rest of the run continue when this stage fails.
+    ///
+    /// The run still ends failed — this changes how much of it happens, not
+    /// whether it counts as a success. A stage that depends on a failed one is
+    /// skipped rather than run against a relation that was never created.
+    #[serde(
+        default,
+        rename = "continueOnFailure",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub continue_on_failure: Option<bool>,
+    /// A memory ceiling for this stage, applied to the session around it.
+    #[serde(
+        default,
+        rename = "memoryLimitMb",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub memory_limit_mb: Option<u64>,
+}
+
+impl NodePolicy {
+    /// Whether this says anything at all. An all-default policy is the same as
+    /// none, and must not be what tips a plan onto the session path.
+    pub fn is_default(&self) -> bool {
+        self == &NodePolicy::default()
+    }
 }
 
 impl NodeData {

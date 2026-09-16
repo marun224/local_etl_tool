@@ -219,6 +219,40 @@ impl PropertySpec {
     }
 }
 
+/// What a control node does, beyond passing its input along.
+///
+/// Carried as an enum on the spec rather than matched on the component id in
+/// the engine. The registry's whole premise is that a component is described in
+/// one place and there is no dispatch to extend; a `match` on `"ctl.wait"`
+/// somewhere in the executor would be exactly the thing that premise rules out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlKind {
+    /// Hold for a fixed time, then carry on.
+    Wait,
+    /// Report something about the rows going past.
+    Log,
+    /// Stop the run when a condition holds.
+    Fail,
+    /// Run what follows only if a condition holds.
+    Branch,
+    /// Force one branch to finish before another starts.
+    Sequence,
+    /// Check a whole relation rather than the rows in it, and fail the run when
+    /// the check does not hold. `qa.row_count` and `qa.schema_match` are these:
+    /// a `qa.*` id, because that is what they are to a user, with no reject
+    /// port because there is nothing to reject.
+    Assert,
+}
+
+impl ControlKind {
+    /// Whether this kind decides what runs after it, rather than only having an
+    /// effect of its own.
+    pub fn gates_downstream(self) -> bool {
+        matches!(self, ControlKind::Branch)
+    }
+}
+
 /// One input or output port.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PortSpec {
@@ -290,6 +324,12 @@ pub struct ComponentSpec {
     pub outputs: Vec<PortSpec>,
     #[serde(default)]
     pub properties: Vec<PropertySpec>,
+    /// What this component does beyond producing rows, if anything.
+    ///
+    /// `Some` means the stage has to be addressable on its own, which is what
+    /// makes a plan holding it run through a session rather than as one script.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control: Option<ControlKind>,
     /// DuckDB extensions this component needs loaded before it can run.
     ///
     /// Declared here rather than inferred from the generated SQL for two
@@ -337,8 +377,15 @@ impl ComponentSpec {
             inputs,
             outputs,
             properties: Vec::new(),
+            control: None,
             requires_extensions: Vec::new(),
         }
+    }
+
+    /// Mark this component as doing something a batched script cannot express.
+    pub fn control(mut self, kind: ControlKind) -> Self {
+        self.control = Some(kind);
+        self
     }
 
     pub fn description(mut self, description: &str) -> Self {
@@ -404,6 +451,11 @@ impl ComponentSpec {
     /// Whether this component has a dead-letter output.
     pub fn has_reject_port(&self) -> bool {
         self.has_output(Some(REJECTED_PORT))
+    }
+
+    /// Whether a plan containing this component must run through a session.
+    pub fn needs_session(&self) -> bool {
+        self.control.is_some()
     }
 }
 

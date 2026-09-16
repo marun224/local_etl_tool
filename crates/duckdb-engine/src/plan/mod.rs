@@ -15,7 +15,7 @@ pub(crate) mod builders;
 pub mod specs;
 
 use crate::EngineError;
-use etl_metadata::{PipelineDoc, PipelineNode, REJECTED_PORT};
+use etl_metadata::{ControlKind, NodePolicy, PipelineDoc, PipelineNode, REJECTED_PORT};
 use serde_json::Value as JsonValue;
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, VecDeque};
@@ -54,8 +54,14 @@ impl StageKind {
     }
 
     /// Whether this stage produces a relation downstream nodes can select from.
+    ///
+    /// Control nodes do: they pass their input along unchanged. A `ctl.log` or
+    /// `ctl.wait` that broke the chain it sits in would be unusable in the
+    /// middle of a pipeline, which is the only place anyone puts one. What
+    /// makes them control nodes is the effect they have on the way past, not an
+    /// absence of rows.
     pub fn produces_relation(self) -> bool {
-        !matches!(self, StageKind::Sink | StageKind::Control)
+        self != StageKind::Sink
     }
 }
 
@@ -169,6 +175,89 @@ pub fn reject_relation(node_id: &str) -> String {
     format!("{node_id}{REJECT_SUFFIX}")
 }
 
+/// How a stage behaves when it fails, with the document's defaults filled in.
+///
+/// The resolved form of [`NodePolicy`]: the document carries options, a stage
+/// carries answers, so nothing downstream has to remember what an absent value
+/// meant.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct StagePolicy {
+    /// Extra attempts after the first. Zero means run it once.
+    pub retry_attempts: u32,
+    /// The wait before the first retry, doubling each attempt after it.
+    pub retry_backoff_ms: u64,
+    /// Let the run carry on past this stage's failure. The run still ends
+    /// failed; this decides how much of it happens first.
+    pub continue_on_failure: bool,
+    /// A memory ceiling applied around this stage.
+    pub memory_limit_mb: Option<u64>,
+}
+
+/// The backoff used when a stage asks for retries without naming one.
+pub const DEFAULT_RETRY_BACKOFF_MS: u64 = 250;
+
+impl StagePolicy {
+    fn from_node(policy: Option<&NodePolicy>) -> Self {
+        let Some(policy) = policy else {
+            return Self::default();
+        };
+
+        let retry_attempts = policy.retry_attempts.unwrap_or(0);
+
+        Self {
+            retry_attempts,
+            retry_backoff_ms: policy.retry_backoff_ms.unwrap_or(if retry_attempts > 0 {
+                DEFAULT_RETRY_BACKOFF_MS
+            } else {
+                0
+            }),
+            continue_on_failure: policy.continue_on_failure.unwrap_or(false),
+            memory_limit_mb: policy.memory_limit_mb,
+        }
+    }
+
+    /// Whether this stage has to be addressable on its own, which is what makes
+    /// a plan need a session rather than one batched script.
+    ///
+    /// Retrying a stage means re-running that stage; carrying on past a failure
+    /// means the batch must not abort. A memory ceiling is set and cleared
+    /// around the statement. None of the three is expressible in one script.
+    pub fn needs_session(&self) -> bool {
+        self.retry_attempts > 0 || self.continue_on_failure || self.memory_limit_mb.is_some()
+    }
+
+    /// How long to wait before attempt `attempt`, counting the first retry as 1.
+    pub fn backoff_for(&self, attempt: u32) -> std::time::Duration {
+        let doubled = self
+            .retry_backoff_ms
+            .saturating_mul(1u64 << attempt.saturating_sub(1).min(16));
+
+        std::time::Duration::from_millis(doubled)
+    }
+}
+
+/// What a control stage does on the way past, beyond passing rows along.
+///
+/// Built here rather than in a builder because a builder returns SQL, and most
+/// of this is not SQL: a duration to sleep for, a message to print, a decision
+/// to take. The SQL that *is* here is a probe the driver evaluates before
+/// deciding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Control {
+    pub kind: ControlKind,
+    /// A query the driver runs before passing rows through. Its meaning depends
+    /// on the kind: a match count for [`ControlKind::Fail`] and
+    /// [`ControlKind::Branch`], a single `ok` boolean for
+    /// [`ControlKind::Assert`], and for [`ControlKind::Sequence`] a read of the
+    /// other input, whose only purpose is to have happened.
+    pub probe: Option<String>,
+    /// What to say — printed by a log, and used as the failure message by a
+    /// fail or a failed assertion.
+    pub message: Option<String>,
+    /// How long [`ControlKind::Wait`] holds for.
+    pub wait_ms: Option<u64>,
+}
+
 /// One `SELECT count(*)` a stage emits, and which of its outputs it counts.
 ///
 /// A list rather than a single statement because a quality node reports two
@@ -232,6 +321,10 @@ pub struct Stage {
     pub spill_path: Option<String>,
     /// DuckDB extensions this stage's component needs, straight from its spec.
     pub requires_extensions: Vec<String>,
+    /// How this stage behaves when it fails.
+    pub policy: StagePolicy,
+    /// What this stage does besides producing rows, for a control node.
+    pub control: Option<Control>,
 }
 
 impl Stage {
@@ -239,6 +332,12 @@ impl Stage {
     /// SQL both key off the node id; the alias is an additional view.
     pub fn relation_name(&self) -> &str {
         &self.node_id
+    }
+
+    /// Whether this stage has to be addressable on its own rather than batched
+    /// into one script with the rest.
+    pub fn needs_session(&self) -> bool {
+        self.control.is_some() || self.policy.needs_session()
     }
 
     /// The dead-letter relation this stage creates, if it is one that splits.
@@ -341,6 +440,28 @@ impl Plan {
     /// this to know whether the first row count belongs to the prelude.
     pub fn has_prelude_probe(&self, counts: bool) -> bool {
         counts && !self.extensions().is_empty()
+    }
+
+    /// Whether this plan has to run through a persistent session rather than
+    /// as one batched script.
+    ///
+    /// True when something in it needs a stage to be addressable on its own: a
+    /// control node, or a stage carrying a retry or failure policy. Everything
+    /// else keeps the one-script path it was written against — see
+    /// `docs/DECISION_execution_model.md` for why a plan earns the session
+    /// instead of every plan getting one.
+    pub fn needs_session(&self) -> bool {
+        self.stages.iter().any(Stage::needs_session)
+    }
+
+    /// The stages this plan would run one at a time, for a caller that wants to
+    /// explain why a session was used.
+    pub fn session_reasons(&self) -> Vec<&str> {
+        self.stages
+            .iter()
+            .filter(|s| s.needs_session())
+            .map(|s| s.node_id.as_str())
+            .collect()
     }
 
     /// Node ids in execution order — the useful form for tests and for the
@@ -711,6 +832,18 @@ fn build_stages(
             })?;
 
             let counts = builders::count_probes(&node.id, kind, splits, from.as_deref());
+            let policy = StagePolicy::from_node(node.data.policy.as_ref());
+
+            let control = match component.spec.control {
+                None => None,
+                Some(kind) => Some(builders::control_for(
+                    kind,
+                    &node.id,
+                    &component_id,
+                    &properties,
+                    &inputs,
+                )?),
+            };
 
             let (sink_path, sink_mode) = if kind == StageKind::Sink {
                 let read = |key: &str| {
@@ -738,6 +871,8 @@ fn build_stages(
                 sink_path,
                 sink_mode,
                 requires_extensions: component.spec.requires_extensions.clone(),
+                policy,
+                control,
                 materialize,
                 spill_path,
             })

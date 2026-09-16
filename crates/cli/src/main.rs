@@ -312,9 +312,12 @@ fn command_run(
                 .unwrap_or(0);
 
             for stage in &report.stages {
-                let rows = match stage.rows {
-                    Some(rows) => format!("{rows} rows"),
-                    None => "-".to_string(),
+                let rows = match (&stage.skipped, stage.rows) {
+                    // A stage that did not run says why, rather than showing a
+                    // dash that reads the same as "no counts were collected".
+                    (Some(reason), _) => reason.describe(),
+                    (None, Some(rows)) => format!("{rows} rows"),
+                    (None, None) => "-".to_string(),
                 };
 
                 // A quality node's rejected count is shown even when it is
@@ -332,12 +335,30 @@ fn command_run(
                 );
             }
 
+            for failure in &report.failures {
+                println!(
+                    "  ! {} ({}): {}",
+                    failure.label, failure.node_id, failure.message
+                );
+            }
+
+            for note in &report.notes {
+                println!("  · {note}");
+            }
+
             println!(
                 "\nRan {} stage(s) in {:.2}s",
                 report.stages.len(),
                 report.elapsed.as_secs_f64()
             );
-            exit::OK
+            // A report can describe a failed run: `continue_on_failure` hands
+            // back everything that happened rather than only the first error,
+            // and the exit code is what says it still failed.
+            if report.failed() {
+                exit::FAILED
+            } else {
+                exit::OK
+            }
         }
 
         Err(error) => {

@@ -15,7 +15,7 @@
 
 use super::builders::{self, Lowering};
 use crate::EngineError;
-use etl_metadata::{ComponentSpec, PortSpec, PropertySpec};
+use etl_metadata::{ComponentSpec, ControlKind, PortSpec, PropertySpec};
 use serde_json::{Map, Value as JsonValue};
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
@@ -709,6 +709,108 @@ fn all_components() -> Vec<(ComponentSpec, BuildFn)> {
                         .help("The column on the right input it must be found in."),
                 ]),
             builders::quality_referential,
+        ),
+        // -- Control ------------------------------------------------------
+        //
+        // All six pass their input through unchanged; what makes them control
+        // nodes is what the executor does on the way past. A plan holding one
+        // runs through a session rather than as one batched script, because
+        // every one of them needs a decision taken between two statements.
+        (
+            ComponentSpec::new("ctl.wait", "Wait")
+                .description("Hold for a fixed time, then carry on.")
+                .icon("clock")
+                .control(ControlKind::Wait)
+                .properties(vec![
+                    PropertySpec::integer("ms")
+                        .required()
+                        .help("How long to wait, in milliseconds."),
+                    PropertySpec::text("message").help("Printed while waiting."),
+                ]),
+            builders::control_passthrough,
+        ),
+        (
+            ComponentSpec::new("ctl.log", "Log")
+                .description("Report how many rows went past, with a note.")
+                .icon("scroll-text")
+                .control(ControlKind::Log)
+                .properties(vec![PropertySpec::text("message")
+                    .help("Printed with the row count when the rows go past.")]),
+            builders::control_passthrough,
+        ),
+        (
+            ComponentSpec::new("ctl.fail", "Fail")
+                .description("Stop the run, always or when a condition holds.")
+                .icon("octagon-x")
+                .control(ControlKind::Fail)
+                .properties(vec![
+                    PropertySpec::sql("when").help(
+                        "A row predicate. The run fails if any row matches. Left unset, reaching \
+                         this node fails the run.",
+                    ),
+                    PropertySpec::text("message")
+                        .required()
+                        .help("What to say when it fails."),
+                ]),
+            builders::control_passthrough,
+        ),
+        (
+            ComponentSpec::new("ctl.branch", "Branch")
+                .description("Run what follows only if some row matches.")
+                .icon("git-branch")
+                .control(ControlKind::Branch)
+                .properties(vec![
+                    PropertySpec::sql("predicate")
+                        .required()
+                        .help("A row predicate. What follows runs if at least one row matches."),
+                    PropertySpec::text("message").help("Printed when the branch is not taken."),
+                ]),
+            builders::control_passthrough,
+        ),
+        (
+            ComponentSpec::new("ctl.sequence", "Sequence")
+                .description("Finish one branch before another starts.")
+                .icon("list-ordered")
+                .control(ControlKind::Sequence)
+                .inputs(vec![
+                    PortSpec::new("main").help("Passed through to the output."),
+                    PortSpec::new("after").help("Read to completion first. Its rows are dropped."),
+                ])
+                .properties(vec![]),
+            builders::control_passthrough,
+        ),
+        // -- Quality assertions -------------------------------------------
+        //
+        // A `qa.*` id because that is what these are to a user, but they assert
+        // something about a whole relation rather than partitioning it: no
+        // reject port, and the only outcome is to stop the run. Deferred out of
+        // Phase 6a for exactly that reason — they needed the session first.
+        (
+            ComponentSpec::new("qa.row_count", "Row count")
+                .description("Fail the run unless the row count is within bounds.")
+                .icon("hash")
+                .control(ControlKind::Assert)
+                .outputs(vec![PortSpec::main()])
+                .properties(vec![
+                    PropertySpec::number("min").help("Fewest rows that is acceptable, inclusive."),
+                    PropertySpec::number("max").help("Most rows that is acceptable, inclusive."),
+                    PropertySpec::text("message").help("What to say when the count is outside."),
+                ]),
+            builders::control_passthrough,
+        ),
+        (
+            ComponentSpec::new("qa.schema_match", "Schema match")
+                .description("Fail the run unless the named columns are present.")
+                .icon("table-properties")
+                .control(ControlKind::Assert)
+                .outputs(vec![PortSpec::main()])
+                .properties(vec![
+                    PropertySpec::string_list("columns")
+                        .required()
+                        .help("Columns that must exist on the input."),
+                    PropertySpec::text("message").help("What to say when one is missing."),
+                ]),
+            builders::control_passthrough,
         ),
     ]
 }

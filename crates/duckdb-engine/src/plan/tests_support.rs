@@ -20,6 +20,7 @@ pub(crate) fn node(id: &str, component_id: &str, properties: JsonValue) -> Pipel
             disabled: None,
             materialize: None,
             alias: None,
+            policy: None,
             extra: Default::default(),
         },
         extra: Default::default(),

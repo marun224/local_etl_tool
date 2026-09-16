@@ -14,10 +14,10 @@
 //! dispatch with a spec registry so that adding the ninth is data rather than
 //! another match arm.
 
-use super::{reject_relation, CountProbe, Input, Materialize, StageKind};
+use super::{reject_relation, Control, CountProbe, Input, Materialize, StageKind};
 use crate::sql::{quote_identifier, quote_literal, quote_path};
 use crate::EngineError;
-use etl_metadata::{MAIN_PORT, REJECTED_PORT};
+use etl_metadata::{ControlKind, MAIN_PORT, REJECTED_PORT};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
 /// What a builder needs to know about the node it is lowering.
@@ -1406,4 +1406,201 @@ pub(crate) fn quality_referential(node: &Lowering<'_>) -> Result<String, EngineE
     );
 
     Ok(quality_split(node, &plain_base(&left), &predicate, &[]))
+}
+
+// ---------------------------------------------------------------------------
+// Control
+//
+// Every control component lowers to the same SQL: a view equal to its input.
+// The thing that makes it a control node is the [`Control`] built alongside it,
+// which the driven executor acts on before letting the rows past. Keeping the
+// SQL trivial is deliberate — a control node must not change what the data is,
+// only what happens around it.
+// ---------------------------------------------------------------------------
+
+/// The pass-through every control component shares.
+pub(crate) fn control_passthrough(node: &Lowering<'_>) -> Result<String, EngineError> {
+    let upstream = match node.inputs {
+        [] => {
+            return Err(EngineError::WrongInputCount {
+                id: node.node_id.to_string(),
+                component_id: node.component_id.to_string(),
+                expected: 1,
+                actual: 0,
+            })
+        }
+        // A sequence node takes two and passes the first along; every other
+        // control node takes one. Taking the first input in both cases is what
+        // makes one builder enough.
+        inputs => inputs[0].relation(),
+    };
+
+    Ok(create_view(node, &plain_base(&upstream)))
+}
+
+/// Work out what a control stage does, from its kind and its properties.
+///
+/// Called by the planner rather than by a builder, because most of what a
+/// control node does is not SQL and a builder returns SQL. The parts that *are*
+/// SQL are probes: queries the driver runs to decide something.
+pub(crate) fn control_for(
+    kind: ControlKind,
+    node_id: &str,
+    component_id: &str,
+    properties: &JsonValue,
+    inputs: &[Input],
+) -> Result<Control, EngineError> {
+    let node = Lowering {
+        node_id,
+        component_id,
+        properties,
+        inputs,
+        alias: None,
+        materialize: Materialize::Auto,
+        spill_path: None,
+    };
+
+    let upstream = inputs
+        .first()
+        .map(Input::relation)
+        .unwrap_or_else(|| node_id.to_string());
+
+    let control = match kind {
+        ControlKind::Wait => Control {
+            kind,
+            probe: None,
+            message: optional_str(&node, "message")?.map(str::to_string),
+            wait_ms: Some(non_negative(&node, "ms")? as u64),
+        },
+
+        ControlKind::Log => Control {
+            kind,
+            probe: None,
+            message: optional_str(&node, "message")?.map(str::to_string),
+            wait_ms: None,
+        },
+
+        // No `when` means fail whenever the run reaches this node. With one, it
+        // fails only if some row matches — a dead-letter check that stops the
+        // run rather than writing a file.
+        ControlKind::Fail => Control {
+            kind,
+            probe: optional_str(&node, "when")?.map(|predicate| {
+                format!(
+                    "SELECT count(*) AS n FROM {} WHERE coalesce({predicate}, false);",
+                    quote_identifier(&upstream)
+                )
+            }),
+            message: Some(required_str(&node, "message")?.to_string()),
+            wait_ms: None,
+        },
+
+        // Taken when at least one row matches. Expressed as a count rather than
+        // a scalar so the predicate is written about a row, which is the same
+        // thing every other component's predicate is written about.
+        ControlKind::Branch => Control {
+            kind,
+            probe: Some(format!(
+                "SELECT count(*) AS n FROM {} WHERE coalesce({}, false);",
+                quote_identifier(&upstream),
+                required_str(&node, "predicate")?
+            )),
+            message: optional_str(&node, "message")?.map(str::to_string),
+            wait_ms: None,
+        },
+
+        // The probe reads the *other* input. Nothing is done with the answer —
+        // the point is that reading it forced that branch to run first.
+        ControlKind::Sequence => {
+            let (_, after) = exactly_two_inputs(&node)?;
+
+            Control {
+                kind,
+                probe: Some(format!(
+                    "SELECT count(*) AS n FROM {};",
+                    quote_identifier(&after)
+                )),
+                message: None,
+                wait_ms: None,
+            }
+        }
+
+        ControlKind::Assert => Control {
+            kind,
+            probe: Some(assertion_probe(&node, &upstream)?),
+            message: Some(assertion_message(&node)?),
+            wait_ms: None,
+        },
+    };
+
+    Ok(control)
+}
+
+/// The `ok` query behind `qa.row_count` and `qa.schema_match`.
+///
+/// Both answer one boolean about a whole relation rather than about a row,
+/// which is why neither has a reject port: there is nothing to reject, only a
+/// run to stop.
+fn assertion_probe(node: &Lowering<'_>, upstream: &str) -> Result<String, EngineError> {
+    let relation = quote_identifier(upstream);
+
+    // `qa.schema_match` names columns; `qa.row_count` sets bounds. The property
+    // present is what decides, so neither needs to know the other exists.
+    if let Some(values) = optional_array(node, "columns")? {
+        let columns = column_list(node, "columns", values)?;
+
+        // Selecting the columns is the check: DuckDB raises if one is missing,
+        // and a raised probe is already a failed stage. The wrapper exists only
+        // so a passing check still returns a row to read.
+        return Ok(format!(
+            "SELECT count(*) >= 0 AS ok FROM (SELECT {} FROM {relation} LIMIT 0);",
+            columns.join(", ")
+        ));
+    }
+
+    let minimum = optional_number(node, "min")?;
+    let maximum = optional_number(node, "max")?;
+
+    let mut bounds = Vec::new();
+    if let Some(low) = &minimum {
+        bounds.push(format!("count(*) >= {low}"));
+    }
+    if let Some(high) = &maximum {
+        bounds.push(format!("count(*) <= {high}"));
+    }
+
+    if bounds.is_empty() {
+        return Err(EngineError::InvalidProperty {
+            id: node.node_id.to_string(),
+            property: "min".to_string(),
+            reason: "or max must be set; a row count with neither bound checks nothing".to_string(),
+        });
+    }
+
+    Ok(format!(
+        "SELECT ({}) AS ok FROM {relation};",
+        bounds.join(" AND ")
+    ))
+}
+
+/// What an assertion says when it does not hold.
+fn assertion_message(node: &Lowering<'_>) -> Result<String, EngineError> {
+    if let Some(message) = optional_str(node, "message")? {
+        return Ok(message.to_string());
+    }
+
+    if let Some(values) = optional_array(node, "columns")? {
+        let columns = column_list(node, "columns", values)?;
+        return Ok(format!("expected the columns {}", columns.join(", ")));
+    }
+
+    let minimum = optional_number(node, "min")?;
+    let maximum = optional_number(node, "max")?;
+
+    Ok(match (minimum, maximum) {
+        (Some(low), Some(high)) => format!("expected between {low} and {high} rows"),
+        (Some(low), None) => format!("expected at least {low} rows"),
+        (None, Some(high)) => format!("expected at most {high} rows"),
+        (None, None) => "the row count is outside its bounds".to_string(),
+    })
 }

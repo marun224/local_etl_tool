@@ -38,6 +38,7 @@ fn node(id: &str, component_id: &str) -> PipelineNode {
             disabled: None,
             materialize: None,
             alias: None,
+            policy: None,
             extra: Default::default(),
         },
         extra: Default::default(),
@@ -265,12 +266,17 @@ fn a_known_namespace_with_an_unimplemented_component_says_so() {
 }
 
 #[test]
-fn only_sources_transforms_and_quality_checks_produce_relations() {
+fn everything_but_a_sink_produces_a_relation() {
     assert!(StageKind::Source.produces_relation());
     assert!(StageKind::Transform.produces_relation());
     assert!(StageKind::Quality.produces_relation());
+
+    // Control nodes pass their input along, so a ctl.log in the middle of a
+    // chain does not break the chain. Changed in Phase 6b; before that they
+    // produced nothing, which would have made them unusable where they belong.
+    assert!(StageKind::Control.produces_relation());
+
     assert!(!StageKind::Sink.produces_relation());
-    assert!(!StageKind::Control.produces_relation());
 }
 
 #[test]

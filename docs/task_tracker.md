@@ -3,22 +3,23 @@
 **State only.** Design lives in [PLAN_duckle_parity.md](PLAN_duckle_parity.md). Read this file
 first when picking the project back up.
 
-> ## ⏸ Paused 2026-09-16, after Phase 6a
+> ## ⏸ Paused 2026-09-16, after Phase 6b
 >
-> Stopped at a clean boundary — gate green, nothing mid-edit. **Phase 6a is complete.**
+> Stopped at a clean boundary — gate green, nothing mid-edit. **Phase 6b is complete.**
 >
 > Phases 0–5 are dated 2026-09-15 because that is when the work was done; the clock rolled
 > past midnight while pausing, which is the only reason those lines read a day later.
 >
-> **To resume:** read this file, then Phase 6b in the plan. Unlike every phase so far, 6b
-> opens with a decision to make rather than code to write — the plan says which.
+> **To resume:** read this file, then Phase 7 in the plan. Phase 7 is the desktop app and is
+> explicitly multi-sitting — split it at the sub-bullets, 7a first.
 >
 > ```powershell
 > cd D:\workspace\ETL_Local_Tool
-> cargo test --workspace                                            # expect 300 passing
-> .\target\debug\etl.exe components                                 # expect 47
+> cargo test --workspace                                            # expect 326 passing
+> .\target\debug\etl.exe components                                 # expect 54
 > .\target\debug\etl.exe run samples\pipelines\orders_enriched.json # expect 12/5/7/6/6
 > .\target\debug\etl.exe run samples\pipelines\orders_checked.json  # expect 12/10+2/9+1/9/2/1
+> .\target\debug\etl.exe run samples\pipelines\orders_guarded.json  # expect 12 through, branch taken
 > ```
 >
 > The phase's own acceptance criterion, which should print the same 12/6/6 twice into two
@@ -30,7 +31,7 @@ first when picking the project back up.
 > .\target\debug\etl.exe run samples\pipelines\orders_by_context.json @c --context prod
 > ```
 >
-> All five were run verbatim at the moment of pausing and printed exactly what is written
+> All of these were run verbatim at the moment of pausing and printed exactly what is written
 > above. If any of them disagrees with this file later, trust the commands and fix the file.
 >
 > **State of the tree:** committed and pushed on 2026-09-16 — this paragraph used to say
@@ -51,21 +52,26 @@ first when picking the project back up.
 
 ## Where things stand
 
-- **Next phase:** Phase 6b — Control flow and per-stage policy. **It starts with a written
-  decision, not with code:** `ctl.*` and per-stage retry both need a stage to be runnable on
-  its own, and the one-script-per-run model forbids that. See Phase 6b in the plan.
+- **Next phase:** Phase 7 — the desktop app (Tauri 2 + React 19 + xyflow). Multi-sitting; start
+  with 7a, the Tauri shell and its IPC commands.
 - **In progress:** nothing
 - **Blocked on:** nothing.
 
-Phase 6 was split into 6a and 6b on 2026-09-16, before starting — the reasoning is in the plan.
-**6a is complete** (2026-09-16).
+Phase 6 was split into 6a and 6b on 2026-09-16 before starting; **both are complete**
+(2026-09-16). The execution-model decision 6b turned on is recorded in
+[DECISION_execution_model.md](DECISION_execution_model.md) — read that before changing how
+anything runs.
+
+**Deferred out of 6b, with reasons, in the plan:** `ctl.foreach` (needs the planner to treat a
+body as a re-runnable subgraph), `ctl.run_pipeline` (nested documents need their own design
+pass), `ctl.throttle` (nothing to throttle until Phase 10 has a row cursor).
 
 ## What works today
 
-Phases 0–5 and 6a are complete, so there is a working CLI. From the repo root:
+Phases 0–6 are complete, so there is a working CLI. From the repo root:
 
 ```powershell
-cargo test --workspace        # 300 tests: 234 engine, 31 end-to-end, 20 secrets, 15 metadata
+cargo test --workspace        # 326 tests: 247 engine, 44 end-to-end, 20 secrets, 15 metadata
 .\target\debug\etl.exe run samples\pipelines\orders_enriched.json
 .\target\debug\etl.exe validate samples\pipelines\orders_enriched.json
 .\target\debug\etl.exe plan samples\pipelines\orders_enriched.json --script
@@ -87,7 +93,37 @@ The split is exact by construction: accepted is `coalesce(<predicate>, false)` a
 its exact negation, so a row whose predicate is *unknown* is rejected rather than lost by both
 sides. A test asserts accepted + rejected = input for every validator, against real data.
 
-**Forty-seven components exist.** Sources: `src.cloud.http`, `src.cloud.s3`, `src.db.mysql`,
+**There are two execution transports, and a plan earns the second one.** Most plans go to DuckDB
+as a single script, which is what every component was built against. A plan holding a control
+node or a stage policy runs instead through a **persistent session** — one DuckDB process with
+its stdin held open, statements sent and answered one at a time. That is what makes a stage
+retryable, a failure survivable, and a branch possible. A round trip costs 0.54 ms against
+41.5 ms to spawn a process, which is why per-stage execution is affordable at all.
+
+```powershell
+.\target\debug\etl.exe run samples\pipelines\orders_guarded.json
+```
+
+That sample asserts its schema and row count, logs, and branches on whether any large order
+exists — writing the report only if one does. `plan.needs_session()` decides the transport;
+`plan.session_reasons()` names the stages that asked for it.
+
+**Per-stage policy** sits on a node beside `materialize`:
+
+```jsonc
+"policy": {
+  "retryAttempts": 2,        // extra attempts after the first
+  "retryBackoffMs": 100,     // doubling each attempt
+  "continueOnFailure": true, // the run goes on; it still ends failed
+  "memoryLimitMb": 512       // set and reset around this stage
+}
+```
+
+`continueOnFailure` returns a **report**, not an error: the stages that ran, the ones skipped
+because they read something that never got created, and the failures. The exit code is 3 either
+way. Getting the report back is the entire point of asking a run to continue.
+
+**Fifty-four components exist.** Sources: `src.cloud.http`, `src.cloud.s3`, `src.db.mysql`,
 `src.db.postgres`, `src.db.sqlite`, `src.file.csv`, `src.file.excel`, `src.file.json`,
 `src.file.jsonl`, `src.file.parquet`, `src.lake.delta`, `src.lake.iceberg`. Transforms:
 `xf.aggregate`, `xf.cast`, `xf.dedup`, `xf.derive`, `xf.distinct`, `xf.except`,
@@ -96,8 +132,10 @@ sides. A test asserts accepted + rejected = input for every validator, against r
 `xf.unpivot`, `xf.window`. Sinks: `snk.cloud.s3`, `snk.db.mysql`, `snk.db.postgres`,
 `snk.db.sqlite`, `snk.file.csv`, `snk.file.excel`, `snk.file.json`, `snk.file.jsonl`,
 `snk.file.parquet`. Quality: `qa.accepted_values`, `qa.expression`, `qa.not_null`, `qa.range`,
-`qa.referential`, `qa.regex`, `qa.unique`. Everything else in the six namespaces compiles to
-`UnsupportedComponent`, by design.
+`qa.referential`, `qa.regex`, `qa.unique`. Quality assertions, which fail the run rather than
+partitioning rows and so have no reject port: `qa.row_count`, `qa.schema_match`. Control:
+`ctl.branch`, `ctl.fail`, `ctl.log`, `ctl.sequence`, `ctl.wait`. Everything else in the six
+namespaces compiles to `UnsupportedComponent`, by design.
 
 **Extensions are vendored**, not installed system-wide: `.\scripts\fetch-duckdb-extensions.ps1`
 puts them under `tools/duckdb/extensions/` and the executor points DuckDB at that directory. A
@@ -141,7 +179,8 @@ extension, which sits badly with Phase 9's vendored set) and DuckLake (a catalog
 needs its own design pass rather than a thirteenth copy of the ATTACH shape). Both are listed
 under Phase 4 in the plan, so both need a decision recorded there rather than quietly dropping.
 
-**Not built yet:** control flow and per-stage policy (Phase 6b), the desktop app (Phase 7).
+**Not built yet:** the desktop app (Phase 7), the headless runner (Phase 8), and the three
+control components deferred out of 6b — see the top of this file.
 
 **Deferred out of 6a, on purpose:** `qa.row_count` and `qa.schema_match`. Both assert something
 about a whole relation rather than partitioning it — no reject rows, and the only outcome is to

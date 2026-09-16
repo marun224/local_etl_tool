@@ -1,0 +1,108 @@
+{
+  "formatVersion": 1,
+  "name": "orders_guarded",
+  "nodes": [
+    {
+      "id": "read_orders",
+      "type": "source",
+      "position": { "x": 0.0, "y": 0.0 },
+      "data": {
+        "label": "Orders CSV",
+        "componentId": "src.file.csv",
+        "properties": {
+          "path": "${workspace}/samples/data/orders.csv",
+          "header": true,
+          "delimiter": ","
+        },
+        "alias": "orders",
+        "policy": {
+          "retryAttempts": 2,
+          "retryBackoffMs": 100
+        }
+      }
+    },
+    {
+      "id": "expect_columns",
+      "type": "transform",
+      "position": { "x": 260.0, "y": 0.0 },
+      "data": {
+        "label": "Schema is what we expect",
+        "componentId": "qa.schema_match",
+        "properties": {
+          "columns": ["order_id", "customer_id", "amount", "status"],
+          "message": "orders.csv is missing a column the pipeline needs"
+        }
+      }
+    },
+    {
+      "id": "expect_rows",
+      "type": "transform",
+      "position": { "x": 520.0, "y": 0.0 },
+      "data": {
+        "label": "Enough rows to bother",
+        "componentId": "qa.row_count",
+        "properties": {
+          "min": 1,
+          "message": "the orders file was empty"
+        }
+      }
+    },
+    {
+      "id": "note_size",
+      "type": "transform",
+      "position": { "x": 780.0, "y": 0.0 },
+      "data": {
+        "label": "Loaded",
+        "componentId": "ctl.log",
+        "properties": {
+          "message": "orders loaded and checked"
+        }
+      }
+    },
+    {
+      "id": "any_large",
+      "type": "transform",
+      "position": { "x": 1040.0, "y": 0.0 },
+      "data": {
+        "label": "Any large orders?",
+        "componentId": "ctl.branch",
+        "properties": {
+          "predicate": "amount > 400",
+          "message": "no order over 400, so the large-order report was not written"
+        }
+      }
+    },
+    {
+      "id": "large_only",
+      "type": "transform",
+      "position": { "x": 1300.0, "y": 0.0 },
+      "data": {
+        "label": "Large orders",
+        "componentId": "xf.filter",
+        "properties": { "predicate": "amount > 400" }
+      }
+    },
+    {
+      "id": "write_large",
+      "type": "sink",
+      "position": { "x": 1560.0, "y": 0.0 },
+      "data": {
+        "label": "Large orders Parquet",
+        "componentId": "snk.file.parquet",
+        "properties": {
+          "path": "${workspace}/samples/out/orders_large.parquet",
+          "mode": "overwrite",
+          "compression": "zstd"
+        }
+      }
+    }
+  ],
+  "edges": [
+    { "id": "e1", "source": "read_orders", "target": "expect_columns", "sourceHandle": "main", "targetHandle": "in" },
+    { "id": "e2", "source": "expect_columns", "target": "expect_rows", "sourceHandle": "main", "targetHandle": "in" },
+    { "id": "e3", "source": "expect_rows", "target": "note_size", "sourceHandle": "main", "targetHandle": "in" },
+    { "id": "e4", "source": "note_size", "target": "any_large", "sourceHandle": "main", "targetHandle": "in" },
+    { "id": "e5", "source": "any_large", "target": "large_only", "sourceHandle": "main", "targetHandle": "in" },
+    { "id": "e6", "source": "large_only", "target": "write_large", "sourceHandle": "main", "targetHandle": "in" }
+  ]
+}

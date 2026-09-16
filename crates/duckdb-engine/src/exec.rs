@@ -16,9 +16,12 @@
 //! number of values that arrived before a failure is what identifies the stage
 //! that failed.
 
-use crate::plan::{Plan, Stage};
+use crate::plan::{Control, Plan, Stage};
+use crate::session::{Session, SessionError};
 use crate::sql::quote_path;
+use etl_metadata::ControlKind;
 use serde_json::Value as JsonValue;
+use std::collections::HashSet;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -79,6 +82,9 @@ pub enum ExecError {
 
     #[error("could not read DuckDB's output: {0}")]
     BadOutput(String),
+
+    #[error(transparent)]
+    Session(#[from] SessionError),
 }
 
 /// How to run a plan.
@@ -126,6 +132,40 @@ pub struct StageOutcome {
     /// stage that does not split, which is how a node with nothing to reject
     /// stays distinguishable from a node that cannot reject at all.
     pub rejected: Option<u64>,
+    /// Why this stage produced nothing, when it did not run at all. Only the
+    /// driven path can report this: on the one-script path a failure ends the
+    /// run, so there is never a stage that was reached and skipped.
+    pub skipped: Option<SkipReason>,
+}
+
+/// Why a stage did not run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkipReason {
+    /// It failed, and `continue_on_failure` let the run go on.
+    Failed,
+    /// Something it reads never got created, because that stage failed.
+    /// Running it anyway would fail with a message about a missing table,
+    /// which would name the wrong node.
+    UpstreamFailed { node_id: String },
+    /// A `ctl.branch` upstream did not take this way. Not a failure — the
+    /// pipeline said this might not run, and it did not.
+    NotTaken { node_id: String },
+}
+
+impl SkipReason {
+    pub fn describe(&self) -> String {
+        match self {
+            SkipReason::Failed => "failed".to_string(),
+            SkipReason::UpstreamFailed { node_id } => format!("skipped: {node_id} failed"),
+            SkipReason::NotTaken { node_id } => format!("not taken: {node_id}"),
+        }
+    }
+
+    /// Whether this stage's absence means the run went wrong. A branch not
+    /// taken is the pipeline working as written.
+    pub fn is_failure(&self) -> bool {
+        !matches!(self, SkipReason::NotTaken { .. })
+    }
 }
 
 impl StageOutcome {
@@ -160,17 +200,50 @@ pub struct RunReport {
     pub script: String,
     /// How many `disk`-materialised spill files were written and cleared up.
     pub spilled: usize,
+    /// What the control nodes had to say: waits held, branches taken or not,
+    /// logs printed. Empty for a plan without them.
+    pub notes: Vec<String>,
+    /// Stages that failed while `continue_on_failure` kept the run going.
+    ///
+    /// **A report holding any of these is a failed run.** Every other way a
+    /// stage can fail returns an error instead; these come back inside a report
+    /// precisely so the rest of it survives to be read.
+    pub failures: Vec<StageFailure>,
 }
 
 impl RunReport {
+    /// Whether this run failed despite reaching the end.
+    pub fn failed(&self) -> bool {
+        !self.failures.is_empty()
+    }
+
     pub fn total_rows_written(&self) -> Option<u64> {
         self.stages.iter().filter_map(|s| s.rows).next_back()
     }
 }
 
 /// Compile-free execution: run an already-compiled plan.
+///
+/// Two transports, one plan. Most plans go to DuckDB as a single script, which
+/// is fastest and is what every component was written against. A plan holding a
+/// control node or a per-stage policy needs its stages addressable one at a
+/// time, and takes the session path instead.
 pub fn run(plan: &Plan, options: &RunOptions) -> Result<RunReport, ExecError> {
     let binary = locate_duckdb(options)?;
+
+    if plan.needs_session() {
+        return run_driven(plan, options, binary);
+    }
+
+    run_one_script(plan, options, binary)
+}
+
+/// The original path: the whole plan as one `-c` invocation.
+fn run_one_script(
+    plan: &Plan,
+    options: &RunOptions,
+    binary: PathBuf,
+) -> Result<RunReport, ExecError> {
     let script = with_extension_directory(plan, options);
 
     prepare_sinks(plan, options)?;
@@ -230,6 +303,8 @@ pub fn run(plan: &Plan, options: &RunOptions) -> Result<RunReport, ExecError> {
         // masked script. The unmasked one went to DuckDB and nowhere else.
         script: redact(&script, &options.redact),
         spilled,
+        notes: Vec::new(),
+        failures: Vec::new(),
     })
 }
 
@@ -528,9 +603,493 @@ fn outcomes(plan: &Plan, counts_enabled: bool, counts: &[u64]) -> Vec<StageOutco
                 component_id: stage.component_id.clone(),
                 rows: count(false),
                 rejected: stage.splits.then(|| count(true)).flatten(),
+                skipped: None,
             }
         })
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// The driven path
+//
+// One DuckDB process held open, stages sent to it one at a time. Used only for
+// plans that need it: see `Plan::needs_session` and
+// `docs/DECISION_execution_model.md`.
+//
+// Everything here is about *transport*. The plan, the SQL, and the count probes
+// are the same ones the one-script path uses — if the two ever disagree about
+// anything else, the dual path has stopped paying for itself.
+// ---------------------------------------------------------------------------
+
+/// A stage that failed while the run was told to carry on past it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StageFailure {
+    pub node_id: String,
+    pub label: String,
+    pub message: String,
+}
+
+/// Run a plan through a persistent session.
+fn run_driven(plan: &Plan, options: &RunOptions, binary: PathBuf) -> Result<RunReport, ExecError> {
+    let extensions = plan.extensions();
+    let extension_dir = locate_extension_dir(options);
+
+    prepare_sinks(plan, options)?;
+    prepare_spills(plan, options)?;
+
+    let mut session = Session::open(
+        &binary,
+        options.working_dir.as_deref(),
+        extension_dir.as_deref(),
+        &extensions,
+    )
+    .map_err(|source| session_error(source, &extensions, options))?;
+
+    let started = Instant::now();
+
+    let mut outcomes: Vec<StageOutcome> = Vec::with_capacity(plan.stages.len());
+    let mut failures: Vec<StageFailure> = Vec::new();
+    // Stages that cannot run because something they read never got created.
+    let mut unusable: HashSet<String> = HashSet::new();
+    // Stages downstream of a branch that went the other way. Separate from
+    // `unusable` because this is the pipeline working, not failing.
+    let mut untaken: HashSet<String> = HashSet::new();
+    let mut notes: Vec<String> = Vec::new();
+    let mut script = String::new();
+
+    for stage in &plan.stages {
+        script.push_str(&format!("-- {} ({})\n", stage.node_id, stage.component_id));
+        script.push_str(&stage.sql);
+        script.push_str("\n\n");
+
+        // A stage reading a relation that was never created would fail with a
+        // DuckDB message about a missing table, which says nothing about the
+        // stage that actually broke. Skipping is the honest report.
+        if let Some(missing) = blocked_by(stage, &unusable) {
+            unusable.insert(stage.node_id.clone());
+            outcomes.push(skipped_outcome(
+                stage,
+                SkipReason::UpstreamFailed { node_id: missing },
+            ));
+            continue;
+        }
+
+        if let Some(branch) = blocked_by(stage, &untaken) {
+            untaken.insert(stage.node_id.clone());
+            outcomes.push(skipped_outcome(
+                stage,
+                SkipReason::NotTaken { node_id: branch },
+            ));
+            continue;
+        }
+
+        // A control node acts before its rows are allowed past: it may hold,
+        // report, stop the run, or decide that what follows does not run.
+        if let Some(control) = &stage.control {
+            match act(&mut session, stage, control, options)? {
+                Ok(Action::Continue) => {}
+
+                Ok(Action::Note(note)) => notes.push(note),
+
+                Ok(Action::DoNotTake(note)) => {
+                    notes.push(note);
+                    untaken.insert(stage.node_id.clone());
+                }
+
+                Err(message) => {
+                    unusable.insert(stage.node_id.clone());
+                    outcomes.push(skipped_outcome(stage, SkipReason::Failed));
+                    failures.push(StageFailure {
+                        node_id: stage.node_id.clone(),
+                        label: stage.label.clone(),
+                        message: message.clone(),
+                    });
+
+                    if !stage.policy.continue_on_failure {
+                        return Err(ExecError::StageFailed {
+                            node_id: stage.node_id.clone(),
+                            label: stage.label.clone(),
+                            message: redact(&message, &options.redact),
+                        });
+                    }
+                    continue;
+                }
+            }
+        }
+
+        match run_stage(&mut session, stage, options)? {
+            Ok(counts) => outcomes.push(stage_outcome(stage, &counts)),
+
+            Err(message) => {
+                unusable.insert(stage.node_id.clone());
+
+                outcomes.push(StageOutcome {
+                    node_id: stage.node_id.clone(),
+                    label: stage.label.clone(),
+                    component_id: stage.component_id.clone(),
+                    rows: None,
+                    rejected: None,
+                    skipped: Some(SkipReason::Failed),
+                });
+
+                failures.push(StageFailure {
+                    node_id: stage.node_id.clone(),
+                    label: stage.label.clone(),
+                    message: message.clone(),
+                });
+
+                // Without `continue_on_failure` this is the end of the run, and
+                // it ends the same way the one-script path ends: at the first
+                // failure, naming the stage.
+                if !stage.policy.continue_on_failure {
+                    return Err(ExecError::StageFailed {
+                        node_id: stage.node_id.clone(),
+                        label: stage.label.clone(),
+                        message: redact(&message, &options.redact),
+                    });
+                }
+            }
+        }
+    }
+
+    let elapsed = started.elapsed();
+    let spilled = clear_spills(plan, options);
+    let _ = session.close();
+
+    // A run that carried on past a failure still failed, but the report is the
+    // reason anyone asked it to carry on: it says which stages ran, which were
+    // skipped, and why. Returning an error here would throw that away and leave
+    // `continue_on_failure` with nothing to show for itself. The failures ride
+    // along instead, and the caller decides the exit code.
+    let failures = failures
+        .into_iter()
+        .map(|failure| StageFailure {
+            message: redact(&failure.message, &options.redact),
+            ..failure
+        })
+        .collect();
+
+    Ok(RunReport {
+        stages: outcomes,
+        elapsed,
+        duckdb_bin: binary,
+        script: redact(&script, &options.redact),
+        spilled,
+        notes,
+        failures,
+    })
+}
+
+/// A stage that was reached but not run.
+fn skipped_outcome(stage: &Stage, reason: SkipReason) -> StageOutcome {
+    StageOutcome {
+        node_id: stage.node_id.clone(),
+        label: stage.label.clone(),
+        component_id: stage.component_id.clone(),
+        rows: None,
+        rejected: None,
+        skipped: Some(reason),
+    }
+}
+
+/// What a control node decided.
+enum Action {
+    /// Carry on, saying nothing.
+    Continue,
+    /// Carry on, with something worth telling the user.
+    Note(String),
+    /// Carry on, but nothing downstream of this runs.
+    DoNotTake(String),
+}
+
+/// Do what a control node says, before its rows are let past.
+#[allow(clippy::type_complexity)]
+fn act(
+    session: &mut Session,
+    stage: &Stage,
+    control: &Control,
+    options: &RunOptions,
+) -> Result<Result<Action, String>, ExecError> {
+    // The probe is evaluated first for every kind that has one, so a failing
+    // probe is a failing stage before any decision rests on its answer.
+    let answered = match &control.probe {
+        None => None,
+        Some(probe) => {
+            let answer = session.execute(probe).map_err(ExecError::Session)?;
+
+            match answer.values.first().and_then(first_number) {
+                Some(number) => Some(number),
+                None => {
+                    let mut said = answer.stderr.trim().to_string();
+                    if said.is_empty() {
+                        said = session.message().trim().to_string();
+                    }
+
+                    // Keep both halves. DuckDB's message is usually the more
+                    // specific — it names the missing column and what was
+                    // available — but the node's own message is why the person
+                    // put the check there, and dropping it loses the intent.
+                    let detail = if said.is_empty() {
+                        format!("{} produced no answer", stage.label)
+                    } else {
+                        said
+                    };
+
+                    return Ok(Err(match control.message.as_deref() {
+                        Some(note) if !note.is_empty() => format!("{note}. {detail}"),
+                        _ => detail,
+                    }));
+                }
+            }
+        }
+    };
+
+    let said = || control.message.clone().unwrap_or_default();
+
+    let action = match control.kind {
+        ControlKind::Wait => {
+            let ms = control.wait_ms.unwrap_or(0);
+            std::thread::sleep(Duration::from_millis(ms));
+
+            match control.message.as_deref() {
+                Some(note) => Action::Note(format!("{} — waited {ms}ms: {note}", stage.label)),
+                None => Action::Note(format!("{} — waited {ms}ms", stage.label)),
+            }
+        }
+
+        // The count is reported by the ordinary probes; this is only the note
+        // that goes with it.
+        ControlKind::Log => match control.message.as_deref() {
+            Some(note) => Action::Note(format!("{} — {note}", stage.label)),
+            None => Action::Continue,
+        },
+
+        // No probe means fail on arrival; a probe means fail only if some row
+        // matched it.
+        ControlKind::Fail => match answered {
+            None => return Ok(Err(said())),
+            Some(0) => Action::Continue,
+            Some(matched) => return Ok(Err(format!("{} ({matched} row(s) matched)", said()))),
+        },
+
+        ControlKind::Branch => match answered {
+            Some(0) | None => {
+                let note = match control.message.as_deref() {
+                    Some(note) => format!("{} — not taken: {note}", stage.label),
+                    None => format!("{} — not taken, nothing downstream ran", stage.label),
+                };
+                Action::DoNotTake(note)
+            }
+            Some(matched) => Action::Note(format!("{} — taken ({matched} row(s))", stage.label)),
+        },
+
+        // Nothing is done with the answer. Having read the other input is the
+        // whole effect.
+        ControlKind::Sequence => Action::Continue,
+
+        // The probe returns a boolean, which arrives as 1 or 0.
+        ControlKind::Assert => match answered {
+            Some(1) => Action::Continue,
+            _ => return Ok(Err(said())),
+        },
+    };
+
+    let _ = options;
+    Ok(Ok(action))
+}
+
+/// The first value of the first row, as a number. Booleans arrive as 1 and 0.
+fn first_number(value: &JsonValue) -> Option<u64> {
+    let row = value.as_array()?.first()?.as_object()?;
+    let first = row.values().next()?;
+
+    match first {
+        JsonValue::Bool(true) => Some(1),
+        JsonValue::Bool(false) => Some(0),
+        other => other.as_u64(),
+    }
+}
+
+/// The upstream this stage cannot run without, if that upstream is unusable.
+fn blocked_by(stage: &Stage, unusable: &HashSet<String>) -> Option<String> {
+    stage
+        .inputs
+        .iter()
+        .find(|input| unusable.contains(&input.node_id))
+        .map(|input| input.node_id.clone())
+}
+
+/// Run one stage, with its retries, returning either its counts or the message
+/// explaining why it did not produce them.
+///
+/// The outer `Result` is for the session itself coming apart — a timeout or a
+/// lost pipe, which no retry policy can help with. The inner one is the stage
+/// failing, which is what a policy is about.
+#[allow(clippy::type_complexity)]
+fn run_stage(
+    session: &mut Session,
+    stage: &Stage,
+    options: &RunOptions,
+) -> Result<Result<Vec<u64>, String>, ExecError> {
+    let mut attempt = 0;
+
+    loop {
+        let outcome = attempt_stage(session, stage, options)?;
+
+        match outcome {
+            Ok(counts) => return Ok(Ok(counts)),
+
+            Err(message) => {
+                if attempt >= stage.policy.retry_attempts {
+                    return Ok(Err(message));
+                }
+
+                attempt += 1;
+                std::thread::sleep(stage.policy.backoff_for(attempt));
+            }
+        }
+    }
+}
+
+/// One attempt at one stage.
+fn attempt_stage(
+    session: &mut Session,
+    stage: &Stage,
+    options: &RunOptions,
+) -> Result<Result<Vec<u64>, String>, ExecError> {
+    // A memory ceiling is set around the statement and put back afterwards, so
+    // one greedy stage cannot quietly change the budget for the rest of the run.
+    if let Some(limit) = stage.policy.memory_limit_mb {
+        let set = format!("SET memory_limit='{limit}MB';");
+        session.execute(&set).map_err(ExecError::Session)?;
+    }
+
+    let answer = session.execute(&stage.sql).map_err(ExecError::Session)?;
+
+    // A `CREATE VIEW` prints nothing whether it worked or not, so the statement
+    // itself cannot say. The count probes that follow are the verdict: a probe
+    // against a relation that was never created fails and returns nothing.
+    //
+    // With counts turned off there is no verdict to read, so stderr is all
+    // there is. That mode already gives up per-stage attribution; this is the
+    // same trade.
+    // Whatever the statement itself said. When a `CREATE VIEW` fails, this is
+    // the real cause; the count probe that follows then fails too, complaining
+    // that the view does not exist. Reporting the probe's message would name
+    // the symptom and hide the reason.
+    let said = answer.stderr.trim().to_string();
+
+    let result = if options.counts {
+        collect_counts(session, stage, options).map_err(|from_probe| {
+            if said.is_empty() {
+                from_probe
+            } else {
+                said
+            }
+        })
+    } else if answer.has_message() {
+        Err(said)
+    } else {
+        Ok(Vec::new())
+    };
+
+    if stage.policy.memory_limit_mb.is_some() {
+        session
+            .execute("RESET memory_limit;")
+            .map_err(ExecError::Session)?;
+    }
+
+    Ok(result)
+}
+
+/// Run the stage's count probes.
+///
+/// These are the same probes the one-script path emits, and they double as the
+/// success signal: a probe against a relation that was never created fails and
+/// returns nothing, so a missing count is how a failed `CREATE VIEW` — which
+/// prints nothing either way — becomes visible.
+fn collect_counts(
+    session: &mut Session,
+    stage: &Stage,
+    options: &RunOptions,
+) -> Result<Vec<u64>, String> {
+    if !options.counts {
+        return Ok(Vec::new());
+    }
+
+    let mut counts = Vec::with_capacity(stage.counts.len());
+
+    for probe in &stage.counts {
+        let answer = match session.execute(&probe.sql) {
+            Ok(answer) => answer,
+            Err(error) => return Err(error.to_string()),
+        };
+
+        match answer.values.first().and_then(count_in) {
+            Some(count) => counts.push(count),
+            None => {
+                // Now, and only now, is it worth waiting for the explanation.
+                let mut said = answer.stderr.trim().to_string();
+                if said.is_empty() {
+                    said = session.message().trim().to_string();
+                }
+
+                return Err(if said.is_empty() {
+                    format!("{} produced no rows to count", stage.label)
+                } else {
+                    said
+                });
+            }
+        }
+    }
+
+    Ok(counts)
+}
+
+/// The `n` out of a count probe's result.
+fn count_in(value: &JsonValue) -> Option<u64> {
+    value
+        .as_array()
+        .and_then(|rows| rows.first())
+        .and_then(|row| row.get("n"))
+        .and_then(JsonValue::as_u64)
+}
+
+/// Pair a stage's counts with its ports, the way the one-script path does.
+fn stage_outcome(stage: &Stage, counts: &[u64]) -> StageOutcome {
+    let at = |wanted_rejected: bool| {
+        stage
+            .counts
+            .iter()
+            .position(|probe| probe.is_rejected() == wanted_rejected)
+            .and_then(|index| counts.get(index).copied())
+    };
+
+    StageOutcome {
+        node_id: stage.node_id.clone(),
+        label: stage.label.clone(),
+        component_id: stage.component_id.clone(),
+        rows: at(false),
+        rejected: stage.splits.then(|| at(true)).flatten(),
+        skipped: None,
+    }
+}
+
+/// Turn a session that would not open into the message the one-script path
+/// would have given for the same cause.
+fn session_error(source: SessionError, extensions: &[&str], options: &RunOptions) -> ExecError {
+    // A prelude that fails is almost always a missing extension, and saying so
+    // is more use than repeating DuckDB's own wording.
+    if !extensions.is_empty() {
+        if let SessionError::BadOutput(message) = &source {
+            return ExecError::ExtensionLoadFailed {
+                extensions: extensions.join(", "),
+                message: redact(message, &options.redact),
+            };
+        }
+    }
+
+    ExecError::Session(source)
 }
 
 #[cfg(test)]

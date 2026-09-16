@@ -352,6 +352,40 @@ three times.
 
 **Done.** Both namespaces registered and tested.
 
+**Amended 2026-09-16, on completion.** The decision was made and recorded in
+[DECISION_execution_model.md](DECISION_execution_model.md): **option A, a persistent session,
+with the dual path** — a plan takes the session only when it holds a control node or a stage
+policy, and every other plan keeps the one-script transport it was built against. The measured
+case for it is in that file.
+
+Built: `crates/duckdb-engine/src/session.rs`, the driven path in `exec.rs`, `StagePolicy` on
+every stage, five control components (`ctl.wait`, `ctl.log`, `ctl.fail`, `ctl.branch`,
+`ctl.sequence`) and the two assertions deferred out of 6a (`qa.row_count`, `qa.schema_match`).
+Per-stage `retry_attempts`, `retry_backoff_ms`, `continue_on_failure` and `memory_limit_mb` all
+work. Policy lives on `NodeData` beside `materialize` rather than in a `src/policy.rs`: it is
+four fields resolved once, and a module for it would have been a file holding a struct.
+
+**Three of the listed components were not built, and are deferred rather than dropped:**
+
+- **`ctl.foreach`.** Everything else here is one stage deciding something about itself. A foreach
+  is a stage deciding about *other* stages: it needs its body identified as a subgraph, that
+  subgraph re-executed per binding, and the relations inside it named per iteration so the runs
+  do not overwrite one another. That is a planner change, not an executor one, and it wants its
+  own phase. The session it needs now exists, which was the hard part.
+- **`ctl.run_pipeline`.** A nested document, loaded and compiled at run time, with its own
+  parameters and its own session. Raises questions this phase did not settle: recursion depth,
+  whether the child shares the parent's session, and how a child's failure reads in the parent's
+  report. Design work, not typing.
+- **`ctl.throttle`.** A rate limiter needs a rate to limit, and every stage here is one statement
+  rather than a stream of rows. It would be `ctl.wait` with extra steps until there is a row
+  cursor to throttle, which arrives with Phase 10's connectors.
+
+**One thing found while building, worth not rediscovering:** the stderr grace period must never be
+waited on the way through. A `CREATE VIEW` returns no rows whether it worked or not, so pausing
+on "no rows arrived" put 250 ms on *every* stage — a seven-stage sample took 2.0 s instead of
+0.18 s. The verdict comes from the count probes; stderr is asked for the message only once
+something is already known to have failed.
+
 ### Phase 7 — Desktop app: Tauri 2 + React 19 + xyflow canvas
 
 **Goal.** Build, run, and inspect a pipeline entirely in the GUI. **Multi-sitting — split at
