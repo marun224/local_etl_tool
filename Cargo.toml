@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/metadata",
     "crates/secrets",
+    "crates/state",
     "crates/duckdb-engine",
     "crates/cli",
     "apps/desktop",
@@ -18,6 +19,7 @@ rust-version = "1.80"
 # Internal
 etl-metadata = { path = "crates/metadata", version = "0.1.0" }
 etl-secrets = { path = "crates/secrets", version = "0.1.0" }
+etl-state = { path = "crates/state", version = "0.1.0" }
 etl-duckdb-engine = { path = "crates/duckdb-engine", version = "0.1.0" }
 
 # External

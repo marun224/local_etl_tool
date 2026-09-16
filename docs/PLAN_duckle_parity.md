@@ -578,6 +578,36 @@ watermark; the console lists runs and enforces roles.
 
 **Done.** Runner executes the sample on a schedule with history.
 
+**Split into 8a–8d on 2026-09-16, before starting.** The phase as written is four features that
+happen to share a crate, and three of them need a supply-chain decision this project has always
+taken deliberately. Ordered so that each one has something real underneath it:
+
+- **8a — Watermark incremental loading.** The correctness core, and the one slice that needs no
+  new dependency: a state store, an `incremental` block on a source node, and the rule that
+  state advances only on a run that fully succeeded. Everything else in the phase is plumbing
+  around this.
+- **8b — The runner: `run`/`validate`, run history, structured logs, lineage JSON.** Needs 8a's
+  state store to have a place to write run records. One decision: a separate `etl-runner`
+  binary as the plan names, or subcommands on the existing `etl`.
+- **8c — Scheduler: interval, cron with timezone, file-watch.** Needs 8b's run records to have a
+  history to append to. Two dependencies: cron parsing with a timezone, and filesystem watching.
+- **8d — Web console: `serve`, shared-token auth, roles.** Last, because it is a view over what
+  8b and 8c produce. One dependency: an HTTP server.
+
+**Open before 8c and 8d — the dependency posture.** This workspace has four external crates
+(`serde`, `serde_json`, `thiserror`, `clap`) plus RustCrypto, and has hand-rolled a topological
+sort and a civil-date conversion rather than take `petgraph` or a date crate. Phase 8 asks for
+three things where that stance has a real cost: **cron with timezone** (a timezone database is
+not something to hand-roll — it changes several times a year and being wrong is silent),
+**file-watching** (platform-specific; `notify` is the only sane answer), and an **HTTP server**
+for the console. These are recorded as an open decision in the tracker rather than picked in a
+diff. 8a and 8b need none of them and go first regardless.
+
+**Note.** `PipelineDoc::resource_pool` already exists and is read by nothing — its doc comment
+says it is for "the limits a scheduled run observes". Admission pools are not in this phase's
+**Do** list, so 8c will schedule without them and the field stays unused until a phase claims
+it. Worth knowing before someone assumes it works.
+
 ### Phase 9 — Standalone binary export + air-gapped packaging
 
 **Goal.** "Build Pipeline" produces one self-contained executable, cross-OS.

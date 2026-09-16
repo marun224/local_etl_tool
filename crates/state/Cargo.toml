@@ -1,0 +1,12 @@
+[package]
+name = "etl-state"
+description = "What a pipeline remembers between runs: watermarks, held under the workspace's .etl/ directory."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

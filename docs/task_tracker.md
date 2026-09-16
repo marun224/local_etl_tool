@@ -56,11 +56,14 @@ first when picking the project back up.
 
 ## Where things stand
 
-- **Next phase:** Phase 8 — the headless runner: `serve`, scheduler, RBAC, watermark
-  incremental loads. The first phase since 0 with no GUI in it, and the first needing state
-  that outlives a run.
-- **In progress:** nothing
-- **Blocked on:** nothing.
+- **Next phase:** Phase 8, split into 8a–8d in the plan on 2026-09-16 before starting.
+- **In progress:** **8a — watermark incremental loading.** The state store (`crates/state/`) is
+  built and tested; what remains is the `incremental` block on a source node, the predicate the
+  compiler adds from it, reading the new high-water mark after a run, and the CLI surface
+  (`etl state list|forget`). Nothing is half-wired — the crate stands on its own and nothing
+  reads it yet.
+- **Blocked on:** nothing. 8c and 8d need a dependency decision (see Open decisions); 8a and 8b
+  do not and go first regardless.
 
 Phase 6 was split into 6a and 6b on 2026-09-16 before starting; **both are complete**
 (2026-09-16). The execution-model decision 6b turned on is recorded in
@@ -293,7 +296,11 @@ fail the run. That is `ctl.fail`'s shape and it needs 6b's execution-model decis
 | 7b | — the canvas | **done** | 2026-09-16 |
 | 7c | — the generated property panel | **done** | 2026-09-16 |
 | 7d | — the run view, Plan tab, and the policy panel | **done** | 2026-09-16 |
-| 8 | Headless runner: serve, scheduler, RBAC, incremental | not started | |
+| 8 | Headless runner: serve, scheduler, RBAC, incremental | **in progress** | |
+| 8a | — watermark incremental loading | in progress (state store done) | |
+| 8b | — the runner: run/validate, history, logs, lineage | not started | |
+| 8c | — scheduler: interval, cron, file-watch | not started | |
+| 8d | — web console: serve, token auth, roles | not started | |
 | 9 | Standalone binary export + air-gapped packaging | not started | |
 | 10 | Rust-native connectors | not started | |
 | 11 | AI assistant + MCP server | not started | |
@@ -323,7 +330,31 @@ fail the run. That is `ctl.fail`'s shape and it needs 6b's execution-model decis
 
 ## Open decisions
 
-None. (Resolved 2026-09-15: RustCrypto — see Settled decisions 4.)
+1. **What dependencies may Phase 8c and 8d take?** This workspace has four external crates
+   (`serde`, `serde_json`, `thiserror`, `clap`) plus RustCrypto, and has hand-rolled a
+   topological sort and civil-date conversion rather than take `petgraph` or a date crate. 8a
+   and 8b need nothing new. The last two slices each need something:
+
+   - **Cron with a timezone (8c).** The cron *expression* is easy to parse by hand; the
+     **timezone database** is not, and must not be — it changes several times a year and being
+     wrong is silent. Either take `chrono-tz`/`jiff`, or restrict schedules to UTC and interval,
+     which needs no database at all and covers most of what a local tool schedules.
+   - **File-watching (8c).** Platform-specific enough that `notify` is the only sane answer;
+     the alternative is polling `mtime`, which is genuinely fine for a watched directory and
+     costs nothing but latency.
+   - **An HTTP server (8d).** The console needs one. `axum` brings `tokio` and a large tree;
+     `tiny_http` is small and blocking. A hand-rolled HTTP/1.1 server is possible and is
+     probably a bad idea for something that accepts connections and checks tokens.
+
+   Not urgent — 8a and 8b come first — but worth taking deliberately rather than discovering in
+   a diff, which is the same call made for cryptography in Settled decisions 4.
+
+<details>
+<summary>Resolved: which cryptography dependency? (2026-09-15)</summary>
+
+See Settled decisions 4 — RustCrypto `aes-gcm`.
+
+</details>
 
 <details>
 <summary>Resolved: which cryptography dependency?</summary>
