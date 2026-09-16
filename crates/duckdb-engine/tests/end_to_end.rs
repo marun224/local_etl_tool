@@ -10,10 +10,11 @@
 //! fresh checkout is not red for a reason that has nothing to do with the code.
 
 use etl_duckdb_engine::{
-    compile, run, Contexts, ExecError, Resolver, RunOptions, RunReport, SkipReason,
+    compile, compile_with, run, CompileOptions, Contexts, ExecError, Resolver, RunOptions,
+    RunReport, SkipReason,
 };
 use etl_metadata::PipelineDoc;
-use std::path::{Path, PathBuf};
+use std::path::{Path, PathBuf, MAIN_SEPARATOR};
 use std::process::Command;
 
 /// The repository root, found from this crate's manifest.
@@ -2027,5 +2028,259 @@ fn the_one_script_path_publishes_no_per_stage_timings() {
     assert!(
         report.elapsed > std::time::Duration::ZERO,
         "the run as a whole is still timed"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Incremental loading
+//
+// The phase's own acceptance line: a watermarked load run twice loads only new
+// rows, and a failed run does not advance the watermark. Both are asserted
+// against a real CSV that grows between runs, because the failure mode being
+// guarded against — silently skipping rows — is invisible in a test that mocks
+// the data away.
+// ---------------------------------------------------------------------------
+
+/// A CSV of orders, written fresh.
+fn write_orders(path: &Path, rows: &[(&str, &str)]) {
+    let mut text = String::from("order_id,order_ts\n");
+    for (id, ts) in rows {
+        text.push_str(&format!("{id},{ts}\n"));
+    }
+
+    std::fs::create_dir_all(path.parent().expect("has a parent")).expect("directory");
+    std::fs::write(path, text).expect("writes the csv");
+}
+
+/// `source -> parquet sink`, with the source watching `order_ts`.
+fn incremental_doc(csv: &Path, out: &Path) -> PipelineDoc {
+    let json = format!(
+        r#"{{
+          "formatVersion": 1,
+          "name": "incremental_test",
+          "nodes": [
+            {{"id": "orders", "type": "source", "position": {{"x": 0, "y": 0}},
+             "data": {{"label": "Orders", "componentId": "src.file.csv",
+                      "properties": {{"path": {path}, "header": true}},
+                      "incremental": {{"column": "order_ts"}}}}}},
+            {{"id": "out", "type": "sink", "position": {{"x": 200, "y": 0}},
+             "data": {{"label": "Out", "componentId": "snk.file.parquet",
+                      "properties": {{"path": {out}, "mode": "overwrite"}}}}}}
+          ],
+          "edges": [
+            {{"id": "e1", "source": "orders", "target": "out",
+             "sourceHandle": "main", "targetHandle": "in"}}
+          ]
+        }}"#,
+        path = serde_json::to_string(&csv.to_string_lossy()).expect("json"),
+        out = serde_json::to_string(&out.to_string_lossy()).expect("json"),
+    );
+
+    PipelineDoc::from_json(&json).expect("document parses")
+}
+
+/// A plan for `document`, compiled as though `orders` had reached `mark`.
+fn compiled_at(document: &PipelineDoc, mark: &str) -> etl_duckdb_engine::Plan {
+    let mut watermarks = std::collections::BTreeMap::new();
+    watermarks.insert("orders".to_string(), mark.to_string());
+
+    compile_with(document, &CompileOptions { watermarks }).expect("compiles with a watermark")
+}
+
+#[test]
+fn a_watermarked_load_run_twice_reads_only_what_is_new() {
+    if duckdb_binary().is_none() {
+        return;
+    }
+
+    let directory = output_dir("incremental");
+    let csv = directory.join("orders.csv");
+    let out = directory.join("out.parquet");
+
+    write_orders(
+        &csv,
+        &[
+            ("1", "2026-01-01 00:00:00"),
+            ("2", "2026-01-02 00:00:00"),
+            ("3", "2026-01-03 00:00:00"),
+        ],
+    );
+
+    let document = incremental_doc(&csv, &out);
+
+    // First run: nothing is remembered, so everything is read. A first run
+    // that quietly skipped history would be very hard to notice.
+    let report = run(&compile(&document).expect("compiles"), &options()).expect("runs");
+
+    assert_eq!(stage(&report, "orders").rows, Some(3));
+    assert_eq!(report.watermarks.len(), 1, "one source, one mark");
+    assert_eq!(report.watermarks[0].column, "order_ts");
+
+    let mark = report.watermarks[0].value.clone().expect("a mark was read");
+    assert_eq!(mark, "2026-01-03 00:00:00");
+
+    // Second run over unchanged data: the mark is already at the top, so there
+    // is nothing after it.
+    let report = run(&compiled_at(&document, &mark), &options()).expect("runs");
+
+    assert_eq!(
+        stage(&report, "orders").rows,
+        Some(0),
+        "a second run over unchanged data must read nothing"
+    );
+    assert_eq!(
+        report.watermarks[0].value, None,
+        "nothing loaded means nothing to move the mark to"
+    );
+
+    // Now the source grows. Only the rows after the mark are read, and the row
+    // *at* the mark is not re-read -- which is what `>` rather than `>=` buys,
+    // and is the difference between a duplicate and a correct load.
+    write_orders(
+        &csv,
+        &[
+            ("1", "2026-01-01 00:00:00"),
+            ("2", "2026-01-02 00:00:00"),
+            ("3", "2026-01-03 00:00:00"),
+            ("4", "2026-01-04 00:00:00"),
+            ("5", "2026-01-05 00:00:00"),
+        ],
+    );
+
+    let report = run(&compiled_at(&document, &mark), &options()).expect("runs");
+
+    assert_eq!(
+        stage(&report, "orders").rows,
+        Some(2),
+        "only the two rows after the watermark"
+    );
+    assert_eq!(
+        report.watermarks[0].value.as_deref(),
+        Some("2026-01-05 00:00:00"),
+        "the new mark is the highest value loaded"
+    );
+
+    // And the parquet holds exactly those rows, checked independently of the
+    // code under test.
+    let binary = duckdb_binary().expect("checked above");
+    let written = out.to_string_lossy().replace(MAIN_SEPARATOR, "/");
+    let found = query(
+        &binary,
+        &format!("SELECT count(*) AS n FROM read_parquet('{written}')"),
+    );
+
+    assert!(found.contains("2"), "two rows were written: {found}");
+}
+
+#[test]
+fn a_declared_start_bounds_the_very_first_run() {
+    if duckdb_binary().is_none() {
+        return;
+    }
+
+    let directory = output_dir("incremental-start");
+    let csv = directory.join("orders.csv");
+    let out = directory.join("out.parquet");
+
+    write_orders(
+        &csv,
+        &[
+            ("1", "2026-01-01 00:00:00"),
+            ("2", "2026-02-01 00:00:00"),
+            ("3", "2026-03-01 00:00:00"),
+        ],
+    );
+
+    let mut document = incremental_doc(&csv, &out);
+    for node in &mut document.nodes {
+        if let Some(incremental) = node.data.incremental.as_mut() {
+            incremental.start = Some("2026-01-15 00:00:00".to_string());
+        }
+    }
+
+    let report = run(&compile(&document).expect("compiles"), &options()).expect("runs");
+
+    assert_eq!(
+        stage(&report, "orders").rows,
+        Some(2),
+        "the declared start bounds the first run, before anything is remembered"
+    );
+}
+
+#[test]
+fn a_failed_run_hands_back_no_state_to_save() {
+    if duckdb_binary().is_none() {
+        return;
+    }
+
+    let directory = output_dir("incremental-failure");
+    let csv = directory.join("orders.csv");
+    let out = directory.join("out.parquet");
+
+    write_orders(&csv, &[("1", "2026-01-01 00:00:00")]);
+
+    // A watermark column that is not in the data.
+    let mut document = incremental_doc(&csv, &out);
+    for node in &mut document.nodes {
+        if let Some(incremental) = node.data.incremental.as_mut() {
+            incremental.column = "no_such_column".to_string();
+        }
+    }
+
+    let error = run(&compile(&document).expect("compiles"), &options())
+        .expect_err("a watermark column that does not exist must fail the run");
+
+    assert!(
+        format!("{error}").contains("no_such_column"),
+        "the error names the column: {error}"
+    );
+
+    // The probe is emitted with the source rather than at the end of the
+    // script, so a misconfigured watermark is caught before a sink writes.
+    assert!(!out.exists(), "nothing was written");
+
+    // And this is the structural half of "state advances only on success": a
+    // failed run returns an error, so there is no report to take watermarks
+    // from. Nothing downstream has to remember not to save them.
+}
+
+#[test]
+fn incremental_outside_a_source_is_dropped_with_a_warning() {
+    // Only a source reads from outside the pipeline, so only a source can read
+    // part of it. On a transform the predicate would compile and quietly filter
+    // a second time, which is the kind of thing that looks like it works.
+    let document = PipelineDoc::from_json(
+        r#"{
+          "formatVersion": 1,
+          "nodes": [
+            {"id": "orders", "type": "source", "position": {"x": 0, "y": 0},
+             "data": {"label": "Orders", "componentId": "src.file.csv",
+                      "properties": {"path": "samples/data/orders.csv"}}},
+            {"id": "big", "type": "transform", "position": {"x": 200, "y": 0},
+             "data": {"label": "Big", "componentId": "xf.filter",
+                      "properties": {"predicate": "amount > 100"},
+                      "incremental": {"column": "order_ts"}}}
+          ],
+          "edges": [
+            {"id": "e1", "source": "orders", "target": "big",
+             "sourceHandle": "main", "targetHandle": "in"}
+          ]
+        }"#,
+    )
+    .expect("parses");
+
+    let plan = compile(&document).expect("compiles anyway");
+
+    assert!(
+        !plan.is_incremental(),
+        "the declaration is dropped rather than honoured somewhere it does not apply"
+    );
+    assert!(
+        plan.warnings.iter().any(|warning| matches!(
+            warning,
+            etl_duckdb_engine::Warning::IncrementalIgnored { id, .. } if id == "big"
+        )),
+        "and the drop is said out loud: {:?}",
+        plan.warnings
     );
 }

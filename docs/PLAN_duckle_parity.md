@@ -608,6 +608,50 @@ says it is for "the limits a scheduled run observes". Admission pools are not in
 **Do** list, so 8c will schedule without them and the field stays unused until a phase claims
 it. Worth knowing before someone assumes it works.
 
+**8a done 2026-09-16.** Watermark incremental loading, end to end: an `incremental` block on a
+source node, a predicate the compiler adds from it, a probe that reads the new mark, and state
+that advances only on a run that fully succeeded.
+
+Where each piece went, and why there:
+
+- **`incremental` sits on the node beside `materialize` and `policy`**, not in a component's
+  property schema. It is how a node is *run* rather than what its component does, and it reads
+  the same on all twelve sources; in the schema it would be twelve copies of one idea, and a
+  thirteenth source would silently not have it.
+- **The predicate is applied in `create_view`**, the one place every relation-producing builder
+  already ends. Twelve sources build their bodies twelve ways and only some have somewhere to
+  put a `WHERE`, so the filter wraps the body instead: `SELECT * FROM (<body>) WHERE col > mark`.
+  DuckDB pushes it back down into the scan for the formats that support it.
+- **Strictly greater than, never `>=`.** The watermark is a value already loaded; re-reading it
+  would duplicate every row sharing that timestamp. The mirror-image risk — a row written later
+  with a timestamp at or below the mark is never seen — is inherent to watermarking, and is why
+  the column has to be one that only goes up. Said in the doc comment rather than pretended away.
+- **The probe rides the existing count stream.** A count probe emits `n`; a watermark probe emits
+  `w`; each parser ignores what it does not recognise. That is why this needed no change to count
+  attribution, which is delicate enough that threading a second value through it would have been
+  the risky way to do it.
+- **The probe is emitted with its source, not at the end of the script.** It costs the same — the
+  relation is scanned either way — and buys the thing that matters: a watermark column that does
+  not exist fails before any sink has written, rather than after.
+- **`compile_with` rather than a changed `compile`.** `compile` still compiles as though nothing
+  has ever run, which is what `validate` and the canvas want; only a real run reads a watermark.
+- **A changed column starts over.** If the stored mark came from a different column than the
+  document now names, it is discarded with a warning rather than compared across columns. That
+  reloads data, which is the safe direction.
+- **`incremental` outside a source is dropped with a warning.** On a transform the predicate
+  would compile and quietly filter a second time — the kind of thing that looks like it works.
+
+**Verify.** Automated as the phase's own acceptance line:
+`a_watermarked_load_run_twice_reads_only_what_is_new` grows a real CSV between runs and checks
+3 → 0 → 2 rows and the marks either side; `a_failed_run_hands_back_no_state_to_save` checks that
+a bad watermark column fails before the sink writes. 361 Rust tests, 114 frontend, fmt and clippy
+clean. `samples/pipelines/orders_incremental.json` is the worked example, and `etl state
+list|forget` is the surface for looking at and resetting what is remembered.
+
+**Not in 8a:** the canvas cannot yet *edit* an `incremental` block — it survives a GUI round trip
+untouched, but there is no panel for it. It belongs with a Phase 8 that has a runner to schedule,
+and is noted in the tracker rather than left to be discovered.
+
 ### Phase 9 — Standalone binary export + air-gapped packaging
 
 **Goal.** "Build Pipeline" produces one self-contained executable, cross-OS.

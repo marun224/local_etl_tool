@@ -32,6 +32,20 @@ pub(crate) struct Lowering<'a> {
     pub materialize: Materialize,
     /// Where a `disk` node spills to. Set by the planner, not by the builder.
     pub spill_path: Option<&'a str>,
+    /// The watermark filter for an incremental source, when there is one to
+    /// apply. Builders do not read it either: like `materialize`, it is applied
+    /// by `create_view`, so it lands on all twelve sources rather than on
+    /// whichever ones remembered to ask.
+    pub incremental: Option<IncrementalFilter<'a>>,
+}
+
+/// "Only the rows after this", resolved.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct IncrementalFilter<'a> {
+    pub column: &'a str,
+    /// The high-water mark to read past. `None` on the first run of a source
+    /// that declared no `start`, which means load everything.
+    pub since: Option<&'a str>,
 }
 
 // ---------------------------------------------------------------------------
@@ -821,6 +835,7 @@ pub(crate) fn sink_s3(node: &Lowering<'_>) -> Result<String, EngineError> {
 /// materialisation modes in one place instead of in twenty-five builders.
 fn create_view(node: &Lowering<'_>, body: &str) -> String {
     let name = quote_identifier(node.node_id);
+    let body = &apply_watermark(node, body);
 
     let mut statement = match (node.materialize, node.spill_path) {
         // A temp table: the work happens once, here, rather than on each read.
@@ -852,6 +867,80 @@ fn create_view(node: &Lowering<'_>, body: &str) -> String {
     }
 
     statement
+}
+
+/// The query that reads this run's new high-water mark.
+///
+/// `max` over the node's own relation, which is already narrowed to this run's
+/// rows — so the answer is the highest value *loaded*, not the highest in the
+/// source. Those are the same number when the run read everything after the
+/// mark, and the former is the correct one to remember when it did not.
+///
+/// A relation that loaded nothing gives `null`, which the executor reads as
+/// "leave the watermark where it was" rather than as a value to store.
+pub(crate) fn watermark_probe(node_id: &str, column: &str) -> String {
+    format!(
+        "SELECT max({}) AS w FROM {};",
+        quote_identifier(column),
+        quote_identifier(node_id)
+    )
+}
+
+/// Narrow a source's body to the rows after its watermark.
+///
+/// Wrapped around the body rather than pushed into each reader, because the
+/// twelve sources build their bodies twelve different ways and only some of
+/// them have somewhere to put a predicate. DuckDB pushes the filter back down
+/// into the scan for the formats that support it, so wrapping costs nothing
+/// where it matters and works everywhere.
+///
+/// Strictly greater than, never `>=`: the watermark is a value already loaded,
+/// and re-reading it would duplicate every row sharing that timestamp. The cost
+/// is the mirror-image risk — a row written *later* with a timestamp at or
+/// below the mark is never seen — which is inherent to watermarking and is why
+/// [`Incremental::column`] has to be a column that only goes up.
+///
+/// [`Incremental::column`]: etl_metadata::Incremental::column
+fn apply_watermark(node: &Lowering<'_>, body: &str) -> String {
+    let Some(filter) = node.incremental else {
+        return body.to_string();
+    };
+
+    let Some(since) = filter.since else {
+        // Declared incremental, but nothing remembered and no start given: the
+        // first run loads everything, which is what makes the second one
+        // meaningful.
+        return body.to_string();
+    };
+
+    format!(
+        "SELECT * FROM ({body}) WHERE {} > {}",
+        quote_identifier(filter.column),
+        watermark_literal(since)
+    )
+}
+
+/// A watermark as a SQL literal.
+///
+/// Stored state is always text, because the store has no business deciding
+/// whether a column is a timestamp or an id. Something that reads as a number
+/// goes back unquoted so a numeric column compares against a number; everything
+/// else is quoted, and DuckDB casts the string to the column's type — which is
+/// the right authority for the job.
+fn watermark_literal(value: &str) -> String {
+    let numeric = !value.is_empty()
+        && value.parse::<f64>().is_ok()
+        // `parse::<f64>` accepts "inf" and "NaN", which are not what anyone's
+        // watermark column holds and must not go through unquoted.
+        && value
+            .chars()
+            .all(|c| c.is_ascii_digit() || c == '.' || c == '-' || c == '+');
+
+    if numeric {
+        value.to_string()
+    } else {
+        quote_literal(value)
+    }
 }
 
 fn copy_to(upstream: &str, path: &str, options: &str) -> String {
@@ -1458,6 +1547,9 @@ pub(crate) fn control_for(
         alias: None,
         materialize: Materialize::Auto,
         spill_path: None,
+        // A control node reads properties through this, and builds no
+        // relation of its own; there is nothing for a watermark to narrow.
+        incremental: None,
     };
 
     let upstream = inputs

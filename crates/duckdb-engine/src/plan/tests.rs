@@ -39,6 +39,7 @@ fn node(id: &str, component_id: &str) -> PipelineNode {
             materialize: None,
             alias: None,
             policy: None,
+            incremental: None,
             extra: Default::default(),
         },
         extra: Default::default(),

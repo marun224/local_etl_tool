@@ -17,8 +17,8 @@ first when picking the project back up.
 >
 > ```powershell
 > cd D:\workspace\ETL_Local_Tool
-> cargo test --workspace                                            # expect 339 passing
-> npm --prefix frontend run test                                    # expect 111 passing
+> cargo test --workspace                                            # expect 361 passing
+> npm --prefix frontend run test                                    # expect 114 passing
 > npm --prefix frontend run typecheck                               # expect clean
 > npm --prefix frontend run test                                    # expect 80 passing
 > npm --prefix frontend run build                                   # expect clean
@@ -57,13 +57,12 @@ first when picking the project back up.
 ## Where things stand
 
 - **Next phase:** Phase 8, split into 8a–8d in the plan on 2026-09-16 before starting.
-- **In progress:** **8a — watermark incremental loading.** The state store (`crates/state/`) is
-  built and tested; what remains is the `incremental` block on a source node, the predicate the
-  compiler adds from it, reading the new high-water mark after a run, and the CLI surface
-  (`etl state list|forget`). Nothing is half-wired — the crate stands on its own and nothing
-  reads it yet.
-- **Blocked on:** nothing. 8c and 8d need a dependency decision (see Open decisions); 8a and 8b
-  do not and go first regardless.
+- **In progress:** nothing. **8a is complete** (2026-09-16). Next is **8b** — the runner:
+  `run`/`validate` as a headless binary, run history, structured logs, lineage JSON. It needs
+  one decision of its own: a separate `etl-runner` binary as the plan names, or subcommands on
+  the existing `etl`.
+- **Blocked on:** nothing. 8c and 8d need a dependency decision (see Open decisions); 8b does
+  not and goes first regardless.
 
 Phase 6 was split into 6a and 6b on 2026-09-16 before starting; **both are complete**
 (2026-09-16). The execution-model decision 6b turned on is recorded in
@@ -80,7 +79,7 @@ Phases 0–6 are complete and 7a–7c are done, so there is a working CLI **and 
 build a pipeline on**. From the repo root:
 
 ```powershell
-cargo test --workspace        # 339 tests: 247 engine, 47 e2e, 20 secrets, 15 metadata, 10 desktop
+cargo test --workspace        # 361 tests: 251 engine, 51 e2e, 20 secrets, 15 metadata, 10 desktop, 18 state
 .\target\debug\etl.exe run samples\pipelines\orders_enriched.json
 .\target\debug\etl.exe validate samples\pipelines\orders_enriched.json
 .\target\debug\etl.exe plan samples\pipelines\orders_enriched.json --script
@@ -256,6 +255,34 @@ back in full.
 .\target\debug\etl.exe secret list          # names and descriptions, never values
 ```
 
+**A source can load only what is new.** An `incremental` block on a source node names a column
+to watch; the workspace remembers the highest value loaded, and the next run reads past it.
+
+```jsonc
+"incremental": {
+  "column": "order_ts",   // must be a column that only ever goes up
+  "start": "2026-01-01"   // optional: where to begin before anything is remembered
+}
+```
+
+```powershell
+.\target\debug\etl.exe run samples\pipelines\orders_incremental.json   # 12 rows, mark recorded
+.\target\debug\etl.exe run samples\pipelines\orders_incremental.json   # 0 rows, nothing new
+.\target\debug\etl.exe state list
+.\target\debug\etl.exe state forget orders_incremental --node read_orders
+```
+
+**The watermark advances only on a run that fully succeeded.** A run that wrote some of its
+output and then failed leaves the mark behind its output, which is the recoverable direction:
+the next run redoes the window rather than skipping it. A failed run says so
+(`watermarks not advanced: the run failed`) rather than doing it quietly.
+
+The comparison is strictly `>`, never `>=` — re-reading the mark would duplicate every row
+sharing that timestamp. The cost is the mirror image: a row written *later* with a timestamp at
+or below the mark is never seen. That is inherent to watermarking, and is why the column has to
+be one that only goes up. State lives in `.etl/state/<pipeline>.json`, keyed by the document's
+`name` when it has one so a renamed *file* keeps its history.
+
 **Nodes can be materialised.** `"materialize": "auto" | "view" | "memory" | "disk"` on a node.
 `view` is the lazy default, `memory` a temp table, `disk` a Parquet spill under `.etl/tmp/` that
 the executor clears up afterwards. Every mode gives the same answer; there is a test that says
@@ -266,8 +293,10 @@ extension, which sits badly with Phase 9's vendored set) and DuckLake (a catalog
 needs its own design pass rather than a thirteenth copy of the ATTACH shape). Both are listed
 under Phase 4 in the plan, so both need a decision recorded there rather than quietly dropping.
 
-**Not built yet:** the headless runner (Phase 8) and the three control components deferred out
-of 6b — see the top of this file. i18next and Vega are in the plan's stack note and stay
+**Not built yet:** the rest of Phase 8 (8b–8d) and the three control components deferred out
+of 6b. **The canvas cannot edit an `incremental` block** — it survives a GUI round trip
+untouched, but there is no panel for it; that belongs with a Phase 8 that has a runner to
+schedule — see the top of this file. i18next and Vega are in the plan's stack note and stay
 uninstalled until the thing that needs them exists; lucide-react arrived with the palette in 7b,
 and 7d added nothing, having written its own SQL highlighter rather than taking Prism.
 
@@ -297,7 +326,7 @@ fail the run. That is `ctl.fail`'s shape and it needs 6b's execution-model decis
 | 7c | — the generated property panel | **done** | 2026-09-16 |
 | 7d | — the run view, Plan tab, and the policy panel | **done** | 2026-09-16 |
 | 8 | Headless runner: serve, scheduler, RBAC, incremental | **in progress** | |
-| 8a | — watermark incremental loading | in progress (state store done) | |
+| 8a | — watermark incremental loading | **done** | 2026-09-16 |
 | 8b | — the runner: run/validate, history, logs, lineage | not started | |
 | 8c | — scheduler: interval, cron, file-watch | not started | |
 | 8d | — web console: serve, token auth, roles | not started | |

@@ -914,6 +914,7 @@ dependencies = [
  "etl-duckdb-engine",
  "etl-metadata",
  "etl-secrets",
+ "etl-state",
  "serde_json",
 ]
 

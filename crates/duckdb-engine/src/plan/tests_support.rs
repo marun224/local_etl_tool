@@ -21,6 +21,7 @@ pub(crate) fn node(id: &str, component_id: &str, properties: JsonValue) -> Pipel
             materialize: None,
             alias: None,
             policy: None,
+            incremental: None,
             extra: Default::default(),
         },
         extra: Default::default(),

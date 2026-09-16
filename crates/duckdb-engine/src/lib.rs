@@ -21,12 +21,14 @@ use thiserror::Error;
 
 pub use context::{Context, ContextError, Contexts};
 pub use exec::{
-    preview, run, ExecError, Preview, RunOptions, RunReport, SkipReason, StageFailure, StageOutcome,
+    preview, run, ExecError, Preview, RunOptions, RunReport, SkipReason, StageFailure,
+    StageOutcome, Watermark,
 };
 pub use params::{resolve, ParamError, ParamWarning, Resolved, Resolver};
 pub use plan::specs::{registry, Component, Registry};
 pub use plan::{
-    compile, reject_relation, CountProbe, Input, Plan, Stage, StageKind, Warning, REJECT_SUFFIX,
+    compile, compile_with, reject_relation, CompileOptions, CountProbe, Input, Plan, Stage,
+    StageIncremental, StageKind, Warning, REJECT_SUFFIX,
 };
 pub use session::{Answer, Session, SessionError};
 pub use sql::{quote_identifier, quote_literal, quote_path};

@@ -18,7 +18,7 @@ use crate::EngineError;
 use etl_metadata::{ControlKind, NodePolicy, PipelineDoc, PipelineNode, REJECTED_PORT};
 use serde_json::Value as JsonValue;
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BinaryHeap, HashMap, VecDeque};
 
 /// What a stage does, taken from its component's namespace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -325,6 +325,26 @@ pub struct Stage {
     pub policy: StagePolicy,
     /// What this stage does besides producing rows, for a control node.
     pub control: Option<Control>,
+    /// How this stage loads only what is new, for an incremental source.
+    pub incremental: Option<StageIncremental>,
+}
+
+/// An incremental source, resolved against what the workspace remembers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StageIncremental {
+    /// The column being watched.
+    pub column: String,
+    /// The watermark this run read past, or `None` when it loaded everything.
+    /// Kept so the run report can say which it was — "loaded 0 rows" means
+    /// something very different on a first run than on a tenth.
+    pub since: Option<String>,
+    /// The query that reads this run's new high-water mark.
+    ///
+    /// Emitted directly after the stage rather than at the end of the script,
+    /// which costs nothing — the relation is scanned either way — and buys the
+    /// thing that matters: a watermark column that does not exist fails here,
+    /// before any sink has written, instead of after.
+    pub probe: String,
 }
 
 impl Stage {
@@ -386,6 +406,9 @@ pub enum Warning {
     /// Nothing in the plan writes anything. Every non-sink stage is a lazy
     /// view, so a pipeline with no sink compiles fine and then does nothing.
     NoSink,
+    /// A node declares `incremental` somewhere it cannot apply. Only a source
+    /// loads from outside the pipeline, so only a source can load part of it.
+    IncrementalIgnored { id: String, component_id: String },
 }
 
 /// Emitted after the extension prelude when counts are on, so that a failed
@@ -569,6 +592,15 @@ impl Plan {
                 }
             }
 
+            // Not gated on `counts`: a row count is a convenience, whereas
+            // a watermark that failed to be read is a pipeline that reloads
+            // the world next time. Its output carries a different key, so it
+            // passes through the count parser without disturbing it.
+            if let Some(incremental) = &stage.incremental {
+                script.push_str(&incremental.probe);
+                script.push('\n');
+            }
+
             script.push('\n');
         }
 
@@ -586,10 +618,46 @@ impl Plan {
             .iter()
             .flat_map(|stage| stage.counts.iter().map(move |probe| (stage, probe)))
     }
+
+    /// The incremental sources, in the order their probes are emitted.
+    ///
+    /// The executor pairs this with the values it read back, so the order
+    /// here and the order in [`Plan::script`] have to stay the same one.
+    pub fn watermark_probes(&self) -> impl Iterator<Item = (&Stage, &StageIncremental)> {
+        self.stages
+            .iter()
+            .filter_map(|stage| stage.incremental.as_ref().map(|state| (stage, state)))
+    }
+
+    /// Whether anything in this plan remembers where it got to.
+    pub fn is_incremental(&self) -> bool {
+        self.stages.iter().any(|stage| stage.incremental.is_some())
+    }
+}
+
+/// What the compiler needs to know beyond the document itself.
+///
+/// Only one thing so far: what the workspace remembers about this pipeline. It
+/// is passed in rather than read from disk here because [`compile`] is pure —
+/// `validate` runs it against untrusted documents and must not touch the
+/// filesystem — and because the GUI compiles a document that has no file yet.
+#[derive(Debug, Clone, Default)]
+pub struct CompileOptions {
+    /// Node id → the high-water mark already loaded from it.
+    pub watermarks: BTreeMap<String, String>,
 }
 
 /// Validate a document and order it for execution.
+///
+/// Compiles as though nothing has ever run: every incremental source loads
+/// from its declared `start`, or from the beginning. [`compile_with`] is the
+/// one that reads a watermark.
 pub fn compile(doc: &PipelineDoc) -> Result<Plan, EngineError> {
+    compile_with(doc, &CompileOptions::default())
+}
+
+/// Validate and order a document against what the workspace remembers.
+pub fn compile_with(doc: &PipelineDoc, options: &CompileOptions) -> Result<Plan, EngineError> {
     if doc.nodes.is_empty() {
         return Err(EngineError::EmptyPipeline);
     }
@@ -605,26 +673,17 @@ pub fn compile(doc: &PipelineDoc) -> Result<Plan, EngineError> {
 
     let order = topological_order(doc, &edges, &dropped)?;
 
-    let mut unknown_properties = Vec::new();
-    let mut unknown_materialize = Vec::new();
-    let stages = build_stages(
-        doc,
-        &kinds,
-        &edges,
-        &order,
-        &mut unknown_properties,
-        &mut unknown_materialize,
-    )?;
+    let mut noticed = Noticed::default();
+    let stages = build_stages(doc, &kinds, &edges, &order, options, &mut noticed)?;
 
-    warnings.extend(
-        unknown_properties
-            .into_iter()
-            .map(|unknown| Warning::UnknownProperty {
-                id: unknown.node_id,
-                property: unknown.property,
-            }),
-    );
-    warnings.extend(unknown_materialize);
+    warnings.extend(noticed.unknown_properties.into_iter().map(|unknown| {
+        Warning::UnknownProperty {
+            id: unknown.node_id,
+            property: unknown.property,
+        }
+    }));
+    warnings.extend(noticed.unknown_materialize);
+    warnings.extend(noticed.ignored_incremental);
 
     collect_graph_warnings(doc, &edges, &dropped, &stages, &mut warnings);
 
@@ -803,13 +862,25 @@ fn topological_order(
     Ok(order)
 }
 
+/// What lowering noticed but did not refuse over.
+///
+/// Gathered into one place rather than passed as three out-parameters: they
+/// are all the same kind of thing — something worth saying that is not worth
+/// stopping for — and a fourth would otherwise mean a fourth argument.
+#[derive(Debug, Default)]
+struct Noticed {
+    unknown_properties: Vec<specs::UnknownProperty>,
+    unknown_materialize: Vec<Warning>,
+    ignored_incremental: Vec<Warning>,
+}
+
 fn build_stages(
     doc: &PipelineDoc,
     kinds: &[StageKind],
     edges: &[ResolvedEdge],
     order: &[usize],
-    unknown_properties: &mut Vec<specs::UnknownProperty>,
-    unknown_materialize: &mut Vec<Warning>,
+    options: &CompileOptions,
+    noticed: &mut Noticed,
 ) -> Result<Vec<Stage>, EngineError> {
     order
         .iter()
@@ -850,7 +921,7 @@ fn build_stages(
                 &node.id,
                 &component.spec,
                 node.data.properties_or_null(),
-                unknown_properties,
+                &mut noticed.unknown_properties,
             )?;
 
             // An unrecognised mode falls back to `auto` with a warning: the
@@ -859,10 +930,12 @@ fn build_stages(
             let materialize = match node.data.materialize.as_deref() {
                 None => Materialize::Auto,
                 Some(token) => Materialize::parse(token).unwrap_or_else(|| {
-                    unknown_materialize.push(Warning::UnknownMaterialize {
-                        id: node.id.clone(),
-                        value: token.to_string(),
-                    });
+                    noticed
+                        .unknown_materialize
+                        .push(Warning::UnknownMaterialize {
+                            id: node.id.clone(),
+                            value: token.to_string(),
+                        });
                     Materialize::Auto
                 }),
             };
@@ -878,6 +951,40 @@ fn build_stages(
             let spill_path = (materialize == Materialize::Disk)
                 .then(|| format!("{SPILL_DIR}/{}.parquet", node.id));
 
+            // Incremental loading is a source's feature. On a transform the
+            // predicate would compile and quietly filter a second time, which
+            // is the kind of thing that looks like it works, so it is dropped
+            // with a warning rather than honoured somewhere it does not mean
+            // what it says.
+            let declared = node.data.incremental.as_ref().filter(|_| {
+                let is_source = kind == StageKind::Source;
+                if !is_source {
+                    noticed
+                        .ignored_incremental
+                        .push(Warning::IncrementalIgnored {
+                            id: node.id.clone(),
+                            component_id: component_id.clone(),
+                        });
+                }
+                is_source
+            });
+
+            let incremental = declared.map(|declared| {
+                // What the last successful run reached, falling back to the
+                // document's own starting point, falling back to everything.
+                let since = options
+                    .watermarks
+                    .get(&node.id)
+                    .cloned()
+                    .or_else(|| declared.start.clone());
+
+                StageIncremental {
+                    column: declared.column.clone(),
+                    since,
+                    probe: builders::watermark_probe(&node.id, &declared.column),
+                }
+            });
+
             let sql = (component.build)(&builders::Lowering {
                 node_id: &node.id,
                 component_id: &component_id,
@@ -886,6 +993,12 @@ fn build_stages(
                 alias: node.data.alias.as_deref(),
                 materialize,
                 spill_path: spill_path.as_deref(),
+                incremental: incremental
+                    .as_ref()
+                    .map(|state| builders::IncrementalFilter {
+                        column: &state.column,
+                        since: state.since.as_deref(),
+                    }),
             })?;
 
             let counts = builders::count_probes(&node.id, kind, splits, from.as_deref());
@@ -932,6 +1045,7 @@ fn build_stages(
                 control,
                 materialize,
                 spill_path,
+                incremental,
             })
         })
         .collect()

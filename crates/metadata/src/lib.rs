@@ -200,6 +200,44 @@ pub struct NodeData {
     /// every component takes the same four settings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy: Option<NodePolicy>,
+    /// How this source loads only what is new since the last run.
+    ///
+    /// Beside `materialize` and `policy` for the same reason they are: it is
+    /// how the node is *run* rather than what its component does, and it reads
+    /// the same on all twelve sources. Putting it in each component's property
+    /// schema would be twelve copies of one idea, and a thirteenth source would
+    /// silently not have it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incremental: Option<Incremental>,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: Extra,
+}
+
+/// How a source loads only what is new since the last run.
+///
+/// The watermark itself is not here: it lives in the workspace's state, is
+/// written only by a run that fully succeeded, and is matched back to this
+/// block by node id. What the document holds is the *intent* — which column to
+/// watch, and where to start before there is anything to remember — so that a
+/// pipeline file stays a description of the work rather than a record of how
+/// far it has got.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Incremental {
+    /// The column whose high-water mark is remembered between runs.
+    ///
+    /// It must be something that only goes up — a created-at timestamp, an
+    /// auto-incrementing id, a sequence. A column that can be *updated* after
+    /// the fact will silently skip rows: a row edited below the watermark is
+    /// never read again. That is a property of the data, not something this
+    /// engine can check, so it is documented rather than validated.
+    pub column: String,
+    /// Where to begin on the first run, before there is any watermark.
+    ///
+    /// Absent means load everything, which is the right default: a first run
+    /// that quietly skipped history because a default start date was invented
+    /// would be very hard to notice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<String>,
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: Extra,
 }

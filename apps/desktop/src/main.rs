@@ -258,6 +258,9 @@ fn describe_warning(warning: &etl_duckdb_engine::Warning) -> String {
             format!("'{id}' was dropped because '{disabled}' is switched off")
         }
         W::Orphan { id } => format!("'{id}' is not wired to anything"),
+        W::IncrementalIgnored { id, component_id } => {
+            format!("'{id}' asks to load incrementally, but '{component_id}' is not a source")
+        }
         W::UnknownProperty { id, property } => {
             format!("'{id}' sets '{property}', which its component does not define")
         }

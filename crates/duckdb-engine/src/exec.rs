@@ -231,6 +231,16 @@ pub struct RunReport {
     /// What the control nodes had to say: waits held, branches taken or not,
     /// logs printed. Empty for a plan without them.
     pub notes: Vec<String>,
+    /// The new high-water mark each incremental source reached.
+    ///
+    /// **Advisory until the run is known to have succeeded.** These are what
+    /// the probes read, nothing more; persisting them is the caller's decision
+    /// and must not be taken while [`RunReport::failed`] is true. A run that
+    /// wrote some of its output and then failed has state that is *behind* its
+    /// output, which is the recoverable direction — running it again redoes the
+    /// window. Saving these anyway would skip whatever was in flight, and
+    /// nothing afterwards could tell you it happened.
+    pub watermarks: Vec<Watermark>,
     /// Stages that failed while `continue_on_failure` kept the run going.
     ///
     /// **A report holding any of these is a failed run.** Every other way a
@@ -458,6 +468,7 @@ fn run_one_script(
 
     Ok(RunReport {
         stages: outcomes(plan, options.counts, &counts),
+        watermarks: read_watermarks(plan, &parse_watermarks(&stdout)),
         elapsed,
         duckdb_bin: binary,
         // The report is read by people and written to logs, so it carries the
@@ -712,6 +723,57 @@ fn parse_counts(stdout: &str) -> Result<Vec<u64>, ExecError> {
     Ok(counts)
 }
 
+/// Read the watermark probes out of the same stdout the counts came from.
+///
+/// The two never collide: a count probe emits `n` and a watermark probe emits
+/// `w`, and each parser ignores what it does not recognise. That is why adding
+/// watermarks needed no change to count attribution, which is delicate enough
+/// that threading a second value through it would have been the risky way to
+/// do this.
+fn parse_watermarks(stdout: &str) -> Vec<Option<String>> {
+    let mut found = Vec::new();
+
+    for value in serde_json::Deserializer::from_str(stdout).into_iter::<JsonValue>() {
+        let Ok(value) = value else { break };
+
+        let Some(cell) = value
+            .as_array()
+            .and_then(|rows| rows.first())
+            .and_then(|row| row.get("w"))
+        else {
+            continue;
+        };
+
+        found.push(match cell {
+            // `max` over a relation that loaded nothing. Not a value to store.
+            JsonValue::Null => None,
+            JsonValue::String(text) => Some(text.clone()),
+            // A number, a date, whatever else DuckDB chose to print. Rendered
+            // without JSON quoting, because what goes back into the next run's
+            // predicate is the literal, not its JSON spelling.
+            other => Some(other.to_string()),
+        });
+    }
+
+    found
+}
+
+/// Pair the values read back with the sources that asked for them.
+///
+/// Positional, because the probes are emitted in plan order and read in the
+/// order they arrive. A short list means the run stopped early; those sources
+/// simply report nothing, which the caller reads as "do not move it".
+fn read_watermarks(plan: &Plan, values: &[Option<String>]) -> Vec<Watermark> {
+    plan.watermark_probes()
+        .zip(values)
+        .map(|((stage, state), value)| Watermark {
+            node_id: stage.node_id.clone(),
+            column: state.column.clone(),
+            value: value.clone(),
+        })
+        .collect()
+}
+
 /// Turn a non-zero exit into an error that names the stage responsible.
 ///
 /// With counts on, each count probe emits exactly one array, so the number that
@@ -785,6 +847,20 @@ fn outcomes(plan: &Plan, counts_enabled: bool, counts: &[u64]) -> Vec<StageOutco
 // anything else, the dual path has stopped paying for itself.
 // ---------------------------------------------------------------------------
 
+/// A high-water mark one incremental source reached in this run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Watermark {
+    pub node_id: String,
+    pub column: String,
+    /// The value read back, as DuckDB printed it.
+    ///
+    /// Absent when the source loaded nothing, which is the ordinary state of an
+    /// incremental pipeline with nothing new to do. The distinction matters:
+    /// `None` means leave the stored watermark exactly where it was, whereas a
+    /// value means move it.
+    pub value: Option<String>,
+}
+
 /// A stage that failed while the run was told to carry on past it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StageFailure {
@@ -819,6 +895,7 @@ fn run_driven(plan: &Plan, options: &RunOptions, binary: PathBuf) -> Result<RunR
     // `unusable` because this is the pipeline working, not failing.
     let mut untaken: HashSet<String> = HashSet::new();
     let mut notes: Vec<String> = Vec::new();
+    let mut watermarks: Vec<Watermark> = Vec::new();
     let mut script = String::new();
 
     for stage in &plan.stages {
@@ -894,10 +971,22 @@ fn run_driven(plan: &Plan, options: &RunOptions, binary: PathBuf) -> Result<RunR
         let took = stage_started.elapsed();
 
         match ran {
-            Ok(counts) => outcomes.push(StageOutcome {
-                elapsed: timing(stage, took),
-                ..stage_outcome(stage, &counts)
-            }),
+            Ok(readings) => {
+                outcomes.push(StageOutcome {
+                    elapsed: timing(stage, took),
+                    ..stage_outcome(stage, &readings.counts)
+                });
+
+                // Recorded only for a stage that actually ran. A source that
+                // was skipped has no new mark, and must keep the old one.
+                if let Some(state) = &stage.incremental {
+                    watermarks.push(Watermark {
+                        node_id: stage.node_id.clone(),
+                        column: state.column.clone(),
+                        value: readings.watermark,
+                    });
+                }
+            }
 
             Err(message) => {
                 unusable.insert(stage.node_id.clone());
@@ -951,6 +1040,7 @@ fn run_driven(plan: &Plan, options: &RunOptions, binary: PathBuf) -> Result<RunR
 
     Ok(RunReport {
         stages: outcomes,
+        watermarks,
         elapsed,
         duckdb_bin: binary,
         script: redact(&script, &options.redact),
@@ -1120,14 +1210,14 @@ fn run_stage(
     session: &mut Session,
     stage: &Stage,
     options: &RunOptions,
-) -> Result<Result<Vec<u64>, String>, ExecError> {
+) -> Result<Result<Readings, String>, ExecError> {
     let mut attempt = 0;
 
     loop {
         let outcome = attempt_stage(session, stage, options)?;
 
         match outcome {
-            Ok(counts) => return Ok(Ok(counts)),
+            Ok(readings) => return Ok(Ok(readings)),
 
             Err(message) => {
                 if attempt >= stage.policy.retry_attempts {
@@ -1146,7 +1236,7 @@ fn attempt_stage(
     session: &mut Session,
     stage: &Stage,
     options: &RunOptions,
-) -> Result<Result<Vec<u64>, String>, ExecError> {
+) -> Result<Result<Readings, String>, ExecError> {
     // A memory ceiling is set around the statement and put back afterwards, so
     // one greedy stage cannot quietly change the budget for the rest of the run.
     if let Some(limit) = stage.policy.memory_limit_mb {
@@ -1174,14 +1264,18 @@ fn attempt_stage(
             if said.is_empty() {
                 from_probe
             } else {
-                said
+                said.clone()
             }
         })
     } else if answer.has_message() {
-        Err(said)
+        Err(said.clone())
     } else {
         Ok(Vec::new())
     };
+
+    let result = result.and_then(|counts| {
+        collect_watermark(session, stage).map(|watermark| Readings { counts, watermark })
+    });
 
     if stage.policy.memory_limit_mb.is_some() {
         session
@@ -1198,6 +1292,45 @@ fn attempt_stage(
 /// success signal: a probe against a relation that was never created fails and
 /// returns nothing, so a missing count is how a failed `CREATE VIEW` — which
 /// prints nothing either way — becomes visible.
+/// What one stage's probes reported.
+struct Readings {
+    counts: Vec<u64>,
+    /// The watermark this stage reached, for an incremental source. `None`
+    /// both when the stage is not incremental and when it loaded nothing —
+    /// the caller tells them apart by whether the stage declared one.
+    watermark: Option<String>,
+}
+
+/// Read this run's new high-water mark, for a stage that has one.
+///
+/// Inside the stage attempt rather than beside it, so that a retry covers the
+/// probe too and a probe that fails is a stage that failed — which is what it
+/// is. A watermark column that does not exist is a configuration error, and
+/// this is the point at which it surfaces, before anything downstream writes.
+fn collect_watermark(session: &mut Session, stage: &Stage) -> Result<Option<String>, String> {
+    let Some(state) = &stage.incremental else {
+        return Ok(None);
+    };
+
+    let answer = session
+        .execute(&state.probe)
+        .map_err(|error| error.to_string())?;
+
+    match answer.values.first().and_then(|row| row.get("w")) {
+        Some(JsonValue::Null) | None => {
+            // `max` over nothing loaded. Ordinary, and not a value to store.
+            let said = answer.stderr.trim();
+            if said.is_empty() {
+                Ok(None)
+            } else {
+                Err(said.to_string())
+            }
+        }
+        Some(JsonValue::String(text)) => Ok(Some(text.clone())),
+        Some(other) => Ok(Some(other.to_string())),
+    }
+}
+
 fn collect_counts(
     session: &mut Session,
     stage: &Stage,
