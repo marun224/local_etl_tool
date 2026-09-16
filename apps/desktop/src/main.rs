@@ -115,6 +115,12 @@ struct StageResult {
     rows: Option<u64>,
     rejected: Option<u64>,
     skipped: Option<String>,
+    /// How long this stage took, when the engine was willing to say. Absent
+    /// for most stages on most runs — see `StageOutcome::elapsed`, which is
+    /// where the rule lives. The canvas renders nothing at all for `None`
+    /// rather than a zero or a dash, because a dash in a column of numbers
+    /// still reads as a measurement.
+    elapsed_ms: Option<u128>,
 }
 
 #[derive(Debug, Serialize)]
@@ -324,6 +330,7 @@ fn run_pipeline(document: String, settings: Settings) -> IpcResult<RunResult> {
                 rows: stage.rows,
                 rejected: stage.rejected,
                 skipped: stage.skipped.as_ref().map(|r| r.describe()),
+                elapsed_ms: stage.elapsed.map(|elapsed| elapsed.as_millis()),
             })
             .collect(),
         elapsed_ms: report.elapsed.as_millis(),
@@ -565,6 +572,45 @@ mod tests {
         assert_eq!(result.stages.len(), 2);
         assert_eq!(result.stages[0].rows, Some(12));
         assert_eq!(result.stages[1].rows, Some(6));
+    }
+
+    #[test]
+    fn a_run_carries_a_timing_only_where_the_engine_gave_one() {
+        if !have_duckdb() {
+            return;
+        }
+
+        // The rule itself lives in the engine and is tested there. What this
+        // checks is the mapping across the wire, in both directions: `None`
+        // must arrive as `null` rather than becoming a zero on the way, and a
+        // real duration must arrive as a number. The canvas draws whatever
+        // arrives, and a zero beside a lazy view credits the wrong stage.
+        //
+        // The sample earns no session, so nothing in it can be timed.
+        let plain = run_pipeline(SAMPLE.to_string(), settings()).expect("runs");
+        assert!(
+            plain.stages.iter().all(|stage| stage.elapsed_ms.is_none()),
+            "one invocation cannot be attributed to individual stages"
+        );
+
+        // A control node moves the same shape of pipeline onto the driven
+        // path, where the stage that does its work when it runs is timed.
+        let waiting = SAMPLE.replace(
+            r#""componentId": "xf.filter",
+                  "properties": {"predicate": "amount > 100"}"#,
+            r#""componentId": "ctl.wait",
+                  "properties": {"ms": 20}"#,
+        );
+
+        let driven = run_pipeline(waiting, settings()).expect("runs");
+        assert!(
+            driven.stages[1].elapsed_ms.is_some_and(|ms| ms >= 20),
+            "a wait reports what it held for, and it crossed the wire as a number"
+        );
+        assert_eq!(
+            driven.stages[0].elapsed_ms, None,
+            "the lazy source above it still says nothing"
+        );
     }
 
     #[test]

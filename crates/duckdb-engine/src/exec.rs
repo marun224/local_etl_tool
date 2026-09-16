@@ -145,6 +145,25 @@ pub struct StageOutcome {
     /// driven path can report this: on the one-script path a failure ends the
     /// run, so there is never a stage that was reached and skipped.
     pub skipped: Option<SkipReason>,
+    /// How long this stage took, when that number means what it appears to
+    /// mean.
+    ///
+    /// `None` far more often than not, and deliberately. Two things have to
+    /// hold before a duration here is honest:
+    ///
+    /// * **The stage was sent on its own.** Only the driven path does that. The
+    ///   one-script path hands DuckDB the whole plan in one invocation, so
+    ///   there is no per-stage boundary to measure and every stage reports
+    ///   `None`.
+    /// * **The stage did its work when it ran.** A lazy `CREATE VIEW` returns
+    ///   in microseconds and the work it describes happens later, at the sink
+    ///   that pulls it. Timing it truthfully produces `0 ms` beside the
+    ///   transform that cost the most, which is worse than saying nothing. See
+    ///   [`Stage::work_happens_here`].
+    ///
+    /// A blank timing is a smaller lie than a zero, so the rule is to report
+    /// nothing rather than something indefensible.
+    pub elapsed: Option<Duration>,
 }
 
 /// Why a stage did not run.
@@ -196,12 +215,12 @@ impl StageOutcome {
 #[derive(Debug, Clone)]
 pub struct RunReport {
     pub stages: Vec<StageOutcome>,
-    /// Wall-clock time for the DuckDB process.
+    /// Wall-clock time for the whole run.
     ///
-    /// Deliberately one number rather than one per stage: in a plan of lazy
-    /// views, every transform would report roughly zero and the sink would
-    /// report the entire pipeline's work. Per-stage timings only become
-    /// meaningful with materialisation, which arrives in Phase 5.
+    /// Always present, and always the number to trust: it is the one timing
+    /// that needs no caveat about which stage did the work. Per-stage
+    /// durations ride on [`StageOutcome::elapsed`], where most of them are
+    /// `None` for the reasons recorded there.
     pub elapsed: Duration,
     pub duckdb_bin: PathBuf,
     /// What was sent to DuckDB, with any secret values masked. Identical to
@@ -746,6 +765,9 @@ fn outcomes(plan: &Plan, counts_enabled: bool, counts: &[u64]) -> Vec<StageOutco
                 rows: count(false),
                 rejected: stage.splits.then(|| count(true)).flatten(),
                 skipped: None,
+                // One invocation, one timing. There is no per-stage boundary
+                // on this path to put a number either side of.
+                elapsed: None,
             }
         })
         .collect()
@@ -825,6 +847,13 @@ fn run_driven(plan: &Plan, options: &RunOptions, binary: PathBuf) -> Result<RunR
             continue;
         }
 
+        // The clock starts here rather than at `run_stage`, because a control
+        // node does its work in `act` — a `ctl.wait` timed from below this
+        // block reports the microseconds after the wait rather than the wait.
+        // Both skip paths above return before this point, and a stage that
+        // never ran reports no duration at all.
+        let stage_started = Instant::now();
+
         // A control node acts before its rows are allowed past: it may hold,
         // report, stop the run, or decide that what follows does not run.
         if let Some(control) = &stage.control {
@@ -859,8 +888,16 @@ fn run_driven(plan: &Plan, options: &RunOptions, binary: PathBuf) -> Result<RunR
             }
         }
 
-        match run_stage(&mut session, stage, options)? {
-            Ok(counts) => outcomes.push(stage_outcome(stage, &counts)),
+        // `run_stage` retries internally, so measuring around it reports what
+        // the stage actually cost rather than what its last attempt did.
+        let ran = run_stage(&mut session, stage, options)?;
+        let took = stage_started.elapsed();
+
+        match ran {
+            Ok(counts) => outcomes.push(StageOutcome {
+                elapsed: timing(stage, took),
+                ..stage_outcome(stage, &counts)
+            }),
 
             Err(message) => {
                 unusable.insert(stage.node_id.clone());
@@ -872,6 +909,7 @@ fn run_driven(plan: &Plan, options: &RunOptions, binary: PathBuf) -> Result<RunR
                     rows: None,
                     rejected: None,
                     skipped: Some(SkipReason::Failed),
+                    elapsed: timing(stage, took),
                 });
 
                 failures.push(StageFailure {
@@ -922,6 +960,15 @@ fn run_driven(plan: &Plan, options: &RunOptions, binary: PathBuf) -> Result<RunR
     })
 }
 
+/// A measured duration, kept only if the stage it came from earned one.
+///
+/// The measurement is always taken — it costs two `Instant`s — and discarded
+/// here rather than at the call site, so the rule about which stages may
+/// report a timing lives in exactly one place.
+fn timing(stage: &Stage, took: Duration) -> Option<Duration> {
+    stage.work_happens_here().then_some(took)
+}
+
 /// A stage that was reached but not run.
 fn skipped_outcome(stage: &Stage, reason: SkipReason) -> StageOutcome {
     StageOutcome {
@@ -931,6 +978,7 @@ fn skipped_outcome(stage: &Stage, reason: SkipReason) -> StageOutcome {
         rows: None,
         rejected: None,
         skipped: Some(reason),
+        elapsed: None,
     }
 }
 
@@ -1214,6 +1262,9 @@ fn stage_outcome(stage: &Stage, counts: &[u64]) -> StageOutcome {
         rows: at(false),
         rejected: stage.splits.then(|| at(true)).flatten(),
         skipped: None,
+        // The caller times the stage and fills this in; this function knows
+        // only how to read counts.
+        elapsed: None,
     }
 }
 

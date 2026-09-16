@@ -328,6 +328,25 @@ pub struct Stage {
 }
 
 impl Stage {
+    /// Whether this stage does its work at the moment it runs.
+    ///
+    /// True for a sink, whose `COPY ... TO` is the thing that pulls the whole
+    /// pipeline; for a materialised stage, whose table or spill file is built
+    /// there and then; and for a control node, whose waiting or branching is
+    /// all it does. False for a lazy view, which is registered in microseconds
+    /// and computed later by whatever reads it.
+    ///
+    /// The executor asks this before attaching a duration to a stage: a
+    /// timing on a lazy view would read as "this step was free" when the step
+    /// was merely deferred. See [`StageOutcome::elapsed`].
+    ///
+    /// [`StageOutcome::elapsed`]: crate::exec::StageOutcome::elapsed
+    pub fn work_happens_here(&self) -> bool {
+        self.kind == StageKind::Sink
+            || self.kind == StageKind::Control
+            || self.materialize.is_materialised()
+    }
+
     /// The name of the relation this stage creates. Edge wiring and generated
     /// SQL both key off the node id; the alias is an additional view.
     pub fn relation_name(&self) -> &str {

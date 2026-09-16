@@ -515,6 +515,54 @@ them.
 **Not in 7c:** per-stage policy (`retryAttempts` and the rest) has no panel yet — it is 6b's
 feature and belongs with the run view in 7d, where a retry is something you watch happen.
 
+**7d done 2026-09-16. Phase 7 is complete.** Per-node row counts, timings, the data preview, the
+Plan tab and the policy panel. `RunView.tsx` holds the three tab bodies; `App.tsx` keeps only the
+state they read.
+
+Four decisions, the first of which is the phase's real content:
+
+- **A timing is published only where it means what it looks like.** The obvious reading of "per-node
+  timings" is a duration on every node, and it would be wrong: in a plan of lazy views every
+  transform takes microseconds to declare and the sink takes the whole pipeline's work. `0 ms`
+  beside the transform that cost the most is worse than a blank, so `StageOutcome::elapsed` is
+  `Option<Duration>` and is `Some` only when **both** hold — the stage was sent on its own (the
+  driven path; the one-script path has no boundary to measure) and the stage did its work when it
+  ran (`Stage::work_happens_here`: a sink, a control node, or a `memory`/`disk` materialisation).
+  Most stages on most runs therefore report nothing, and the Status tab explains why once rather
+  than per row. This was raised as an open question before starting and settled this way rather
+  than by routing every run through the session, which would reopen
+  [DECISION_execution_model.md](DECISION_execution_model.md) for a cosmetic gain.
+
+  A consequence worth knowing: the clock starts *before* a control node acts, because a `ctl.wait`
+  does all its work in `act()`. Timed from below that, a 250 ms wait reported 26 ms — caught by the
+  test that asserts a wait cannot come back early.
+
+- **The SQL highlighter is hand-written, not Prism.** This deviates from the plan text above, on
+  purpose. Prism returns a string of HTML, which React renders through
+  `dangerouslySetInnerHTML` — and the strings involved are not ours alone: a file path, a raw
+  `xf.sql` body and a node id all reach the panel inside the generated SQL, so a pipeline document
+  would be choosing what HTML this window renders, in a webview holding IPC commands that read and
+  write files. `sql-highlight.tsx` tokenises to React elements instead, which makes the hole
+  structurally impossible because React escapes text children. ~150 lines, one dialect (ours), and
+  a test that every character survives tokenising — including a path with a `<img onerror=...>` in
+  it. One fewer dependency, and Vega and i18next stay uninstalled.
+
+- **The Plan tab shows SQL per stage, not as one script.** The question it answers is "what is this
+  node doing"; a single blob makes the reader find the node themselves. The whole script is one
+  toggle away. The tab also names the **transport** and what asked for it, which is invisible in
+  the SQL and is the reason a retry or a branch is possible at all.
+
+- **A policy that is empty is removed.** `setPolicyField` deletes a cleared knob rather than writing
+  a zero, and drops `policy` entirely once nothing is left in it — the same rule 7c set for
+  properties, for the same reason. The panel carries a `session` badge and a sentence saying that
+  any of these four moves the whole pipeline onto the session transport, because finding that out
+  from the Plan tab afterwards is finding out too late.
+
+**Verified.** 339 Rust tests (247 engine, 47 e2e, 20 secrets, 15 metadata, 10 desktop — up from
+335 because of three timing tests and one IPC mapping test) and 111 frontend tests (up from 80).
+`cargo fmt --check` and `cargo clippy --workspace --all-targets` are clean. The app was launched
+and the window confirmed responding, not merely compiled.
+
 ### Phase 8 — Headless runner: serve, scheduler, RBAC, incremental
 
 **Goal.** Production execution without the desktop app.

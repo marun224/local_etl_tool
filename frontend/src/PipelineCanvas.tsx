@@ -109,6 +109,8 @@ function Canvas({
             problem: problems.get(node.id) ?? null,
             rows: result?.rows ?? null,
             rejected: result?.rejected ?? null,
+            elapsedMs: result?.elapsedMs ?? null,
+            skipped: result?.skipped ?? null,
           } satisfies ComponentNodeData,
         };
       }),

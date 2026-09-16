@@ -329,9 +329,17 @@ fn command_run(
                     None => String::new(),
                 };
 
+                // Most stages have no timing and must not be padded into a
+                // column of blanks; the ones that do have earned it. See
+                // `StageOutcome::elapsed` for which those are and why.
+                let took = match stage.elapsed {
+                    Some(elapsed) => format!("  {:.0}ms", elapsed.as_secs_f64() * 1000.0),
+                    None => String::new(),
+                };
+
                 println!(
-                    "  {:width$}  {:>12}  {}{}",
-                    stage.label, rows, stage.component_id, rejected
+                    "  {:width$}  {:>12}  {}{}{}",
+                    stage.label, rows, stage.component_id, rejected, took
                 );
             }
 

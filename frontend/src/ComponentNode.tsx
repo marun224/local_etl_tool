@@ -11,6 +11,7 @@
 import { Handle, Position, type NodeProps } from "@xyflow/react";
 import { iconFor } from "./icons";
 import { REJECTED_PORT } from "./document";
+import { duration } from "./RunView";
 import type { ComponentSpec } from "./ipc";
 
 export interface ComponentNodeData extends Record<string, unknown> {
@@ -23,6 +24,15 @@ export interface ComponentNodeData extends Record<string, unknown> {
   /** Rows the last run reported, so the canvas can show what happened. */
   rows: number | null;
   rejected: number | null;
+  /**
+   * How long the stage took, when the engine was willing to say. Usually
+   * `null`, and then nothing is drawn — not a zero, which would read as "this
+   * step was free" beside a lazy view that deferred its work rather than
+   * avoiding it.
+   */
+  elapsedMs: number | null;
+  /** Why the stage did not run, when it did not. */
+  skipped: string | null;
 }
 
 function Glyph({ name }: { name: string | undefined }) {
@@ -43,6 +53,7 @@ export function ComponentNode({ data, selected }: NodeProps) {
     selected ? "is-selected" : "",
     node.disabled ? "is-disabled" : "",
     node.problem ? "has-problem" : "",
+    node.skipped ? "is-skipped" : "",
   ]
     .filter(Boolean)
     .join(" ");
@@ -68,13 +79,22 @@ export function ComponentNode({ data, selected }: NodeProps) {
 
       <div className="node-sub">{node.componentId ?? "no component"}</div>
 
-      {(node.rows !== null || node.rejected !== null) && (
-        <div className="node-rows">
-          {node.rows !== null && <span>{node.rows.toLocaleString()} rows</span>}
-          {node.rejected !== null && (
-            <span className="node-rejected">{node.rejected.toLocaleString()} rejected</span>
-          )}
-        </div>
+      {/* A stage that did not run says so instead of showing counts it does
+          not have. The two are mutually exclusive by construction. */}
+      {node.skipped ? (
+        <div className="node-rows node-skipped">{node.skipped}</div>
+      ) : (
+        (node.rows !== null || node.rejected !== null || node.elapsedMs !== null) && (
+          <div className="node-rows">
+            {node.rows !== null && <span>{node.rows.toLocaleString()} rows</span>}
+            {node.rejected !== null && (
+              <span className="node-rejected">{node.rejected.toLocaleString()} rejected</span>
+            )}
+            {node.elapsedMs !== null && (
+              <span className="node-took">{duration(node.elapsedMs)}</span>
+            )}
+          </div>
+        )
       )}
 
       {outputs.map((port, index) => (

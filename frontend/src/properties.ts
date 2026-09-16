@@ -13,7 +13,7 @@
  * "leave it unset and the default applies" work as written.
  */
 
-import type { PipelineDoc } from "./document";
+import type { NodePolicy, PipelineDoc } from "./document";
 import type { PropertySpec, PropertyType } from "./ipc";
 
 /** An ordered key/value list, which is how a `map` property is edited. */
@@ -104,6 +104,55 @@ export function setProperty(
       return { ...node, data: { ...node.data, properties } };
     }),
   };
+}
+
+/**
+ * The four knobs on a stage policy, in the order the panel shows them.
+ *
+ * A list rather than four call sites, so the "an all-default policy is no
+ * policy" rule below has one thing to iterate and cannot fall out of step with
+ * what the panel renders.
+ */
+export const POLICY_FIELDS = [
+  "retryAttempts",
+  "retryBackoffMs",
+  "continueOnFailure",
+  "memoryLimitMb",
+] as const satisfies readonly (keyof NodePolicy)[];
+
+/**
+ * Change one knob on a node's policy.
+ *
+ * Two rules, both of which exist so that a policy in a saved file always means
+ * something:
+ *
+ * * **An unset knob is removed, not written as a zero.** `retryAttempts: 0`
+ *   and no `retryAttempts` compile identically today, but the first reads as a
+ *   decision someone took.
+ * * **A policy with nothing left in it is removed entirely.** An empty
+ *   `"policy": {}` is noise in a document people read and diff, and it is one
+ *   keystroke away from looking like a policy that got lost.
+ */
+export function setPolicyField(
+  document: PipelineDoc,
+  nodeId: string,
+  field: (typeof POLICY_FIELDS)[number],
+  value: number | boolean | undefined,
+): PipelineDoc {
+  const node = document.nodes.find((candidate) => candidate.id === nodeId);
+  const policy: NodePolicy = { ...(node?.data.policy ?? {}) };
+
+  if (value === undefined) {
+    delete policy[field];
+  } else {
+    // The cast is safe by construction: `POLICY_FIELDS` and `NodePolicy` are
+    // checked against each other above, and the panel only ever hands a
+    // boolean to the boolean field.
+    (policy as Record<string, unknown>)[field] = value;
+  }
+
+  const empty = POLICY_FIELDS.every((name) => policy[name] === undefined);
+  return setNodeField(document, nodeId, "policy", empty ? undefined : policy);
 }
 
 /**

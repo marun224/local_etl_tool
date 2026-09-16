@@ -3,21 +3,22 @@
 **State only.** Design lives in [PLAN_duckle_parity.md](PLAN_duckle_parity.md). Read this file
 first when picking the project back up.
 
-> ## ⏸ Paused 2026-09-16, after Phase 7c
+> ## ⏸ Paused 2026-09-16, after Phase 7d
 >
-> Stopped at a clean boundary — gate green, nothing mid-edit. **Phase 7c is complete.**
+> Stopped at a clean boundary — gate green, nothing mid-edit. **Phase 7 is complete**, 7a
+> through 7d. There is a desktop studio you can build, run, inspect and debug a pipeline in.
 >
 > Phases 0–5 are dated 2026-09-15 because that is when the work was done; the clock rolled
 > past midnight while pausing, which is the only reason those lines read a day later.
 >
-> **To resume:** read this file, then Phase 7 in the plan, then start **7d** — the run view:
-> per-node row counts and timings on the canvas, live data preview, and a Plan tab showing the
-> generated SQL. Rough versions of all three already exist in the bottom panel; 7d is making
-> them good, and is where per-stage policy (retry, continueOnFailure) finally gets a panel.
+> **To resume:** read this file, then Phase 8 in the plan — the headless runner: `serve`, a
+> scheduler, RBAC, and watermark incremental loads. It is the first phase since 0 with no GUI
+> in it, and the first that needs a story for state that outlives a run.
 >
 > ```powershell
 > cd D:\workspace\ETL_Local_Tool
-> cargo test --workspace                                            # expect 335 passing
+> cargo test --workspace                                            # expect 339 passing
+> npm --prefix frontend run test                                    # expect 111 passing
 > npm --prefix frontend run typecheck                               # expect clean
 > npm --prefix frontend run test                                    # expect 80 passing
 > npm --prefix frontend run build                                   # expect clean
@@ -39,16 +40,14 @@ first when picking the project back up.
 > All of these were run verbatim at the moment of pausing and printed exactly what is written
 > above. If any of them disagrees with this file later, trust the commands and fix the file.
 >
-> **State of the tree:** committed and pushed on 2026-09-16 — this paragraph used to say
-> "nothing committed", which was true for every phase up to that point and is not any more.
-> All 42 files are one commit on `main` at `github.com/marun224/local_etl_tool` (private).
-> The branch was renamed from `master` on the way, since the remote was empty and nothing
-> depended on the old name.
+> **State of the tree:** clean, committed and pushed — 7 commits on `main` at
+> `github.com/marun224/local_etl_tool` (private), the last being Phase 7c. The branch was
+> renamed from `master` on 2026-09-16, since the remote was empty and nothing depended on
+> the old name.
 >
 > **Phases 0–5 are one commit, not six.** The phases happened on the dates recorded below;
 > the commits did not exist, and dating them after the fact would have git assert a history
-> it never saw. Phase 6 onward can commit per phase, now that there is something to commit
-> onto.
+> it never saw. Every phase from 6a on has its own commit, which is the arrangement to keep.
 >
 > **`tools/` is still not backed up, deliberately.** It is git-ignored and holds the DuckDB
 > CLI (37 MB) plus 9 extension files (247 MB) — 284 MB that does not belong in a repo and is
@@ -57,9 +56,9 @@ first when picking the project back up.
 
 ## Where things stand
 
-- **Next phase:** Phase 7d — the run view: per-node row counts and timings, live data preview,
-  and a Plan tab showing the generated SQL, Prism-highlighted. Rough versions exist already; 7d
-  makes them good and gives per-stage policy a panel.
+- **Next phase:** Phase 8 — the headless runner: `serve`, scheduler, RBAC, watermark
+  incremental loads. The first phase since 0 with no GUI in it, and the first needing state
+  that outlives a run.
 - **In progress:** nothing
 - **Blocked on:** nothing.
 
@@ -78,7 +77,7 @@ Phases 0–6 are complete and 7a–7c are done, so there is a working CLI **and 
 build a pipeline on**. From the repo root:
 
 ```powershell
-cargo test --workspace        # 335 tests: 247 engine, 44 e2e, 20 secrets, 15 metadata, 9 desktop
+cargo test --workspace        # 339 tests: 247 engine, 47 e2e, 20 secrets, 15 metadata, 10 desktop
 .\target\debug\etl.exe run samples\pipelines\orders_enriched.json
 .\target\debug\etl.exe validate samples\pipelines\orders_enriched.json
 .\target\debug\etl.exe plan samples\pipelines\orders_enriched.json --script
@@ -199,8 +198,28 @@ duplicate, a blank, or the reserved `__rejected` suffix.
 Palette entries can be **clicked** as well as dragged. Dragging is unreachable from a keyboard,
 and a webview will not always start an HTML5 drag.
 
-**What 7c is not:** the run view is 7d's, and per-stage policy (retry, continueOnFailure) has no
-panel yet — it belongs with the run view, where a retry is something you watch happen.
+**The run view says what happened, and no more than that.** Each node carries its row count,
+its rejected count, and — sometimes — a timing. Sometimes is the whole design: a duration is
+shown only where it means what it looks like, which is a sink, a control node, or a
+`memory`/`disk` materialisation on the session transport. Everything else shows **nothing**,
+because a lazy view is declared in microseconds and computed later by the sink that reads it,
+and `0 ms` beside the transform that cost the most is worse than a blank. The Status tab says
+so once, under the table, rather than on every row.
+
+The three commands above that print timings are `orders_guarded.json` (a control node and a
+sink), and any pipeline with a per-stage policy. `orders_enriched.json` prints none at all,
+which is correct: it is one script, and one invocation cannot be attributed to its stages.
+
+**The Plan tab shows each stage's SQL in run order**, syntax-highlighted, with a toggle for the
+whole script. It also names the transport — one script or session, and which stages asked for a
+session — because that is invisible in the SQL and is why a retry or a branch is possible.
+Highlighting is hand-written rather than Prism; the reason is in the plan, and it is that Prism
+needs `dangerouslySetInnerHTML` over strings that contain user-controlled file paths.
+
+**Per-stage policy finally has a panel**, at the bottom of the inspector under "When it fails".
+Clearing a knob removes it rather than writing a zero, and emptying the last one removes
+`policy` altogether. A `session` badge and one sentence say that setting any of them moves the
+whole pipeline onto the session transport.
 
 **Extensions are vendored**, not installed system-wide: `.\scripts\fetch-duckdb-extensions.ps1`
 puts them under `tools/duckdb/extensions/` and the executor points DuckDB at that directory. A
@@ -244,10 +263,10 @@ extension, which sits badly with Phase 9's vendored set) and DuckLake (a catalog
 needs its own design pass rather than a thirteenth copy of the ATTACH shape). Both are listed
 under Phase 4 in the plan, so both need a decision recorded there rather than quietly dropping.
 
-**Not built yet:** the run view (7d), the headless runner (Phase 8),
-and the three control components deferred out of 6b — see the top of this file. i18next and Vega
-are in the plan's stack note and stay uninstalled until the thing that needs them exists;
-lucide-react arrived with the palette in 7b.
+**Not built yet:** the headless runner (Phase 8) and the three control components deferred out
+of 6b — see the top of this file. i18next and Vega are in the plan's stack note and stay
+uninstalled until the thing that needs them exists; lucide-react arrived with the palette in 7b,
+and 7d added nothing, having written its own SQL highlighter rather than taking Prism.
 
 **Deferred out of 6a, on purpose:** `qa.row_count` and `qa.schema_match`. Both assert something
 about a whole relation rather than partitioning it — no reject rows, and the only outcome is to
@@ -266,8 +285,14 @@ fail the run. That is `ctl.fail`'s shape and it needs 6b's execution-model decis
 | 3 | Component spec registry | **done** | 2026-09-15 |
 | 4 | Connector breadth wave 1 (~40 components) | **done** (40) | 2026-09-15 |
 | 5 | Parameters, contexts, secrets, materialization | **done** | 2026-09-15 |
-| 6 | Quality nodes, reject ports, control flow | not started | |
-| 7 | Desktop app (Tauri 2 + React 19 + xyflow) | not started | |
+| 6 | Quality nodes, reject ports, control flow | **done** | 2026-09-16 |
+| 6a | — quality nodes and reject ports | **done** | 2026-09-16 |
+| 6b | — control flow, per-stage policy, persistent session | **done** | 2026-09-16 |
+| 7 | Desktop app (Tauri 2 + React 19 + xyflow) | **done** | 2026-09-16 |
+| 7a | — Tauri shell and its five IPC commands | **done** | 2026-09-16 |
+| 7b | — the canvas | **done** | 2026-09-16 |
+| 7c | — the generated property panel | **done** | 2026-09-16 |
+| 7d | — the run view, Plan tab, and the policy panel | **done** | 2026-09-16 |
 | 8 | Headless runner: serve, scheduler, RBAC, incremental | not started | |
 | 9 | Standalone binary export + air-gapped packaging | not started | |
 | 10 | Rust-native connectors | not started | |
@@ -344,7 +369,9 @@ None. (Resolved 2026-09-15: RustCrypto — see Settled decisions 4.)
 
 ## Environment
 
-- Repo: `d:\workspace\ETL_Local_Tool`, git initialised, branch `master`, **no commits yet**.
+- Repo: `d:\workspace\ETL_Local_Tool`, branch `main`, 7 commits, pushed to
+  `github.com/marun224/local_etl_tool` (private). Renamed from `master` on 2026-09-16 while
+  the remote was still empty. Phases 0–5 are one commit; 6a onward commit per phase.
 - Duckle reference checkout: `D:\workspace\duckle-main` (read-only reference; clean-room rules
   apply — architecture and behaviour, never source).
 - Toolchain verified 2026-09-15: **cargo/rustc 1.96.0**, **node v24.18.0**, **npm 11.16.0**.

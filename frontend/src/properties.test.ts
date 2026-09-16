@@ -20,6 +20,7 @@ import {
   missingProperties,
   renameNode,
   setNodeField,
+  setPolicyField,
   setProperty,
   toText,
   valueOf,
@@ -284,5 +285,53 @@ describe("node fields", () => {
     const after = setNodeField(before, "orders", "label", "Renamed");
 
     expect(after.nodes[0]?.data.futureKey).toEqual({ kept: true });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Stage policy
+// ---------------------------------------------------------------------------
+
+describe("setPolicyField", () => {
+  /** The policy on `orders` after applying a sequence of edits. */
+  function after(...edits: [Parameters<typeof setPolicyField>[2], number | boolean | undefined][]) {
+    let document = doc();
+    for (const [field, value] of edits) {
+      document = setPolicyField(document, "orders", field, value);
+    }
+    return document.nodes[0]?.data.policy;
+  }
+
+  it("writes a value, and leaves the other knobs alone", () => {
+    expect(after(["retryAttempts", 2])).toEqual({ retryAttempts: 2 });
+    expect(after(["retryAttempts", 2], ["retryBackoffMs", 100])).toEqual({
+      retryAttempts: 2,
+      retryBackoffMs: 100,
+    });
+  });
+
+  it("removes a cleared knob rather than writing a zero", () => {
+    // `retryAttempts: 0` and no `retryAttempts` compile the same, but the
+    // first reads as a decision someone took.
+    expect(after(["retryAttempts", 2], ["retryBackoffMs", 100], ["retryAttempts", undefined])).toEqual(
+      { retryBackoffMs: 100 },
+    );
+  });
+
+  it("removes the policy entirely once nothing is left in it", () => {
+    // An empty `"policy": {}` is noise in a file people read and diff, and it
+    // is one keystroke from looking like a policy that got lost.
+    expect(after(["continueOnFailure", true], ["continueOnFailure", undefined])).toBeUndefined();
+  });
+
+  it("does not touch a node it was not asked about", () => {
+    const document = setPolicyField(doc(), "orders", "retryAttempts", 1);
+    expect(document.nodes[1]?.data.policy).toBeUndefined();
+  });
+
+  it("keeps zero as a value where zero is meaningful", () => {
+    // Zero backoff is "retry immediately", which is a real choice and not the
+    // same as leaving it unset.
+    expect(after(["retryBackoffMs", 0])).toEqual({ retryBackoffMs: 0 });
   });
 });

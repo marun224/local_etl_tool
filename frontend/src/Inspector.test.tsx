@@ -17,7 +17,7 @@
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Inspector } from "./Inspector";
-import type { PipelineDoc } from "./document";
+import type { NodePolicy, PipelineDoc } from "./document";
 import type { ComponentSpec } from "./ipc";
 
 // The dialog plugin talks to Tauri, which is not here. Only the path control
@@ -289,5 +289,109 @@ describe("what the panel tells you", () => {
     );
 
     expect(screen.getByText(/Select a node/)).toBeTruthy();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Stage policy
+//
+// The panel 7d finally gives these four knobs. What is worth testing is not
+// that four inputs render, but that they follow the same "unset means unset"
+// rule the generated fields do — and that the panel says out loud that
+// setting any of them changes how the whole pipeline runs.
+// ---------------------------------------------------------------------------
+
+describe("the policy panel", () => {
+  /** Whatever the panel wrote to `data.policy`. */
+  function policyAfter(written: () => PipelineDoc) {
+    return written().nodes[0]?.data.policy;
+  }
+
+  /** The panel, over a node that already carries a policy. */
+  function withPolicy(policy: NodePolicy) {
+    const document = doc();
+    document.nodes[0]!.data.policy = policy;
+
+    const onChange = vi.fn();
+    render(
+      <Inspector
+        document={document}
+        node={document.nodes[0] ?? null}
+        specs={SPECS}
+        onChange={onChange}
+        onRenamed={vi.fn()}
+        onError={vi.fn()}
+      />,
+    );
+
+    return { onChange, written: () => onChange.mock.calls.at(-1)?.[0] as PipelineDoc };
+  }
+
+  it("offers all four knobs, unset", () => {
+    panel();
+
+    for (const label of [
+      "Retry attempts",
+      "Retry backoff (ms)",
+      "Continue on failure",
+      "Memory limit (MB)",
+    ]) {
+      expect(fieldFor(label)).toBeTruthy();
+    }
+
+    // Nothing is written merely by rendering.
+    expect(screen.queryByText("session")).toBeNull();
+  });
+
+  it("writes a retry count", () => {
+    const { written } = panel();
+    const input = within(fieldFor("Retry attempts")).getByRole("spinbutton");
+
+    fireEvent.change(input, { target: { value: "3" } });
+    expect(policyAfter(written)).toEqual({ retryAttempts: 3 });
+  });
+
+  it("removes the policy when its last knob is cleared", () => {
+    // Started from a document that already holds one, because the panel is
+    // controlled: an `onChange` spy does not feed its result back, so clearing
+    // a field the rendered document never had would be a no-op event.
+    const { written } = withPolicy({ retryAttempts: 3 });
+
+    fireEvent.change(within(fieldFor("Retry attempts")).getByRole("spinbutton"), {
+      target: { value: "" },
+    });
+
+    expect(policyAfter(written)).toBeUndefined();
+  });
+
+  it("leaves the other knobs alone when one is cleared", () => {
+    const { written } = withPolicy({ retryAttempts: 3, continueOnFailure: true });
+
+    fireEvent.change(within(fieldFor("Retry attempts")).getByRole("spinbutton"), {
+      target: { value: "" },
+    });
+
+    expect(policyAfter(written)).toEqual({ continueOnFailure: true });
+  });
+
+  it("does not write a number that will not parse", () => {
+    const { onChange } = panel();
+    const input = within(fieldFor("Memory limit (MB)")).getByRole("spinbutton");
+
+    fireEvent.change(input, { target: { value: "2.5" } });
+    fireEvent.change(input, { target: { value: "-1" } });
+
+    // A typo must never become a value: the same rule the generated number
+    // field follows.
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("says that a policy moves the pipeline onto the session transport", () => {
+    // The claim is about what someone sees after setting one — finding it out
+    // from the Plan tab afterwards is finding out too late.
+    withPolicy({ retryAttempts: 1 });
+
+    expect(screen.getByText("session")).toBeTruthy();
+    expect(screen.getByText(/session transport/)).toBeTruthy();
   });
 });

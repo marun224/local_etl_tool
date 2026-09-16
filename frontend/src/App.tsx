@@ -6,7 +6,7 @@
  * and it is the same shape the CLI reads. That is what makes the round-trip
  * promise structural rather than something to remember.
  *
- * The run view is 7d's; everything else here is in place.
+ * The bottom panel lives in `RunView.tsx`; this file owns the state it reads.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -14,6 +14,7 @@ import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialo
 
 import { Inspector } from "./Inspector";
 import { Palette } from "./Palette";
+import { DataTab, PlanTab, StatusTab } from "./RunView";
 import { PipelineCanvas, nextPosition } from "./PipelineCanvas";
 import {
   addNode,
@@ -36,13 +37,14 @@ import {
   writePipeline,
   type IpcError,
   type Manifest,
+  type PlanView,
   type PreviewResult,
   type RunResult,
   type StageResult,
   type Validation,
 } from "./ipc";
 
-type Tab = "problems" | "sql" | "data";
+type Tab = "status" | "plan" | "data";
 
 export default function App() {
   const [manifest, setManifest] = useState<Manifest | null>(null);
@@ -54,10 +56,12 @@ export default function App() {
   const [validation, setValidation] = useState<Validation | null>(null);
   const [run, setRun] = useState<RunResult | null>(null);
   const [preview, setPreview] = useState<PreviewResult | null>(null);
-  const [sql, setSql] = useState<string | null>(null);
+  const [plan, setPlan] = useState<PlanView | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
-  const [tab, setTab] = useState<Tab>("problems");
+  const [tab, setTab] = useState<Tab>("status");
+  // Whether the Plan tab shows one script or one block per stage.
+  const [wholeScript, setWholeScript] = useState(false);
 
   const specs = useMemo(() => specsById(manifest), [manifest]);
 
@@ -139,7 +143,7 @@ export default function App() {
       setDirty(false);
       setRun(null);
       setPreview(null);
-      setSql(null);
+      setPlan(null);
       setSelected(null);
     });
 
@@ -166,14 +170,13 @@ export default function App() {
     act("running", async () => {
       const result = await runPipeline(serializeDocument(document));
       setRun(result);
-      setTab("problems");
+      setTab("status");
     });
 
   const onCompile = () =>
     act("compiling", async () => {
-      const plan = await compilePipeline(serializeDocument(document));
-      setSql(plan.script);
-      setTab("sql");
+      setPlan(await compilePipeline(serializeDocument(document)));
+      setTab("plan");
     });
 
   const onPreview = () =>
@@ -214,7 +217,7 @@ export default function App() {
         <button onClick={() => onSave(true)}>Save as…</button>
         <span className="sep" />
         <button onClick={onCompile} disabled={document.nodes.length === 0}>
-          SQL
+          Plan
         </button>
         <button onClick={onPreview} disabled={!selected}>
           Preview
@@ -265,11 +268,11 @@ export default function App() {
 
       <section className="panel">
         <nav className="tabs">
-          <button className={tab === "problems" ? "on" : ""} onClick={() => setTab("problems")}>
+          <button className={tab === "status" ? "on" : ""} onClick={() => setTab("status")}>
             Status
           </button>
-          <button className={tab === "sql" ? "on" : ""} onClick={() => setTab("sql")}>
-            SQL
+          <button className={tab === "plan" ? "on" : ""} onClick={() => setTab("plan")}>
+            Plan
           </button>
           <button className={tab === "data" ? "on" : ""} onClick={() => setTab("data")}>
             Data
@@ -281,134 +284,22 @@ export default function App() {
         <div className="panel-body">
           {toast && <p className="error">{toast}</p>}
 
-          {tab === "problems" && (
-            <Status document={document} validation={validation} run={run} />
+          {tab === "status" && (
+            <StatusTab document={document} validation={validation} run={run} />
           )}
 
-          {tab === "sql" &&
-            (sql ? <pre className="sql">{sql}</pre> : <p className="muted">Press SQL.</p>)}
+          {tab === "plan" && (
+            <PlanTab
+              plan={plan}
+              whole={wholeScript}
+              onToggleWhole={() => setWholeScript((was) => !was)}
+              onSelect={setSelected}
+            />
+          )}
 
-          {tab === "data" && <Data preview={preview} />}
+          {tab === "data" && <DataTab preview={preview} />}
         </div>
       </section>
     </div>
   );
-}
-
-function Status({
-  document,
-  validation,
-  run,
-}: {
-  document: PipelineDoc;
-  validation: Validation | null;
-  run: RunResult | null;
-}) {
-  if (document.nodes.length === 0) {
-    return <p className="muted">Drag a component from the left to begin.</p>;
-  }
-
-  return (
-    <>
-      {validation && !validation.valid && validation.error && (
-        <p className="error">
-          <strong>{validation.error.stage}</strong>
-          {validation.error.nodeId ? ` · ${validation.error.nodeId}` : ""} —{" "}
-          {validation.error.message}
-        </p>
-      )}
-
-      {validation?.valid && (
-        <p className="ok">
-          Valid — {validation.stageCount} stage(s), {validation.sinkCount} sink(s).
-        </p>
-      )}
-
-      {validation?.warnings.map((warning) => (
-        <p key={warning} className="warn">
-          {warning}
-        </p>
-      ))}
-
-      {run && (
-        <>
-          <table>
-            <thead>
-              <tr>
-                <th>Stage</th>
-                <th>Rows</th>
-                <th>Component</th>
-              </tr>
-            </thead>
-            <tbody>
-              {run.stages.map((stage) => (
-                <tr key={stage.nodeId}>
-                  <td>{stage.label}</td>
-                  <td>
-                    {stage.skipped ?? stage.rows?.toLocaleString() ?? "—"}
-                    {stage.rejected !== null && ` (+${stage.rejected} rejected)`}
-                  </td>
-                  <td className="muted">{stage.componentId}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-
-          {run.notes.map((note) => (
-            <p key={note} className="muted">
-              · {note}
-            </p>
-          ))}
-          {run.failures.map((failure) => (
-            <p key={failure} className="error">
-              ! {failure}
-            </p>
-          ))}
-
-          <p className={run.failed ? "error" : "ok"}>
-            {run.failed ? "Run failed" : "Ran"} in {run.elapsedMs}ms
-          </p>
-        </>
-      )}
-    </>
-  );
-}
-
-function Data({ preview }: { preview: PreviewResult | null }) {
-  if (!preview) return <p className="muted">Select a node and press Preview.</p>;
-  if (preview.rows.length === 0) return <p className="muted">No rows.</p>;
-
-  return (
-    <>
-      <table>
-        <thead>
-          <tr>
-            {preview.columns.map((column) => (
-              <th key={column}>{column}</th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {preview.rows.map((row, index) => (
-            <tr key={index}>
-              {preview.columns.map((column) => (
-                <td key={column}>{format(row[column])}</td>
-              ))}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      <p className="muted">
-        {preview.nodeId} — {preview.rows.length} row(s)
-        {preview.truncated && ", and there are more"}
-      </p>
-    </>
-  );
-}
-
-/** Null is a value, and must not render as an empty cell. */
-function format(value: unknown): string {
-  if (value === null || value === undefined) return "—";
-  if (typeof value === "object") return JSON.stringify(value);
-  return String(value);
 }

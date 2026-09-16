@@ -1935,3 +1935,97 @@ fn both_transports_agree_on_the_same_pipeline() {
         "the transport must not change the answer"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Per-stage timings
+//
+// The rule under test is not "does the executor measure time" — it plainly
+// does — but which measurements it is willing to publish. A `0 ms` beside the
+// transform that cost the most is worse than a blank, so the executor keeps a
+// duration only where the stage did its work at the moment it ran.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_waiting_stage_reports_the_time_it_actually_held() {
+    if duckdb_binary().is_none() {
+        return;
+    }
+
+    let document = guarded("ctl.wait", r#"{"ms": 250}"#, "");
+    let plan = compile(&document).expect("compiles");
+    assert!(plan.needs_session(), "a control node takes the driven path");
+
+    let report = run(&plan, &options()).expect("runs");
+
+    // The wait is the one stage whose duration is unambiguous: it is the whole
+    // of what the stage does. Under rather than equal, because a sleep may
+    // overshoot and a timer may round, but it can never come back early.
+    let waited = stage(&report, "gate").elapsed.expect("a wait is timed");
+    assert!(
+        waited >= std::time::Duration::from_millis(250),
+        "the wait reported {waited:?}, which is less than it was asked to hold"
+    );
+
+    // And the lazy stages either side of it say nothing rather than zero.
+    assert_eq!(
+        stage(&report, "orders").elapsed,
+        None,
+        "a lazy view has no honest duration to report"
+    );
+    assert_eq!(stage(&report, "after").elapsed, None);
+}
+
+#[test]
+fn a_materialised_stage_earns_a_timing_and_a_lazy_one_does_not() {
+    if duckdb_binary().is_none() {
+        return;
+    }
+
+    // `memory` builds its table there and then, so the time it takes is the
+    // time its work took. Paired with a policy so the plan takes the driven
+    // path at all — timing is a property of the transport as much as the stage.
+    let document = guarded("xf.distinct", "{}", r#"{"retryAttempts": 1}"#);
+    let mut document = document;
+    for node in &mut document.nodes {
+        if node.id == "gate" {
+            node.data.materialize = Some("memory".to_string());
+        }
+    }
+
+    let plan = compile(&document).expect("compiles");
+    let report = run(&plan, &options()).expect("runs");
+
+    assert!(
+        stage(&report, "gate").elapsed.is_some(),
+        "a memory-materialised stage does its work when it runs, so it is timed"
+    );
+    assert_eq!(
+        stage(&report, "after").elapsed,
+        None,
+        "the lazy filter after it is not"
+    );
+}
+
+#[test]
+fn the_one_script_path_publishes_no_per_stage_timings() {
+    if duckdb_binary().is_none() {
+        return;
+    }
+
+    // Nothing here earns a session, so the whole plan goes to DuckDB in one
+    // invocation. There is no boundary between stages to measure, and the
+    // report must not invent one.
+    let plan = compile(&guarded("xf.distinct", "{}", "")).expect("compiles");
+    assert!(!plan.needs_session());
+
+    let report = run(&plan, &options()).expect("runs");
+
+    assert!(
+        report.stages.iter().all(|stage| stage.elapsed.is_none()),
+        "one invocation cannot be attributed to individual stages"
+    );
+    assert!(
+        report.elapsed > std::time::Duration::ZERO,
+        "the run as a whole is still timed"
+    );
+}

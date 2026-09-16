@@ -66,6 +66,15 @@ export interface StageResult {
   rejected: number | null;
   /** Why this stage did not run, if it did not. */
   skipped: string | null;
+  /**
+   * How long the stage took, when the engine was willing to say.
+   *
+   * `null` for most stages on most runs, and that is the engine being honest
+   * rather than incomplete: a lazy view is registered in microseconds and
+   * computed later by whatever reads it, so a `0 ms` beside it would credit
+   * the wrong stage. Render nothing for `null` — not a zero, not a dash.
+   */
+  elapsedMs: number | null;
 }
 
 export interface RunResult {

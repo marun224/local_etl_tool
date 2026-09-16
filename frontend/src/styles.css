@@ -616,3 +616,173 @@ button.tiny.wide {
   width: 100%;
   color: var(--muted);
 }
+
+/* --------------------------------------------------------------------- */
+/* The run view                                                           */
+/* --------------------------------------------------------------------- */
+
+.right {
+  text-align: right;
+}
+
+.mono {
+  font-family: ui-monospace, Consolas, monospace;
+}
+
+.note {
+  margin: 6px 0;
+  max-width: 78ch;
+  line-height: 1.5;
+}
+
+/* A stage that did not run is dimmed rather than coloured: it is not an
+   error in itself, it is the consequence of one somewhere else. */
+tr.is-skipped td {
+  opacity: 0.55;
+}
+
+table.run td:first-child {
+  font-family: inherit;
+}
+
+/* The preview grid scrolls on its own, with the header staying put. A data
+   grid whose header scrolls away is one you lose your place in at row 30. */
+.grid {
+  overflow: auto;
+  max-height: 22vh;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.grid th {
+  position: sticky;
+  top: 0;
+  background: var(--panel);
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.grid td {
+  padding: 3px 10px;
+}
+
+.grid .row-number {
+  color: var(--muted);
+  text-align: right;
+  font-size: 10.5px;
+  user-select: none;
+  padding-right: 8px;
+  border-right: 1px solid var(--line);
+}
+
+/* Null is italic as well as dimmed, so it cannot be mistaken for the
+   four-letter string "null" that a column might genuinely hold. */
+.grid td.null {
+  font-style: italic;
+  opacity: 0.7;
+}
+
+/* --------------------------------------------------------------------- */
+/* The Plan tab                                                           */
+/* --------------------------------------------------------------------- */
+
+.plan-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0 0 8px;
+  font-size: 11.5px;
+}
+
+ol.plan {
+  margin: 0;
+  padding-left: 22px;
+}
+
+ol.plan li {
+  margin-bottom: 10px;
+}
+
+ol.plan li::marker {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.plan-stage {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0 0 4px;
+  font-size: 11.5px;
+}
+
+/* A button that reads as a link: it navigates rather than acts. */
+button.link {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+}
+
+button.link:hover {
+  text-decoration: underline;
+}
+
+.badge {
+  margin-left: 8px;
+  padding: 1px 6px;
+  border: 1px solid var(--warn);
+  border-radius: 999px;
+  color: var(--warn);
+  font-size: 10px;
+  font-weight: 500;
+  vertical-align: middle;
+}
+
+/* --------------------------------------------------------------------- */
+/* Generated SQL                                                          */
+/* --------------------------------------------------------------------- */
+
+.tok-keyword {
+  color: var(--ns-transform);
+  font-weight: 600;
+}
+
+.tok-string {
+  color: var(--ok);
+}
+
+.tok-number {
+  color: var(--ns-sink);
+}
+
+.tok-comment {
+  color: var(--muted);
+  font-style: italic;
+}
+
+/* --------------------------------------------------------------------- */
+/* Run results on the node itself                                         */
+/* --------------------------------------------------------------------- */
+
+.node-took {
+  color: var(--muted);
+  margin-left: auto;
+}
+
+.node-skipped {
+  color: var(--muted);
+  font-style: italic;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: block;
+}
+
+/* A skipped node is dimmed for the same reason its row is: it did not fail,
+   it was not reached. */
+.node.is-skipped {
+  opacity: 0.6;
+}

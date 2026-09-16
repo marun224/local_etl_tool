@@ -8,8 +8,9 @@
  * per-component panel is a panel nobody can add to.
  *
  * The node's own fields — name, label, alias, materialize, disabled — sit above
- * the properties. They are how a node is *run* rather than what its component
- * does, and every component has them, so they are still not per-component.
+ * the properties, and the stage policy sits below them. They are how a node is
+ * *run* rather than what its component does, and every component has them, so
+ * they are still not per-component.
  */
 
 import { useEffect, useState } from "react";
@@ -26,8 +27,10 @@ import {
   isMissing,
   isSet,
   MATERIALIZE,
+  POLICY_FIELDS,
   renameNode,
   setNodeField,
+  setPolicyField,
   setProperty,
   toText,
   valueOf,
@@ -68,6 +71,9 @@ export function Inspector({
 
   const setField = (field: string, value: unknown) =>
     onChange(setNodeField(document, node.id, field, value));
+
+  const setPolicy = (field: (typeof POLICY_FIELDS)[number], value: number | boolean | undefined) =>
+    onChange(setPolicyField(document, node.id, field, value));
 
   return (
     <aside className="inspector">
@@ -140,7 +146,121 @@ export function Inspector({
           />
         ))
       )}
+
+      <Policy node={node} onChange={setPolicy} />
     </aside>
+  );
+}
+
+/**
+ * What this stage does when it fails.
+ *
+ * Kept below the properties because it is about failure rather than about what
+ * the node does, and most nodes never need it. The note at the bottom is not
+ * decoration: setting any of these moves the whole pipeline onto the session
+ * transport, which is a real change in how it runs, and finding that out from
+ * the Plan tab afterwards is finding out too late.
+ */
+function Policy({
+  node,
+  onChange,
+}: {
+  node: PipelineNode;
+  onChange: (
+    field: (typeof POLICY_FIELDS)[number],
+    value: number | boolean | undefined,
+  ) => void;
+}) {
+  const policy = node.data.policy ?? {};
+  const set = POLICY_FIELDS.some((field) => policy[field] !== undefined);
+
+  return (
+    <>
+      <h3>
+        When it fails
+        {set && <span className="badge">session</span>}
+      </h3>
+
+      <Number
+        label="Retry attempts"
+        help="Extra attempts after the first. Left unset, the stage runs once."
+        value={policy.retryAttempts}
+        min={0}
+        onChange={(value) => onChange("retryAttempts", value)}
+      />
+
+      <Number
+        label="Retry backoff (ms)"
+        help="How long to wait before the first retry, doubling each time after."
+        value={policy.retryBackoffMs}
+        min={0}
+        onChange={(value) => onChange("retryBackoffMs", value)}
+      />
+
+      <Toggle
+        label="Continue on failure"
+        help="The rest of the run goes on; stages reading this one are skipped. The run still ends failed."
+        value={policy.continueOnFailure === true}
+        onChange={(on) => onChange("continueOnFailure", on ? true : undefined)}
+      />
+
+      <Number
+        label="Memory limit (MB)"
+        help="A ceiling set around this stage and put back afterwards."
+        value={policy.memoryLimitMb}
+        min={1}
+        onChange={(value) => onChange("memoryLimitMb", value)}
+      />
+
+      {set && (
+        <p className="muted small">
+          Any of these puts the whole pipeline on the session transport: one DuckDB process
+          held open, stages sent one at a time. That is what makes a retry possible, and it is
+          also what lets the run report per-stage timings.
+        </p>
+      )}
+    </>
+  );
+}
+
+/**
+ * A whole number, or nothing.
+ *
+ * Clearing the box removes the field rather than writing a zero, and a value
+ * that will not parse is not written at all — the same rule the generated
+ * fields follow, for the same reason: a typo must never become a value.
+ */
+function Number({
+  label,
+  help,
+  value,
+  min,
+  onChange,
+}: {
+  label: string;
+  help: string;
+  value: number | undefined;
+  min: number;
+  onChange: (value: number | undefined) => void;
+}) {
+  return (
+    <div className="field">
+      <span title={help}>{label}</span>
+      <input
+        type="number"
+        min={min}
+        value={value ?? ""}
+        onChange={(event) => {
+          const text = event.target.value.trim();
+          if (text === "") return onChange(undefined);
+
+          const parsed = globalThis.Number(text);
+          if (!globalThis.Number.isInteger(parsed) || parsed < min) return;
+
+          onChange(parsed);
+        }}
+      />
+    </div>
   );
 }
 
