@@ -953,7 +953,7 @@ taskkill //F //IM etl.exe
 cargo fmt --all
 cargo fmt --all --check                      # clean
 cargo clippy --workspace --all-targets -- -D warnings   # clean
-cargo test --workspace                       # 576 passing
+cargo test --workspace                       # 615 passing
 npm --prefix frontend run test               # 114 passing
 npm --prefix frontend run typecheck          # clean
 

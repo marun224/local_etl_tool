@@ -24,7 +24,7 @@ first when picking the project back up.
 >
 > ```powershell
 > cd D:\workspace\ETL_Local_Tool
-> cargo test --workspace                                            # expect 576 passing
+> cargo test --workspace                                            # expect 615 passing
 > npm --prefix frontend run test                                    # expect 114 passing
 > npm --prefix frontend run typecheck                               # expect clean
 > npm --prefix frontend run build                                   # expect clean
@@ -88,8 +88,10 @@ first when picking the project back up.
 > `etl state forget` and `etl runs prune` are how you get back here deliberately.
 >
 > **State of the tree:** clean and committed. The last phase commit is **`c6830a4` — Phase 8d**;
-> anything after it is this file. Everything is pushed; `origin/main` at
-> `github.com/marun224/local_etl_tool` (private) is at the same commit as `HEAD`.
+> after it come this file and one between-phases commit that gave `etl-cli` its first tests
+> (39 of them, no behaviour changed — see the last session-log entry). The remote is
+> `github.com/marun224/local_etl_tool` (private); **it is behind by that commit and this
+> file** until somebody pushes.
 >
 > (This line used to carry a commit count, which was wrong twice and could not be right for
 > long: correcting it is itself a commit, so the number was stale the moment it was written.
@@ -125,7 +127,7 @@ pass), `ctl.throttle` (nothing to throttle until Phase 10 has a row cursor).
 **a scheduler that runs them**, and **a console to watch it from**. From the repo root:
 
 ```powershell
-cargo test --workspace        # 576 tests: 254 engine, 113 scheduler, 65 console, 51 e2e, 45 state, 23 secrets, 15 metadata, 10 desktop
+cargo test --workspace        # 615 tests: 254 engine, 113 scheduler, 65 console, 51 e2e, 45 state, 39 cli, 23 secrets, 15 metadata, 10 desktop
 .\target\debug\etl.exe run samples\pipelines\orders_enriched.json
 .\target\debug\etl.exe validate samples\pipelines\orders_enriched.json
 .\target\debug\etl.exe plan samples\pipelines\orders_enriched.json --script
@@ -1236,3 +1238,35 @@ underneath. Settled decision 8 held: `tiny_http`, and five crates arrive with it
   token in the URL refused on the API for both a GET and a POST, a viewer's `POST` refused with
   the run not happening, a traversal attempt answered 404, and the hardening headers read off
   the wire.
+
+### 2026-09-17 — Between phases: the CLI gets tests
+
+Not a phase. `cargo test -p etl-cli` reported **0 passing** — the one crate the 576 did not
+reach, and the crate Phase 9's build logic is about to land in.
+
+It is not only argument parsing. `ConsoleWorkspace` is the seam `etl-console` is built around,
+and every route in that crate is tested against a *fake* workspace; the real one, which turns a
+name off a socket into a path on disk, had nothing on it. `collect_pipelines`, `watermarks_for`,
+`Settings::for_schedule` and `record_of` were in the same position.
+
+- `crates/cli/src/tests.rs` — **39 tests**, the `src/tests.rs` shape every other crate uses.
+  Scanning (what counts as a pipeline, what is skipped, the depth bound, name order), `locate`
+  including the traversal cases, the console's listings and run history, the two watermark
+  precedence rules, schedule inheritance, and the records a run leaves behind.
+- `crates/cli/src/main.rs` — one line: `#[cfg(test)] mod tests;`.
+
+Nothing under test changed. **615 Rust tests**, 114 frontend, clippy clean, fmt clean.
+
+#### What running it changed
+
+- **The suite passed on the first run, which is not evidence.** Three mutations were made to the
+  code under test — `MAX_DEPTH` 4 → 5, `record_of`'s outcome inverted, and
+  `watermarks_for`'s column guard short-circuited — and exactly four tests failed, no more and
+  no fewer. Reverted after. A test that cannot fail is worse than no test, because it is
+  counted.
+- **`git checkout` to undo those mutations also removed the `mod tests;` line**, since it was an
+  uncommitted change to the same file. Obvious afterwards; worth the line here.
+- **The traversal test asserts *not found* rather than found-and-refused.** `locate` resolves a
+  name by looking it up in the workspace's own list, so there is no join for `../../etc/passwd`
+  to escape through. Pinning "404" rather than "403" is what stops somebody later replacing the
+  lookup with a join plus a check, which is the shape that has holes in it.

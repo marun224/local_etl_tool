@@ -20,6 +20,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+#[cfg(test)]
+mod tests;
+
 /// Exit codes, fixed so scripts and CI can branch on them.
 mod exit {
     /// Everything worked.
