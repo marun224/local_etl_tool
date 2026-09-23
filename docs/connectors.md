@@ -254,11 +254,41 @@ Real TLS was checked by hand once, against the public countries API
 (`countries.trevorblades.com`): 27 Oceania countries through a `$continent` variable, and an
 unknown field reported as above. The suite itself never leaves 127.0.0.1.
 
-## `src.stream.kafka`
+## `src.stream.kafka` and `snk.stream.kafka`
 
-Added in Phase 10e (2026-09-23). Client: `rskafka` 0.6, on a single-threaded `tokio` runtime
-that exists only for the length of one read (Settled decision 26). Verified against Apache
-Kafka 4.1 in KRaft mode. **Plaintext only for now**; TLS and SASL, and the sink, are Phase 10f.
+The source was added in Phase 10e and the sink, TLS and SASL in 10f (both 2026-09-23).
+Client: `rskafka` 0.6, on a single-threaded `tokio` runtime that exists only for the length of
+one read or write (Settled decision 26). Verified against Apache Kafka 4.1 in KRaft mode, on
+plaintext, SSL, SASL_PLAINTEXT and SASL_SSL listeners.
+
+### Connecting
+
+Both directions take the same connection properties.
+
+| `security` | What it does | Also needs |
+|---|---|---|
+| `plaintext` (default) | nothing: for a broker on a trusted network | |
+| `ssl` | encrypts, and checks the broker's certificate | `ca_cert` for a private CA |
+| `sasl_plaintext` | signs in, unencrypted | `username`, `password` |
+| `sasl_ssl` | both: what Confluent Cloud, MSK and Aiven expect | all of the above |
+
+- **`sasl_mechanism`** is `plain` (default), `scram-sha-256` or `scram-sha-512`. OAUTHBEARER and
+  Kerberos (GSSAPI) are not supported.
+- **Put the password in a secret** (`"password": "${SECRET:kafka_password}"`). It is never in an
+  error: a connection is described as `brokers (sasl_ssl, SCRAM-SHA-512 as 'etl')`, and every
+  connector error is masked as well. `etl build` refuses to bake a secret without
+  `--allow-secrets`.
+- **`ca_cert`** is a PEM file of the certificate authority to trust, relative to the workspace.
+  Unset, the bundled public roots are trusted (the same `webpki-roots` HTTPS uses), which is
+  right for hosted Kafka and wrong for a private CA: that fails with `invalid peer
+  certificate: UnknownIssuer`. Client certificates (mutual TLS) are not supported.
+- **A setting that cannot work is refused before anything runs**, by `etl validate` and the
+  canvas: SASL without a username or password, a username or password without SASL, or a
+  `ca_cert` without TLS.
+- **A failed sign-in says why.** `rskafka` retries a failed sign-in as if it were a network
+  blip, until any timeout wins. So when connecting times out, the connector makes one more
+  attempt with retries off and reports what it says, e.g. `Sasl handshake failed: API error:
+  SaslAuthenticationFailed`. This takes about `timeout_ms` plus a few seconds.
 
 ### What it is, and what it is not
 
@@ -330,8 +360,43 @@ position over the first's. The scheduler never does this; a hand-run `etl run` b
 running scheduler is the known unguarded case, as it is for watermarks.
 
 **Timeouts.** `timeout_ms` (default 30,000) bounds each step, retries included: connecting,
-listing the topic, and each fetch. `rskafka`'s own retries have no deadline, so without this a
-mistyped broker address would hang a run; with it, the run fails naming what it was doing.
+listing the topic, each fetch and each send. A step that stalls is given five seconds more,
+so that when retries run out their reason arrives rather than a bare "no answer".
+`rskafka`'s own retries have no deadline, so without this a mistyped broker address would
+hang a run; with it, the run fails naming what it was doing.
+
+### Writing: `snk.stream.kafka`
+
+Each row becomes **one record whose value is the row as a JSON object**, key column
+included. Types go as DuckDB writes JSON (see *Types* above): a decimal as a number, a
+timestamp as text.
+
+- **`key_column`** names the column whose value is the record's key: text as UTF-8, a number or
+  boolean as written, anything nested as its JSON. A null key, or no `key_column`, sends the
+  row without one. A `key_column` the rows do not have fails the write, naming it.
+- **Partitioning is Java's.** A keyed record goes to `murmur2(key) & 0x7fffffff` modulo the
+  partition count, bit for bit as Kafka's Java producer does. Checked two ways: against the
+  values Kafka's own test suite pins, and by writing 30 keys through `etl` and through Kafka's
+  console producer into two six-partition topics, which put every key on the same partition.
+  So a consumer that relies on "one key, one partition, in order" sees our records where it
+  sees everyone else's. **Keyless rows** go to one partition per batch, taking turns across
+  batches.
+- **`batch_size`** (default 500) rows per batch. A batch goes to each of its partitions in turn,
+  and each send waits for **every in-sync replica** to acknowledge (`acks=all`).
+- **`compression`** is `none` (default), `gzip`, `snappy`, `lz4` or `zstd`, per batch. Each is
+  verified by writing with it and reading back through the source.
+- **The topic must exist.** This connector never creates one.
+
+**Delivery is at-least-once per batch.** If a batch fails, the batches before it are
+delivered, and **part of the failing batch may be too**, since it goes to each partition
+separately. The error says so: `batch 3 failed after 2 batch(es) (4 record(s)) were
+delivered, and part of batch 3 may have landed too: ...`. A send that timed out may also have
+landed. So a re-run can write some records twice. There is no idempotent producer or
+transaction, so if duplicates matter, key the records and deduplicate downstream, or read with
+a consumer that tolerates them.
+
+**Like every native sink, it delivers only after a run that fully succeeded** (see *What every
+native connector shares*), and never in `preview`.
 
 ### A micro-batch into a file
 
@@ -340,3 +405,73 @@ batch**, and a run that read nothing leaves an empty file. That is right for "th
 changes", and wrong for "everything so far". For the second, write to a database sink that
 appends, or put the date in the path (`${date}`). There is no per-run built-in for a file
 name yet.
+
+## `src.stream.nats` and `snk.stream.nats`
+
+Added in Phase 10g (2026-09-23). Client: `async-nats` 0.50 (JetStream, `ring`, NKeys), on a
+single-threaded `tokio` runtime that exists for one read or write (Settled decision 43).
+Verified against NATS 2.11 servers: open, user and password, token, TLS, and operator mode
+with a `.creds` file.
+
+**JetStream only.** Core NATS keeps nothing: a message goes to whoever is listening at that
+moment, so there is nothing to read back in a batch. The source reads a JetStream **stream**;
+the sink publishes to a **subject** that a stream captures, and waits for JetStream's
+acknowledgement.
+
+### Connecting
+
+- **`url`**: `nats://host:4222`, comma-separated for a cluster. `tls://` turns TLS on, as does
+  `tls: true`.
+- **`auth`**: `none`; `user_password` (`username`, `password`); `token` (`token`); `creds`
+  (`creds_file`, a `.creds` file holding a JWT and an NKey seed, which is how Synadia Cloud and
+  other operator-mode deployments sign in). Put passwords and tokens in secrets; a `.creds`
+  file holds a secret key, so keep it out of version control.
+- **TLS** trusts `ca_cert` if given and the bundled public roots if not, not the operating
+  system's store (Settled decision 42), exactly as for Kafka. Client certificates are not
+  supported.
+- **A setting that would be ignored is refused** before anything runs: a token with
+  `auth: none`, a password with `auth: token`, a `ca_cert` without TLS.
+- **Errors say why and never quote a secret**: `connecting to nats://host:4222 (plaintext,
+  user_password as 'etl'): authorization violation`, or `invalid peer certificate:
+  UnknownIssuer`.
+
+### Reading: `src.stream.nats`
+
+The same bounded micro-batch as Kafka (see its section): when the run starts it records the
+stream's last sequence, reads from the saved position up to it or `max_records`, and saves
+where it got to **only if the whole run succeeds**. It reads through an **ephemeral ordered
+consumer**: nothing is left on the server, no durable consumer exists, and NATS's own tools do
+not show this pipeline as a consumer (Settled decision 38). `etl state forget` replays.
+
+- **`filter_subject`** reads only matching subjects (`orders.eu.>`). The position still moves
+  past the end of the stream, so messages that did not match are not looked at again.
+  Changing the stream or the filter starts that node from `start`, with a note.
+- **Rows** are Kafka's `value_format` (`json`, `text`, `bytes`, with the same refusals), plus
+  `_stream`, `_subject`, `_sequence`, `_timestamp` (UTC, milliseconds) and `_headers` (a JSON
+  object of name to value, a repeated name as a list, null when there are none). An empty
+  payload under `json` is a row of only the underscore columns.
+- **Messages discarded before they were read fail the run**, with the count: a stream's limits
+  (`max_age`, `max_msgs`, `max_bytes`) drop the oldest messages, and a saved position older
+  than the stream's first sequence means some were never read. The fix is `etl state forget`.
+- **Messages deleted from the middle are not a gap.** `max_msgs_per_subject`, or a delete by
+  hand, removes messages inside a stream; they are simply not there to read, and no error is
+  raised, because JetStream does this in normal operation.
+- A saved position past the end means the stream was probably deleted and made again: an
+  error, with the same fix.
+
+### Writing: `snk.stream.nats`
+
+Each row is published as **one JSON message** to `subject`, which must be one exact subject (no
+wildcards) that a stream captures; publishing where no stream listens fails. A batch
+(`batch_size`, default 500) is published whole and then every acknowledgement is awaited,
+so a batch costs one round trip's wait, not one per message.
+
+- **`msg_id_column`** sets each message's `Nats-Msg-Id` from a column. **JetStream then drops a
+  message whose ID it has already stored within the stream's duplicate window** (two minutes
+  by default, set per stream), and the report says how many it dropped. So **a re-run within
+  that window adds no copies**: the one sink in this project with that property. Outside the
+  window, or without `msg_id_column`, delivery is at-least-once per batch.
+- **A failed batch** reports the batches already delivered, and that part of the failing
+  batch may have landed, as for Kafka.
+- **Like every native sink, it publishes only after a run that fully succeeded**, and never in
+  `preview`.

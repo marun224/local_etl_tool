@@ -3,38 +3,41 @@
 **State only.** Design lives in [PLAN_duckle_parity.md](PLAN_duckle_parity.md). Read this file
 first when picking the project back up.
 
-> ## ✅ Phase 10e (checkpoints and the Kafka source) — built 2026-09-23, green locally, **pushed with `[skip ci]`, CI not run**
+> ## ✅ Phase 10g (NATS JetStream, both ways) — built 2026-09-24, green locally, **committed and pushed with 10f; first CI run pending**
 >
-> **What 10e built:** the **checkpoint**, a native source's own saved position, carried in
-> `Context`/`Summary` (SDK), `CompileOptions`/`NativeStep`/`RunReport` (engine), and a
-> `checkpoints` map in the state file, saved only after a fully successful run by one shared
-> function, `etl_duckdb_engine::remember`, that `etl run`, the scheduler, the console and the
-> runner all call. **Built artifacts now keep state** (Settled decision 36), so `etl build` no
-> longer refuses an incremental pipeline. And **`src.stream.kafka`**: bounded micro-batches
-> on `rskafka`, verified against Apache Kafka 4.1. **61 components, 859 Rust tests** (849 on
-> Linux) with every test server up, **128 frontend**. Fmt, clippy with `-D warnings`,
-> typecheck and build clean; two mutation checks caught. What it found is under *From Phase
-> 10e*.
+> **What 10g built:** `src.stream.nats` (bounded micro-batches from a JetStream stream, an
+> ephemeral ordered consumer, a subject filter, gaps from stream limits refused with a count,
+> interior deletes tolerated) and `snk.stream.nats` (JSON to a subject, acknowledged per
+> batch, and **`msg_id_column` so JetStream drops a re-sent message**), with every sign-in:
+> user and password, token, `.creds` (operator mode) and TLS with `ca_cert`. TLS set-up moved
+> into a shared `tls.rs` and value decoding into shared helpers, Kafka's tests unchanged.
+> Five NATS containers join the test services. **64 components, 906 Rust tests** (896 on
+> Linux) with every server up, twice in a row, **131 frontend**. What it found is under *From
+> Phase 10g*.
 >
-> **A correction to the record.** Open question 12 said artifacts "silently re-read" every
-> incremental source, "undocumented". That was wrong: `etl build` **refused** an incremental
-> pipeline outright, and the runner's own doc comment said why. The gap was known and guarded.
-> Option (a) still stands, and now means lifting that refusal rather than fixing a silent bug.
-> Found while building, 2026-09-23, and told to the user.
+> **10f, for the record:** `snk.stream.kafka` (Java-identical partitioning, four codecs,
+> `acks=all`), and TLS and SASL for both Kafka directions.
+>
+> **10e, for the record:** checkpoints (a native source's saved position, saved only after
+> a fully successful run, through the shared `etl_duckdb_engine::remember`), artifacts that
+> keep state (Settled decision 36; open question 12's premise was wrong, since `etl build`
+> already *refused* incremental pipelines), and `src.stream.kafka`.
 >
 > **State of the tree:** everything through `c291142` (10d) is committed, pushed and green in
-> CI ([run 35888523818](https://github.com/marun224/local_etl_tool/actions/runs/35888523818):
-> Ubuntu 812, Windows 822, all six jobs). **10e is committed and pushed** at the user's request
-> on 2026-09-23, as "Phase 10e: checkpoints, and the Kafka source", **with `[skip ci]`**: the
-> user asked for no CI run, and a push to `main` would otherwise start `gate.yml`. So **CI has
-> never run on 10e.** The next push without `[skip ci]`, or a manual `workflow_dispatch`, runs
-> it, and that first run pulls the 680 MB Kafka image in the Ubuntu gate.
+> CI ([run 35888523818](https://github.com/marun224/local_etl_tool/actions/runs/35888523818)).
+> **10e is `fc143d4`**, committed and pushed at the user's request **with `[skip ci]`**, so
+> CI has never run on it. **10f and 10g are one commit**, "Phase 10f and 10g: the Kafka
+> sink with TLS and SASL, and NATS JetStream", committed and pushed at the user's request on
+> 2026-09-24 (the user had staged both together, so they could not be split). That push starts
+> **the first CI run for 10e, 10f and 10g**: it pulls the Kafka and NATS images and makes
+> certificates and an NATS operator in the Ubuntu gate. Its result is not yet known.
 >
-> **Next:** a CI run on 10e when the user wants one; then **10f** (the Kafka sink,
-> TLS and SASL), as planned. Still open on the website: GraphQL can be marked working there,
-> naming `the_graphql_sample_reads_two_relay_pages_filters_and_mutates_in_batches` in its
-> `CLAIMS.md`, and now Kafka reading too, naming
-> `the_kafka_sample_carries_on_between_runs_on_the_one_script_path`.
+> **Next:** read the first CI run's result. Then what follows NATS,
+> decided then (Settled decision 46): Kinesis, a design for the acknowledgement-based brokers,
+> or NoSQL. Still open on the website: GraphQL, Kafka and now NATS can be marked working
+> there, naming `the_graphql_sample_reads_two_relay_pages_filters_and_mutates_in_batches`,
+> `the_kafka_sample_carries_on_between_runs_on_the_one_script_path` and
+> `the_nats_sample_carries_on_between_runs_on_the_one_script_path` in its `CLAIMS.md`.
 >
 > **10d, for the record:** `src.saas.graphql` and `snk.saas.graphql`, the shared `http.rs`,
 > the `code` property kind. CI warnings seen on its run, neither failing anything: the `@v4`
@@ -66,14 +69,14 @@ first when picking the project back up.
 >
 > | Job | Checked locally by |
 > |---|---|
-> | `gate (windows)` — fmt, clippy, 859 tests (servers skip), samples | running it, repeatedly |
-> | `gate (ubuntu)` — fmt, clippy, **849 tests** with Postgres, MySQL, MinIO and Kafka, samples | `cargo test` in `rust:1.96-slim-bookworm` |
+> | `gate (windows)` — fmt, clippy, 906 tests (servers skip), samples | running it, repeatedly |
+> | `gate (ubuntu)` — fmt, clippy, **896 tests** with Postgres, MySQL, MinIO, Kafka (four listeners) and NATS (five servers), samples | `cargo test` in `rust:1.96-slim-bookworm` |
 > | `artifact (both)` — bake, run from elsewhere, run in a bare container | Phase 9b and 9c |
 > | `cross-build-script` — `build-runner.ps1`, ELF check, unbaked contract, no-op rerun | each assertion run by hand |
-> | `frontend` — 128 tests, typecheck, build | running it |
+> | `frontend` — 131 tests, typecheck, build | running it |
 >
 > **The Linux job excludes `apps/desktop`** (Tauri needs WebKitGTK and GTK to compile), so
-> **849 + 10 desktop = 859** is the arithmetic to check if either number moves. **CI fetches
+> **896 + 10 desktop = 906** is the arithmetic to check if either number moves. **CI fetches
 > only the extensions the tests load** (`DUCKDB_TEST_EXTENSIONS`, hyphen-separated because
 > `actions/cache` refuses a comma in a key). **CI cannot do the Windows-to-Linux cross-build**
 > (GitHub's Windows runners run no Linux containers), so it proves the output instead: a Linux
@@ -82,13 +85,13 @@ first when picking the project back up.
 > **To check everything, from the repo root:**
 >
 > ```powershell
-> ./scripts/test-services.ps1                                       # Postgres, MySQL, MinIO, Kafka in Docker
-> cargo test --workspace                                            # expect 859 passing
+> ./scripts/test-services.ps1                                       # Postgres, MySQL, MinIO, Kafka, NATS in Docker
+> cargo test --workspace                                            # expect 906 passing
 > ./scripts/test-services.ps1 -Stop                                 # tidy up afterwards
-> npm --prefix frontend run test                                    # expect 128 passing
+> npm --prefix frontend run test                                    # expect 131 passing
 > npm --prefix frontend run typecheck                               # expect clean
 > npm --prefix frontend run build                                   # expect clean
-> .\target\debug\etl.exe components                                 # expect 61
+> .\target\debug\etl.exe components                                 # expect 64
 > .\target\debug\etl.exe run samples\pipelines\orders_enriched.json # expect 12/5/7/6/6
 > .\target\debug\etl.exe run samples\pipelines\orders_checked.json  # expect 12/10+2/9+1/9/2/1
 > .\target\debug\etl.exe run samples\pipelines\orders_guarded.json  # expect 12 through, branch taken
@@ -111,12 +114,12 @@ first when picking the project back up.
 
 ## Where things stand
 
-- **Next phase:** **10f, the Kafka sink, TLS and SASL**, planned in
-  [PLAN_duckle_parity.md](PLAN_duckle_parity.md) under *Phase 10e and 10f*. After the user
-  commits 10e and it passes CI.
-- **In progress:** nothing. **Phases 0–9 and 10a–10e are done** (10a–10e on 2026-09-23; CI
-  green through 10d on run 35888523818; 10e pushed with `[skip ci]`, never run in CI).
-- **Blocked on:** nothing. 10f's broker tests need Docker running, as 10e's did.
+- **Next phase:** what follows NATS, decided when the user chooses (Settled decision 46):
+  Kinesis, a design for the acknowledgement-based brokers (Pub/Sub, RabbitMQ), or NoSQL.
+- **In progress:** nothing. **Phases 0–9 and 10a–10g are done** (10a–10f on 2026-09-23, 10g
+  on 2026-09-24; CI green through 10d; 10e pushed with `[skip ci]`; 10f and 10g pushed
+  together, their first CI run pending).
+- **Blocked on:** nothing.
 
 Phase 9 was split into 9a–9d on 2026-09-17 before starting, the same way 6 and 8 were:
 **9a** the artifact and the payload format, **9b** the engine and extensions inside it,
@@ -138,7 +141,7 @@ pass), `ctl.throttle` (nothing to throttle until Phase 10 has a row cursor).
 **a scheduler that runs them**, and **a console to watch it from**. From the repo root:
 
 ```powershell
-cargo test --workspace        # 859 tests: 317 engine, 113 scheduler, 107 connectors, 65 console, 51 e2e, 49 cli, 48 state, 26 runner, 23 secrets, 17 native e2e, 15 metadata, 13 verified, 10 desktop, 5 plugin-sdk
+cargo test --workspace        # 906 tests: 317 engine, 150 connectors, 113 scheduler, 65 console, 51 e2e, 50 cli, 48 state, 26 runner, 23 secrets, 17 native e2e, 16 verified, 15 metadata, 10 desktop, 5 plugin-sdk
 .\target\debug\etl.exe run samples\pipelines\orders_enriched.json
 .\target\debug\etl.exe validate samples\pipelines\orders_enriched.json
 .\target\debug\etl.exe plan samples\pipelines\orders_enriched.json --script
@@ -190,25 +193,26 @@ exists — writing the report only if one does. `plan.needs_session()` decides t
 because they read something that never got created, and the failures. The exit code is 3 either
 way. Getting the report back is the entire point of asking a run to continue.
 
-**Sixty-one components exist.** Sources: `src.cloud.http`, `src.cloud.s3`, `src.db.mysql`,
+**Sixty-four components exist.** Sources: `src.cloud.http`, `src.cloud.s3`, `src.db.mysql`,
 `src.db.postgres`, `src.db.sqlite`, `src.file.csv`, `src.file.excel`, `src.file.json`,
 `src.file.jsonl`, `src.file.parquet`, `src.file.xml`, `src.lake.delta`, `src.lake.iceberg`,
-`src.saas.graphql`, `src.saas.rest`, `src.stream.kafka`. Transforms:
+`src.saas.graphql`, `src.saas.rest`, `src.stream.kafka`, `src.stream.nats`. Transforms:
 `xf.aggregate`, `xf.cast`, `xf.dedup`, `xf.derive`, `xf.distinct`, `xf.except`,
 `xf.filter`, `xf.intersect`, `xf.join`, `xf.limit`,
 `xf.pivot`, `xf.rename`, `xf.sample`, `xf.select`, `xf.sort`, `xf.sql`, `xf.union`,
 `xf.unpivot`, `xf.window`. Sinks: `snk.cloud.s3`, `snk.db.mysql`, `snk.db.postgres`,
 `snk.db.sqlite`, `snk.file.csv`, `snk.file.excel`, `snk.file.json`, `snk.file.jsonl`,
-`snk.file.parquet`, `snk.file.xml`, `snk.saas.graphql`, `snk.saas.rest`. Quality: `qa.accepted_values`, `qa.expression`, `qa.not_null`, `qa.range`,
+`snk.file.parquet`, `snk.file.xml`, `snk.saas.graphql`, `snk.saas.rest`, `snk.stream.kafka`, `snk.stream.nats`. Quality: `qa.accepted_values`, `qa.expression`, `qa.not_null`, `qa.range`,
 `qa.referential`, `qa.regex`, `qa.unique`. Quality assertions, which fail the run rather than
 partitioning rows and so have no reject port: `qa.row_count`, `qa.schema_match`. Control:
 `ctl.branch`, `ctl.fail`, `ctl.log`, `ctl.sequence`, `ctl.wait`. Everything else in the six
 namespaces compiles to `UnsupportedComponent`, by design.
 
-**Seven of them are written in Rust, not lowered to DuckDB alone.** `src.file.xml` and
+**Ten of them are written in Rust, not lowered to DuckDB alone.** `src.file.xml` and
 `snk.file.xml` (Phase 10a), `src.saas.rest` and `snk.saas.rest` (Phase 10b),
-`src.saas.graphql` and `snk.saas.graphql` (Phase 10d), and `src.stream.kafka` (Phase 10e) are
-the *native* components, for data DuckDB cannot reach. Kafka is the first that keeps a
+`src.saas.graphql` and `snk.saas.graphql` (Phase 10d), `src.stream.kafka` (10e),
+`snk.stream.kafka` (10f), and `src.stream.nats` and `snk.stream.nats` (10g) are the *native*
+components, for data DuckDB cannot reach. Kafka is the first that keeps a
 position between runs (a checkpoint) rather than reading everything.
 They are registered like any other, so the canvas, validation, lineage, the scheduler, the
 console and a built artifact all have them, but their rows cross to and from DuckDB through a
@@ -575,13 +579,14 @@ fail the run. That is `ctl.fail`'s shape and it needs 6b's execution-model decis
 | 9b | — the engine and its extensions inside the file | **done** | 2026-09-17 |
 | 9c | — cross-building (Linux from Windows) | **done** | 2026-09-17 |
 | 9d | — the CI matrix | **done** (green on the third run) | 2026-09-23 |
-| 10 | Rust-native connectors | **in progress** (10a–10e done; 10f next; later families open) | |
+| 10 | Rust-native connectors | **in progress** (10a–10g done; later families open) | |
 | 10a | — plugin SDK, staging bridge, XML | **done** | 2026-09-23 |
 | 10b | — SaaS REST, source and sink | **done** | 2026-09-23 |
 | 10c | — verify Phase 4's database and lake connectors | **done** | 2026-09-23 |
 | 10d | — SaaS GraphQL, source and sink | **done** (green in CI, run 35888523818) | 2026-09-23 |
 | 10e | — checkpoints, and the Kafka source | **done** (pushed with `[skip ci]`; CI not run) | 2026-09-23 |
-| 10f | — the Kafka sink, TLS and SASL | planned | |
+| 10f | — the Kafka sink, TLS and SASL | **done** (pushed with 10g; CI pending) | 2026-09-23 |
+| 10g | — NATS JetStream, source and sink | **done** (pushed with 10f; CI pending) | 2026-09-24 |
 | 11 | AI assistant + MCP server | not started | |
 | 12 | Benchmarks + parity audit | not started | |
 
@@ -733,6 +738,30 @@ Decisions 25–35 are Phase 10e/10f's (Kafka), all agreed 2026-09-23 as recommen
     building:** the question's premise was wrong. `etl build` already *refused* incremental
     pipelines (the alternative offered as (b)), so the gap was guarded, not silent. Option (a)
     stands, and replaced that refusal with a note.
+
+Decisions 37–46 are Phase 10g's (NATS JetStream), all agreed 2026-09-23 as recommended:
+
+37. **NATS JetStream is the next streaming broker**, before Kinesis: a position that is one
+    sequence number, a maintained client within the rules, and a tiny test server. Only
+    JetStream, since core NATS keeps nothing to read.
+38. **Read from our saved sequence, up to the stream's last sequence at the start, capped by
+    `max_records`, through an ephemeral ordered consumer.** Nothing on the server; the same
+    model as Kafka (27). A durable consumer acknowledging after success was the alternative.
+39. **Rows as Kafka's** (`json`/`text`/`bytes`) plus `_stream`, `_subject`, `_sequence`,
+    `_timestamp` and `_headers`.
+40. **A sink too**: `snk.stream.nats`, JSON to a subject, waiting for JetStream's
+    acknowledgements, at-least-once per batch.
+41. **Sign-in: none, user and password, token, `.creds` (JWT and NKey), and TLS with
+    `ca_cert`.** `.creds` is how hosted NATS works.
+42. **Bundled public roots plus `ca_cert`**, as for Kafka and HTTPS, not the operating system's
+    store that `async-nats` defaults to, so an artifact trusts the same everywhere.
+43. **`tokio` inside the connector again**, Kafka's pattern (26): `async-nats` has no blocking
+    API, and the blocking `nats` crate is deprecated.
+44. **Named `src.stream.nats` and `snk.stream.nats`.**
+45. **Tested against real NATS servers in containers**, one per sign-in method, locally and in
+    CI's Ubuntu gate; the tests skip without them.
+46. **What follows NATS is decided when NATS is done**: Kinesis, a design for the
+    acknowledgement-based brokers, or NoSQL.
 
 ## Open decisions
 
@@ -1319,6 +1348,65 @@ ran*. Earlier ones were resolved 2026-09-16 (Settled decisions 5–8).
   and a clean `target` would settle it.
 - **Kafka's console producer puts keyless records all on one partition** (the sticky
   partitioner), which is why the hand-run sample shows offsets on partition 1 only.
+
+### From Phase 10f
+
+- **Murmur2 matches Java, checked two ways.** The six values Kafka's own `UtilsTest` pins, and
+  a live comparison: 30 keys written through `etl` and through Kafka's Java console producer
+  into two six-partition topics landed on identical partitions.
+- **A failed sign-in looked like a timeout.** `rskafka` retries a failed SASL exchange like a
+  network blip, and its deadline counts only the waits *between* attempts. In a debug build a
+  SCRAM attempt (TLS plus 4,096 rounds of hashing) is slow, so retries overran any timeout and
+  the reason was lost: "no answer within 30000 ms". Now a connect that times out makes one
+  more attempt with retries off, and reports its reason (`SaslAuthenticationFailed`,
+  `UnknownIssuer`). The tests that "passed" before checked only the message's prefix; they now
+  require the reason.
+- **Every broker call gets 5 s of slack past `timeout_ms`** for the same reason: so a
+  library's own failure arrives before our timeout does.
+- **`etl secret set --stdin` stored a BOM.** Windows PowerShell 5.1 prepends one when piping to
+  a program, so a correct password piped in failed to sign in. `--stdin` now drops a leading
+  BOM as well as the trailing newline. The third BOM this session (10e's test records, the
+  scratch pipeline); worth a look at every place text enters from a pipe or a file.
+- **A new topic is not listed at once.** Kafka creates topics asynchronously, so a connector
+  that lists topics first (both of ours do) can call a just-made topic missing. Seen only under
+  parallel tests; the test helpers now wait until a topic is listed. A user creating a topic
+  and running a pipeline in the same second would meet the same message; not worth code.
+- **The test broker's startup script has its own rules** for listeners literally named `SSL`
+  or `SASL_...` (keystore file names, `KAFKA_OPTS` checks). The listeners are named `TLS`,
+  `SASL` and `SASLTLS` to step around them and set Kafka's own properties instead.
+- **Kafka refuses to change one user's SCRAM credentials twice in one request**, so the
+  script adds SHA-256 and SHA-512 in two calls.
+- **PowerShell 5.1 mangles double quotes in arguments to native programs**, so the shell
+  command for the certificate script avoids them (`tr -d '\015'`).
+- **A partial batch can land partly.** A batch goes to each partition in turn, so when one
+  partition refuses, earlier partitions of the same batch may have been written. The error
+  says so, and `connectors.md` does too.
+
+### From Phase 10g
+
+- **Operator mode came up first time**, the step the plan named as riskiest: `nsc` in a
+  throwaway `nats-box` container makes an operator, a system account, an account with
+  JetStream (`nsc edit account --js-enable 1`) and a user, and the server preloads them from a
+  memory resolver. Tried in throwaway containers before it went into the project.
+- **Refactors proved by the untouched suite.** TLS moved into `tls.rs` and value decoding into
+  `kafka::value_columns`/`key_text`; Kafka's 38 tests passed with their file unchanged.
+- **`PublishAckFuture` is `IntoFuture`, not `Future`**, so waiting on it with a timeout needs
+  `.into_future()`. **A NATS read ends by count, not by time**: the consumer reports how many
+  messages are pending when it is made, and each message says how many are left, so a batch
+  never waits for messages that are not coming.
+- **A filtered read moves past the end of the stream**, not only past its last match, so
+  messages that did not match are not looked at again next run.
+- **The frontend's sample test reads the manifest from the built `etl.exe`**, so a new
+  component's sample fails it until `etl` is rebuilt: the 10b lesson, met again. The gate
+  order that avoids it is `cargo build -p etl-cli` before the frontend tests.
+- **A hand check published 1 of 12 messages**: `nats pub` inside a `while read` loop swallowed
+  the rest of the file from standard input. The scratch script, not the product; fixed with
+  `< /dev/null` and the check redone (12, 0, 1).
+- **The harness's safety check refused a command** whose shell snippet had `'\015'` inside a
+  PowerShell line that also used `Remove-Item`; it read the snippet as a path. Shell snippets
+  now go in files.
+- **The probe for `async-nats` went into `%TEMP%`** rather than the session scratchpad, while
+  planning; deleted, and recorded here and in the command log.
 
 ## Session log
 
@@ -2244,3 +2332,49 @@ build clean. By hand through `etl`: 12, then 0, then 3 new, then `forget` and 15
 artifact run three times from its own directory, 15, 0, 1, with `etl state list` reading its
 state. Test services stopped and removed. Committed and pushed at the user's request, with
 `[skip ci]` because the user asked for no CI run.
+
+### 2026-09-23 — Phase 10f: the Kafka sink, TLS and SASL
+
+Started by the user ("pls start 10f"); the plan and decisions were already in place from 10e's
+questions (Settled decisions 31–33).
+
+- `crates/connectors/src/kafka.rs` — the shared `Connection` (security, SASL, `ca_cert`, the
+  retry-off diagnosis), `snk.stream.kafka`, `murmur2`/`partition_for`/`assign`. `rskafka`'s
+  `transport-tls`, `rustls` (ring) and `webpki-roots` added; `cargo tree` still one TLS stack.
+- `crates/connectors/src/kafka/tests.rs` — 16 more: murmur2, placement, settings, and against
+  the broker: sink round trip, keyless spread, all codecs, a refused batch, each security mode,
+  a wrong password, an untrusted CA.
+- `crates/cli` — `--stdin` drops a leading BOM (`stdin_secret`, one test).
+- `scripts/test-services.ps1` and `scripts/kafka-test-secrets.sh` — SASL, TLS and SASL_SSL
+  listeners, SCRAM users, the CA under `target/test-services/`.
+- `samples/pipelines/kafka_orders.json` sends large orders back to a second topic;
+  `verified.rs` creates it, waits for topics to be listed, and checks what arrived.
+- `gate.yml` — 62 components. Docs: `connectors.md`, `learnings.md`, `assignments.md`
+  (A40–A42).
+
+**876 Rust tests with every server and listener up, twice in a row; 128 frontend.** By hand:
+the Java placement comparison, and SASL_SSL with SCRAM-SHA-512 through `etl run` with the
+password in the secret store, then a wrong password and a missing CA, each failing with its
+reason. Not committed.
+
+### 2026-09-24 — Phase 10g: NATS JetStream, both ways
+
+Started by the user ("pls start 10g"), after ten questions answered all as recommended
+(Settled decisions 37–46). Docker running.
+
+- `crates/connectors/src/nats.rs` and `nats/tests.rs` — both components, 27 tests (15 need a
+  server). `async-nats` 0.50 (`jetstream`, `ring`, `nkeys`) and `futures-util` added; the tree
+  still has one `rustls` and one `ring`.
+- `crates/connectors/src/tls.rs` — the TLS set-up both brokers use. `kafka.rs` gains
+  `value_columns` and `key_text`, shared with NATS.
+- `scripts/test-services.ps1` and `scripts/nats-test-creds.sh` — five NATS servers: open, user
+  and password, token, TLS (Kafka's certificate), operator mode for `.creds`.
+- `samples/pipelines/nats_orders.json`; `verified.rs` — 3 tests: the sample on both transports
+  (including message IDs keeping re-published orders out after a lost position) and preview.
+- `gate.yml` — 64 components. Docs: `connectors.md`, `learnings.md`, `assignments.md`
+  (A43–A45).
+
+**906 Rust tests with every server up, twice in a row; 131 frontend.** By hand: the built
+artifact of the NATS sample read 12, then 0, then the 1 new message, and published 7 large
+orders to the second subject; `etl state list` read its position. Committed and pushed with
+10f at the user's request, as one commit because the user had staged both together.

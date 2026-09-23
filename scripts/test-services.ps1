@@ -1,11 +1,11 @@
 <#
 .SYNOPSIS
     Start the servers the verification tests run against: PostgreSQL, MySQL
-    and MinIO (S3) from Phase 10c, and Kafka from 10e, each in a throwaway
-    container.
+    and MinIO (S3) from Phase 10c, Kafka from 10e and NATS from 10g, each in a
+    throwaway container.
 
 .DESCRIPTION
-    The verification tests read four environment variables and skip each
+    The verification tests read these environment variables and skip each
     group when its variable is unset:
 
       ETL_TEST_POSTGRES   a libpq connection string
@@ -15,10 +15,23 @@
                           credentials etl-test / etl-test-secret
       ETL_TEST_KAFKA      host:port of a Kafka broker (KRaft, one node) that
                           does not create topics on its own; tests make theirs
+      ETL_TEST_KAFKA_SASL, ETL_TEST_KAFKA_TLS, ETL_TEST_KAFKA_SASL_TLS
+                          the same broker's SASL_PLAINTEXT, SSL and SASL_SSL
+                          listeners (user etl, password etl-secret, for PLAIN
+                          and SCRAM-SHA-256/512)
+      ETL_TEST_KAFKA_CA   the CA certificate the TLS listeners' certificate is
+                          signed by, as a PEM file under target/test-services/
+      ETL_TEST_NATS       nats://host:port of a NATS server with JetStream, open
+      ETL_TEST_NATS_USERS, ETL_TEST_NATS_TOKEN, ETL_TEST_NATS_TLS, ETL_TEST_NATS_CREDS
+                          NATS servers signing in by user etl / etl-secret, by
+                          token etl-token, over TLS (Kafka's CA), and in
+                          operator mode for a .creds file
+      ETL_TEST_NATS_CREDS_FILE
+                          that .creds file, under target/test-services/
 
-    This script starts the four containers on a private network, waits until
-    each one answers, creates the bucket with MinIO's own `mc` client, and then
-    prints the four variables -- or, in GitHub Actions, writes them to
+    This script starts the containers on a private network, waits until each
+    one answers, creates the bucket with MinIO's own `mc` client, and then
+    prints the variables -- or, in GitHub Actions, writes them to
     $GITHUB_ENV so later steps see them.
 
     Ports are high and fixed so they are unlikely to collide with a real server
@@ -40,7 +53,11 @@ param(
 $ErrorActionPreference = 'Continue'
 
 $network = 'etl-test'
-$containers = @('etl-test-postgres', 'etl-test-mysql', 'etl-test-minio', 'etl-test-kafka')
+$kafkaSecrets = 'etl-test-kafka-secrets'
+$natsCreds = 'etl-test-nats-creds'
+$containers = @('etl-test-postgres', 'etl-test-mysql', 'etl-test-minio', 'etl-test-kafka',
+    'etl-test-nats', 'etl-test-nats-users', 'etl-test-nats-token', 'etl-test-nats-tls',
+    'etl-test-nats-creds')
 
 function Invoke-Docker {
     $output = & docker @args 2>&1
@@ -55,6 +72,8 @@ function Remove-Everything {
         & docker rm -f $name 2>&1 | Out-Null
     }
     & docker network rm $network 2>&1 | Out-Null
+    & docker volume rm $kafkaSecrets 2>&1 | Out-Null
+    & docker volume rm $natsCreds 2>&1 | Out-Null
 }
 
 if ($Stop) {
@@ -73,7 +92,7 @@ if ($LASTEXITCODE -ne 0) {
 Remove-Everything
 Invoke-Docker network create $network
 
-Write-Host 'Starting PostgreSQL, MySQL, MinIO and Kafka (the first run pulls the images)'
+Write-Host 'Starting PostgreSQL, MySQL, MinIO, Kafka and NATS (the first run pulls the images)'
 
 Invoke-Docker run -d --name etl-test-postgres --network $network -p 55432:5432 `
     -e POSTGRES_PASSWORD=etl postgres:16
@@ -89,18 +108,38 @@ Invoke-Docker run -d --name etl-test-minio --network $network -p 59000:9000 `
     -e MINIO_ROOT_USER=etl-test -e MINIO_ROOT_PASSWORD=etl-test-secret `
     quay.io/minio/minio server /data
 
-# Kafka 4.1 in KRaft mode, one node doing both jobs. Two listeners, because a
-# broker hands clients the address it advertises: EXTERNAL is what the tests
-# reach from the host, as 127.0.0.1:59092, and INTERNAL is for the broker's own
-# tools inside the container, which could not reach the host's port. Topics
+# The Kafka broker's certificates and SASL settings, made in a throwaway
+# container of its own image into a Docker volume the broker then mounts. The
+# script is read through `tr` so a CRLF checkout on Windows cannot break it.
+Invoke-Docker volume create $kafkaSecrets
+Invoke-Docker run --rm --user root -v "${kafkaSecrets}:/secrets" `
+    -v "${PSScriptRoot}:/scripts:ro" --entrypoint sh apache/kafka:4.1.0 `
+    -c 'tr -d ''\015'' < /scripts/kafka-test-secrets.sh | sh'
+
+# Kafka 4.1 in KRaft mode, one node doing both jobs. A broker hands clients the
+# address it advertises, so each listener the tests reach is advertised as
+# 127.0.0.1 on its host port: EXTERNAL (plaintext, 59092), SASL
+# (SASL_PLAINTEXT, 59094), TLS (SSL, 59095) and SASLTLS (SASL_SSL, 59096).
+# INTERNAL is for the broker's own tools inside the container, which could not
+# reach the host's ports. The listener names avoid "SSL://" and "SASL_" on
+# purpose: the image's start-up script has its own rules for listeners named
+# that way, and the settings here are Kafka's own properties instead. Topics
 # are not created on demand, so a test that names a missing one sees the error
 # a user would.
-Invoke-Docker run -d --name etl-test-kafka --network $network -p 59092:9092 `
+Invoke-Docker run -d --name etl-test-kafka --network $network `
+    -p 59092:9092 -p 59094:9094 -p 59095:9095 -p 59096:9096 `
+    -v "${kafkaSecrets}:/etc/kafka/secrets:ro" `
     -e KAFKA_NODE_ID=1 `
     -e 'KAFKA_PROCESS_ROLES=broker,controller' `
-    -e 'KAFKA_LISTENERS=EXTERNAL://:9092,INTERNAL://:19092,CONTROLLER://:9093' `
-    -e 'KAFKA_ADVERTISED_LISTENERS=EXTERNAL://127.0.0.1:59092,INTERNAL://localhost:19092' `
-    -e 'KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=EXTERNAL:PLAINTEXT,INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT' `
+    -e 'KAFKA_LISTENERS=EXTERNAL://:9092,INTERNAL://:19092,CONTROLLER://:9093,SASL://:9094,TLS://:9095,SASLTLS://:9096' `
+    -e 'KAFKA_ADVERTISED_LISTENERS=EXTERNAL://127.0.0.1:59092,INTERNAL://localhost:19092,SASL://127.0.0.1:59094,TLS://127.0.0.1:59095,SASLTLS://127.0.0.1:59096' `
+    -e 'KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=EXTERNAL:PLAINTEXT,INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT,SASL:SASL_PLAINTEXT,TLS:SSL,SASLTLS:SASL_SSL' `
+    -e 'KAFKA_SASL_ENABLED_MECHANISMS=PLAIN,SCRAM-SHA-256,SCRAM-SHA-512' `
+    -e 'KAFKA_OPTS=-Djava.security.auth.login.config=/etc/kafka/secrets/jaas.conf' `
+    -e KAFKA_SSL_KEYSTORE_LOCATION=/etc/kafka/secrets/server.p12 `
+    -e KAFKA_SSL_KEYSTORE_TYPE=PKCS12 `
+    -e KAFKA_SSL_KEYSTORE_PASSWORD=etl-test-secret `
+    -e KAFKA_SSL_KEY_PASSWORD=etl-test-secret `
     -e KAFKA_INTER_BROKER_LISTENER_NAME=INTERNAL `
     -e KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER `
     -e KAFKA_CONTROLLER_QUORUM_VOTERS=1@localhost:9093 `
@@ -109,6 +148,27 @@ Invoke-Docker run -d --name etl-test-kafka --network $network -p 59092:9092 `
     -e KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1 `
     -e KAFKA_AUTO_CREATE_TOPICS_ENABLE=false `
     apache/kafka:4.1.0
+
+# NATS 2.11 with JetStream, five small servers, one per way of signing in,
+# because a server takes one kind of client authentication at a time. Each has
+# its monitoring port inside the container for the readiness probe. TLS reuses
+# the certificate made for Kafka above, whose names include 127.0.0.1. The
+# operator-mode server for `.creds` gets its operator, account and user from
+# `nsc` in a throwaway nats-box container, into a volume it then mounts.
+$nats = 'nats:2.11-alpine'
+Invoke-Docker run -d --name etl-test-nats --network $network -p 54222:4222 $nats -js -m 8222
+Invoke-Docker run -d --name etl-test-nats-users --network $network -p 54223:4222 $nats `
+    -js -m 8222 --user etl --pass etl-secret
+Invoke-Docker run -d --name etl-test-nats-token --network $network -p 54224:4222 $nats `
+    -js -m 8222 --auth etl-token
+Invoke-Docker run -d --name etl-test-nats-tls --network $network -p 54225:4222 `
+    -v "${kafkaSecrets}:/certs:ro" $nats `
+    -js -m 8222 --tls --tlscert /certs/server.pem --tlskey /certs/server.key
+Invoke-Docker volume create $natsCreds
+Invoke-Docker run --rm --user root -v "${natsCreds}:/creds" -v "${PSScriptRoot}:/scripts:ro" `
+    natsio/nats-box:0.18.0 sh -c 'tr -d ''\015'' < /scripts/nats-test-creds.sh | sh'
+Invoke-Docker run -d --name etl-test-nats-creds --network $network -p 54226:4222 `
+    -v "${natsCreds}:/creds:ro" $nats -c /creds/server.conf -m 8222
 
 function Wait-For([string] $what, [scriptblock] $probe, [int] $seconds = 180) {
     $deadline = (Get-Date).AddSeconds($seconds)
@@ -140,18 +200,53 @@ Wait-For 'Kafka' {
     docker exec etl-test-kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:19092 --list
 }
 
+# SCRAM users live in the cluster's metadata rather than in a file, so they are
+# added once the broker answers, one mechanism per request: Kafka refuses to
+# alter one user's credentials twice in the same request. PLAIN's user came
+# from jaas.conf.
+foreach ($mechanism in 'SCRAM-SHA-256', 'SCRAM-SHA-512') {
+    Invoke-Docker exec etl-test-kafka /opt/kafka/bin/kafka-configs.sh --bootstrap-server localhost:19092 `
+        --alter --entity-type users --entity-name etl `
+        --add-config "$mechanism=[password=etl-secret]"
+}
+
+foreach ($name in 'etl-test-nats', 'etl-test-nats-users', 'etl-test-nats-token',
+                  'etl-test-nats-tls', 'etl-test-nats-creds') {
+    Wait-For $name {
+        docker exec $name wget -q -O /dev/null 'http://127.0.0.1:8222/healthz?js-enabled-only=true'
+    }
+}
+
+# The CA certificate, for the tests' `ca_cert`. Under target/, which git ignores.
+$caDirectory = Join-Path $PSScriptRoot '../target/test-services'
+New-Item -ItemType Directory -Force $caDirectory | Out-Null
+$kafkaCa = Join-Path (Resolve-Path $caDirectory) 'kafka-ca.pem'
+Invoke-Docker cp etl-test-kafka:/etc/kafka/secrets/ca.pem $kafkaCa
+$natsCredsFile = Join-Path (Resolve-Path $caDirectory) 'nats-etl.creds'
+Invoke-Docker cp etl-test-nats-creds:/creds/etl.creds $natsCredsFile
+
 $variables = [ordered]@{
     ETL_TEST_POSTGRES = 'host=127.0.0.1 port=55432 user=postgres password=etl dbname=postgres'
     ETL_TEST_MYSQL    = 'host=127.0.0.1 port=53306 user=root passwd=etl database=etl'
     ETL_TEST_S3       = 'http://127.0.0.1:59000'
     ETL_TEST_KAFKA    = '127.0.0.1:59092'
+    ETL_TEST_KAFKA_SASL     = '127.0.0.1:59094'
+    ETL_TEST_KAFKA_TLS      = '127.0.0.1:59095'
+    ETL_TEST_KAFKA_SASL_TLS = '127.0.0.1:59096'
+    ETL_TEST_KAFKA_CA       = $kafkaCa
+    ETL_TEST_NATS           = 'nats://127.0.0.1:54222'
+    ETL_TEST_NATS_USERS     = 'nats://127.0.0.1:54223'
+    ETL_TEST_NATS_TOKEN     = 'nats://127.0.0.1:54224'
+    ETL_TEST_NATS_TLS       = 'nats://127.0.0.1:54225'
+    ETL_TEST_NATS_CREDS     = 'nats://127.0.0.1:54226'
+    ETL_TEST_NATS_CREDS_FILE = $natsCredsFile
 }
 
 if ($env:GITHUB_ENV) {
     foreach ($name in $variables.Keys) {
         Add-Content -Path $env:GITHUB_ENV -Value "$name=$($variables[$name])"
     }
-    Write-Host 'Wrote ETL_TEST_POSTGRES, ETL_TEST_MYSQL, ETL_TEST_S3 and ETL_TEST_KAFKA to GITHUB_ENV.'
+    Write-Host "Wrote $($variables.Keys -join ', ') to GITHUB_ENV."
 } else {
     Write-Host ''
     Write-Host 'Set these, then run: cargo test --workspace'

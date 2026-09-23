@@ -306,3 +306,49 @@ Copy-Item samples\pipelines\orders_enriched.json samples\out\scratch\
   *Hint:* `row` builds each record; `rskafka::record::Record::headers` is a `BTreeMap`. Keep
   `METADATA_COLUMNS` and the clash check in step.
   *Check:* a broker test producing a header and reading it back, and `connectors.md` updated.
+
+## Phase 10f — Kafka sink and security
+
+- [ ] **A40. Same key, same partition.**
+  *Do:* create a six-partition topic, write the same keys through `etl` (`snk.stream.kafka`
+  with `key_column`) and through Kafka's console producer (`--property parse.key=true`), then
+  consume both with `--property print.partition=true --property print.key=true`.
+  *Check:* every key is on the same partition in both. Change one key's case and explain why it
+  moves.
+
+- [ ] **A41. Sign in three ways.**
+  *Do:* with the services up, read the sample topic over `sasl_plaintext` with each of `plain`,
+  `scram-sha-256` and `scram-sha-512`, then over `sasl_ssl` with `ca_cert` set to
+  `target/test-services/kafka-ca.pem`. Keep the password in `etl secret`.
+  *Check:* all four read. Then remove `ca_cert` and read the error; then set a wrong password
+  and read that one. Which one would a user see if their cluster's CA were private?
+
+- [ ] **A42. 🦀 Headers on the way out.**
+  *Do:* add a `headers_column` to the sink: a column holding a JSON object of name to text,
+  sent as the record's headers.
+  *Hint:* `assign` builds each `rskafka::record::Record`; its `headers` is a `BTreeMap<String,
+  Vec<u8>>`. Pair it with A39 (headers on the way in) and round-trip them.
+  *Check:* a broker test writing and reading headers back, and `connectors.md` updated.
+
+## Phase 10g — NATS JetStream
+
+- [ ] **A43. A filter and its position.**
+  *Do:* with the services up, make a stream capturing `shop.>`, publish to `shop.eu` and
+  `shop.us` alternately, and read it with `filter_subject: shop.eu` twice.
+  *Check:* the first run reads only `shop.eu` messages, and `etl state list` shows `next` past
+  the stream's last sequence. Explain why it is not just past the last `shop.eu` message.
+
+- [ ] **A44. A re-run without copies.**
+  *Do:* run `samples/pipelines/nats_orders.json`, then `etl state forget nats_orders --node
+  read_orders`, and run it again.
+  *Check:* the second run reads all twelve again, but the large-orders stream does not grow,
+  and the report says how many JetStream dropped. What would happen after the stream's
+  duplicate window had passed?
+
+- [ ] **A45. 🦀 A durable consumer, as an option.**
+  *Do:* sketch (in prose, then in code if you like) a `consumer: durable` option that
+  acknowledges messages only after a successful run, instead of saving a sequence.
+  *Hint:* the hard part is that the connection must stay open until the engine says the run
+  succeeded; today `read` returns before DuckDB starts. What would the SDK need?
+  *Check:* a written answer to "what does the engine have to call, and when", compared with
+  Settled decision 38.

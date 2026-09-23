@@ -38,7 +38,8 @@ fn position(topic: &str, next: &[(i32, i64)]) -> Position {
 #[test]
 fn brokers_are_host_port_pairs_and_spaces_are_forgiven() {
     let parsed = settings(json!({ "brokers": " a:9092, b:9093 ,", "topic": "t" })).unwrap();
-    assert_eq!(parsed.brokers, ["a:9092", "b:9093"]);
+    assert_eq!(parsed.connection.brokers, ["a:9092", "b:9093"]);
+    assert_eq!(parsed.connection.security, Security::Plaintext);
     assert_eq!(parsed.start, Start::Earliest);
     assert_eq!(parsed.format, Format::Json);
     assert_eq!(parsed.max_records, 100_000);
@@ -69,8 +70,8 @@ fn a_configuration_that_cannot_work_is_refused_by_property() {
     assert!(refused(format).starts_with("property 'value_format'"));
 
     let mut security = base();
-    security["security"] = json!("sasl_ssl");
-    assert!(refused(security).contains("plaintext only"));
+    security["security"] = json!("kerberos");
+    assert!(refused(security).starts_with("property 'security'"));
 
     let mut cap = base();
     cap["max_records"] = json!(0);
@@ -409,11 +410,27 @@ fn topic_for(test: &str) -> String {
     format!("etl-{test}-{}-{nanos}", std::process::id())
 }
 
-async fn create(controller: &ControllerClient, topic: &str, partitions: i32) {
+/// Create a topic and wait until the broker lists it. Creation is
+/// asynchronous in Kafka: for a moment after `create_topic` returns, metadata
+/// does not show the topic yet, and a connector that lists topics first (as
+/// both of ours do) would call it missing. Seen under parallel tests in 10f.
+async fn create(client: &Client, topic: &str, partitions: i32) {
+    let controller: ControllerClient = client.controller_client().unwrap();
     controller
         .create_topic(topic, partitions, 1, 10_000)
         .await
         .expect("creates the topic");
+    for _ in 0..100 {
+        let listed = client.list_topics().await.expect("lists topics");
+        if listed
+            .iter()
+            .any(|t| t.name == topic && t.partitions.len() == partitions as usize)
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("topic {topic} was created but never listed");
 }
 
 /// Produce `ids` as JSON values, round-robin across `partitions`.
@@ -473,7 +490,7 @@ fn batches_carry_on_exactly_where_the_last_one_stopped() {
     let topic = topic_for("batches");
     runtime().block_on(async {
         let client = client(&broker).await;
-        create(&client.controller_client().unwrap(), &topic, 3).await;
+        create(&client, &topic, 3).await;
         produce(&client, &topic, 3, 0..25).await;
     });
 
@@ -514,7 +531,7 @@ fn a_run_that_is_not_saved_is_read_again() {
     let topic = topic_for("reread");
     runtime().block_on(async {
         let client = client(&broker).await;
-        create(&client.controller_client().unwrap(), &topic, 2).await;
+        create(&client, &topic, 2).await;
         produce(&client, &topic, 2, 0..6).await;
     });
     let properties = json!({ "brokers": broker, "topic": topic, "max_records": 4 });
@@ -531,7 +548,7 @@ fn latest_reads_nothing_first_and_then_only_what_arrived() {
     let topic = topic_for("latest");
     runtime().block_on(async {
         let client = client(&broker).await;
-        create(&client.controller_client().unwrap(), &topic, 2).await;
+        create(&client, &topic, 2).await;
         produce(&client, &topic, 2, 0..5).await;
     });
     let properties = json!({ "brokers": broker, "topic": topic, "start": "latest" });
@@ -553,7 +570,7 @@ fn deleted_records_make_the_next_read_fail_with_how_many() {
     let topic = topic_for("gap");
     runtime().block_on(async {
         let client = client(&broker).await;
-        create(&client.controller_client().unwrap(), &topic, 1).await;
+        create(&client, &topic, 1).await;
         produce(&client, &topic, 1, 0..6).await;
     });
     let properties = json!({ "brokers": broker, "topic": topic, "max_records": 2 });
@@ -602,4 +619,433 @@ fn a_topic_that_does_not_exist_is_named() {
         error.contains("there is no topic 'etl-no-such-topic'"),
         "{error}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// 10f: keys and partitions, without a broker
+// ---------------------------------------------------------------------------
+
+#[test]
+fn murmur2_matches_the_values_kafkas_own_tests_pin() {
+    // From Apache Kafka's UtilsTest.testMurmur2: the Java implementation's
+    // results, so a key hashes here exactly as it does in a Java producer.
+    let cases: [(&[u8], i32); 6] = [
+        (b"21", -973_932_308),
+        (b"foobar", -790_332_482),
+        (b"a-little-bit-long-string", -985_981_536),
+        (b"a-little-bit-longer-string", -1_486_304_829),
+        (
+            b"lkjh234lh9fiuh90y23oiuhsafujhadof229phr9h19h89h8",
+            -58_897_971,
+        ),
+        (b"abc", 479_470_107),
+    ];
+    for (key, expected) in cases {
+        assert_eq!(murmur2(key), expected, "{}", String::from_utf8_lossy(key));
+    }
+}
+
+#[test]
+fn a_key_always_lands_on_the_same_partition_and_a_negative_hash_is_made_positive() {
+    let partitions: Vec<i32> = (0..6).collect();
+    // "21" hashes negative; masking, not abs(), is what Java does.
+    let expected = (-973_932_308_i32 & 0x7fff_ffff) % 6;
+    assert_eq!(partition_for(b"21", &partitions), expected);
+    assert_eq!(
+        partition_for(b"21", &partitions),
+        partition_for(b"21", &partitions)
+    );
+}
+
+#[test]
+fn a_key_is_its_text_its_written_number_or_its_json_and_null_is_none() {
+    assert_eq!(key_bytes(&json!("C001")), Some(b"C001".to_vec()));
+    assert_eq!(key_bytes(&json!(1001)), Some(b"1001".to_vec()));
+    assert_eq!(key_bytes(&json!(true)), Some(b"true".to_vec()));
+    assert_eq!(key_bytes(&json!({ "a": 1 })), Some(br#"{"a":1}"#.to_vec()));
+    assert_eq!(key_bytes(&JsonValue::Null), None);
+}
+
+#[test]
+fn rows_are_split_by_key_and_keyless_rows_share_the_batch_partition() {
+    let partitions = [0, 1, 2];
+    let rows: Vec<Record> = [json!({ "id": 1, "k": "a" }), json!({ "id": 2, "k": null })]
+        .into_iter()
+        .map(|v| v.as_object().unwrap().clone())
+        .collect();
+
+    let assigned = assign(rows, Some("k"), &partitions, 2).unwrap();
+
+    let keyed = partition_for(b"a", &partitions);
+    assert_eq!(assigned[&keyed][0].key.as_deref(), Some(&b"a"[..]));
+    let keyless = assigned[&2]
+        .iter()
+        .find(|r| r.key.is_none())
+        .expect("row 2");
+    let value: JsonValue = serde_json::from_slice(keyless.value.as_ref().unwrap()).unwrap();
+    assert_eq!(
+        value,
+        json!({ "id": 2, "k": null }),
+        "the whole row, key column included"
+    );
+
+    let missing = assign(
+        vec![json!({ "id": 1 }).as_object().unwrap().clone()],
+        Some("customer"),
+        &partitions,
+        0,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(missing.contains("'customer' is not a column"), "{missing}");
+}
+
+// ---------------------------------------------------------------------------
+// 10f: security settings, without a broker
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_security_setting_that_cannot_work_is_refused_by_property() {
+    let refused = |properties: JsonValue| settings(properties).unwrap_err().to_string();
+    let with = |extra: JsonValue| {
+        let mut properties = json!({ "brokers": "a:9092", "topic": "t" });
+        for (key, value) in extra.as_object().unwrap() {
+            properties[key] = value.clone();
+        }
+        properties
+    };
+
+    let no_user = refused(with(json!({ "security": "sasl_ssl", "password": "p" })));
+    assert!(no_user.starts_with("property 'username'"), "{no_user}");
+
+    let no_password = refused(with(
+        json!({ "security": "sasl_plaintext", "username": "u" }),
+    ));
+    assert!(
+        no_password.starts_with("property 'password'"),
+        "{no_password}"
+    );
+
+    let ignored = refused(with(json!({ "security": "ssl", "username": "u" })));
+    assert!(ignored.contains("signs in with nothing"), "{ignored}");
+
+    let ca = refused(with(json!({ "ca_cert": "ca.pem" })));
+    assert!(ca.starts_with("property 'ca_cert'"), "{ca}");
+
+    let mechanism = refused(with(json!({
+        "security": "sasl_ssl", "sasl_mechanism": "gssapi", "username": "u", "password": "p"
+    })));
+    assert!(
+        mechanism.starts_with("property 'sasl_mechanism'"),
+        "{mechanism}"
+    );
+
+    let fine = settings(with(json!({
+        "security": "sasl_ssl", "sasl_mechanism": "scram-sha-512",
+        "username": "u", "password": "p", "ca_cert": "ca.pem"
+    })))
+    .unwrap();
+    assert_eq!(
+        fine.connection.sasl,
+        Some((Mechanism::ScramSha512, "u".to_string(), "p".to_string()))
+    );
+}
+
+#[test]
+fn a_connection_is_described_without_its_password() {
+    let connection = Connection::from(&json!({
+        "brokers": "a:9092", "security": "sasl_ssl", "sasl_mechanism": "scram-sha-256",
+        "username": "etl", "password": "hunter2"
+    }))
+    .unwrap();
+
+    let described = connection.describe();
+    assert_eq!(described, "a:9092 (sasl_ssl, SCRAM-SHA-256 as 'etl')");
+    assert!(!described.contains("hunter2"));
+}
+
+#[test]
+fn a_ca_cert_that_is_missing_or_holds_no_certificate_is_named() {
+    let context = Context::default();
+    let missing = Connection::from(&json!({
+        "brokers": "a:9092", "security": "ssl", "ca_cert": "no/such/ca.pem"
+    }))
+    .unwrap()
+    .tls(&context)
+    .unwrap_err()
+    .to_string();
+    assert!(missing.starts_with("property 'ca_cert'"), "{missing}");
+
+    let empty = std::env::temp_dir().join(format!("etl-empty-ca-{}.pem", std::process::id()));
+    std::fs::write(&empty, "not a certificate\n").unwrap();
+    let nothing = Connection::from(&json!({
+        "brokers": "a:9092", "security": "ssl", "ca_cert": empty.to_string_lossy()
+    }))
+    .unwrap()
+    .tls(&context)
+    .unwrap_err()
+    .to_string();
+    assert!(nothing.contains("holds no PEM certificate"), "{nothing}");
+}
+
+#[test]
+fn a_sink_setting_that_cannot_work_is_refused_by_property() {
+    let refused = |extra: JsonValue| {
+        let mut properties = json!({ "brokers": "a:9092", "topic": "t" });
+        for (key, value) in extra.as_object().unwrap() {
+            properties[key] = value.clone();
+        }
+        KafkaSink.check(&properties).unwrap_err().to_string()
+    };
+
+    assert!(refused(json!({ "compression": "brotli" })).starts_with("property 'compression'"));
+    assert!(refused(json!({ "batch_size": 0 })).starts_with("property 'batch_size'"));
+    assert!(refused(json!({ "topic": "" })).starts_with("property 'topic'"));
+    KafkaSink
+        .check(&json!({ "brokers": "a:9092", "topic": "t", "compression": "zstd" }))
+        .expect("fine");
+}
+
+// ---------------------------------------------------------------------------
+// 10f: against a real broker
+// ---------------------------------------------------------------------------
+
+fn write_rows(properties: &JsonValue, rows: Vec<JsonValue>) -> Result<Summary, ConnectorError> {
+    let mut reader = crate::fixture::records(rows);
+    KafkaSink.write(properties, &mut reader, &Context::default())
+}
+
+/// Everything a topic holds, read from the start.
+fn read_all(properties: &JsonValue) -> Vec<Record> {
+    let mut out: Vec<Record> = Vec::new();
+    KafkaSource
+        .read(properties, &mut out, &Context::default())
+        .expect("reads");
+    out
+}
+
+fn new_topic(broker: &str, test: &str, partitions: i32) -> String {
+    let topic = topic_for(test);
+    runtime().block_on(async {
+        let client = client(broker).await;
+        create(&client, &topic, partitions).await;
+    });
+    topic
+}
+
+#[test]
+fn rows_written_are_read_back_keyed_to_the_partitions_java_would_pick() {
+    let Some(broker) = broker() else { return };
+    let topic = new_topic(&broker, "sink", 6);
+
+    let rows: Vec<JsonValue> = (1..=20)
+        .map(|id| json!({ "id": id, "customer": format!("C{}", id % 7) }))
+        .collect();
+    let summary = write_rows(
+        &json!({ "brokers": broker, "topic": topic, "key_column": "customer", "batch_size": 8 }),
+        rows,
+    )
+    .expect("writes");
+    assert_eq!(summary.records, 20);
+    assert!(
+        summary.detail.contains("in 3 batch(es)"),
+        "{}",
+        summary.detail
+    );
+
+    let read = read_all(&json!({ "brokers": broker, "topic": topic }));
+    assert_eq!(read.len(), 20);
+    let partitions: Vec<i32> = (0..6).collect();
+    for row in &read {
+        let key = row["_key"].as_str().unwrap();
+        assert_eq!(row["customer"], key, "the key is the column's value");
+        assert_eq!(
+            row["_partition"].as_i64().unwrap() as i32,
+            partition_for(key.as_bytes(), &partitions),
+            "{key}"
+        );
+    }
+}
+
+#[test]
+fn keyless_rows_spread_across_partitions_by_batch() {
+    let Some(broker) = broker() else { return };
+    let topic = new_topic(&broker, "keyless", 3);
+
+    write_rows(
+        &json!({ "brokers": broker, "topic": topic, "batch_size": 2 }),
+        (0..6).map(|id| json!({ "id": id })).collect(),
+    )
+    .expect("writes");
+
+    let read = read_all(&json!({ "brokers": broker, "topic": topic }));
+    let mut per_partition = [0; 3];
+    for row in &read {
+        assert!(row["_key"].is_null());
+        per_partition[row["_partition"].as_i64().unwrap() as usize] += 1;
+    }
+    assert_eq!(per_partition, [2, 2, 2]);
+}
+
+#[test]
+fn every_compression_codec_round_trips() {
+    let Some(broker) = broker() else { return };
+    for codec in ["gzip", "snappy", "lz4", "zstd"] {
+        let topic = new_topic(&broker, codec, 1);
+        write_rows(
+            &json!({ "brokers": broker, "topic": topic, "compression": codec }),
+            (0..3)
+                .map(|id| json!({ "id": id, "codec": codec }))
+                .collect(),
+        )
+        .unwrap_or_else(|error| panic!("{codec}: {error}"));
+
+        let read = read_all(&json!({ "brokers": broker, "topic": topic }));
+        assert_eq!(read.len(), 3, "{codec}");
+        assert!(read.iter().all(|row| row["codec"] == codec), "{codec}");
+    }
+}
+
+#[test]
+fn a_batch_the_broker_refuses_says_how_much_was_already_delivered() {
+    let Some(broker) = broker() else { return };
+    let topic = new_topic(&broker, "partial", 1);
+
+    // The fifth row is larger than a broker takes by default (1 MB), so the
+    // third batch of two is refused.
+    let mut rows: Vec<JsonValue> = (1..=4).map(|id| json!({ "id": id })).collect();
+    rows.push(json!({ "id": 5, "blob": "x".repeat(2 * 1024 * 1024) }));
+
+    let error = write_rows(
+        &json!({ "brokers": broker, "topic": topic, "batch_size": 2, "timeout_ms": 10000 }),
+        rows,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.starts_with("batch 3 failed after 2 batch(es) (4 record(s)) were delivered"),
+        "{error}"
+    );
+    assert_eq!(
+        read_all(&json!({ "brokers": broker, "topic": topic })).len(),
+        4
+    );
+}
+
+/// A secured listener, or `None` to skip.
+fn secured(variable: &str) -> Option<(String, String, String)> {
+    let listener = std::env::var(variable)
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+    let (Some(listener), Some(plain)) = (listener, broker()) else {
+        eprintln!("skipping: {variable} is not set; see scripts/test-services.ps1");
+        return None;
+    };
+    let ca = std::env::var("ETL_TEST_KAFKA_CA").unwrap_or_default();
+    Some((listener, plain, ca))
+}
+
+/// Write two rows and read them back through one secured listener.
+fn round_trip_through(listener: &str, plain: &str, test: &str, security: JsonValue) {
+    let topic = new_topic(plain, test, 1);
+    let mut properties = json!({ "brokers": listener, "topic": topic, "timeout_ms": 15000 });
+    for (key, value) in security.as_object().unwrap() {
+        properties[key] = value.clone();
+    }
+
+    write_rows(&properties, vec![json!({ "id": 1 }), json!({ "id": 2 })])
+        .unwrap_or_else(|error| panic!("{test} write: {error}"));
+    let mut out: Vec<Record> = Vec::new();
+    KafkaSource
+        .read(&properties, &mut out, &Context::default())
+        .unwrap_or_else(|error| panic!("{test} read: {error}"));
+    assert_eq!(out.len(), 2, "{test}");
+}
+
+#[test]
+fn sasl_plain_and_both_scram_mechanisms_sign_in() {
+    let Some((listener, plain, _)) = secured("ETL_TEST_KAFKA_SASL") else {
+        return;
+    };
+    for mechanism in ["plain", "scram-sha-256", "scram-sha-512"] {
+        round_trip_through(
+            &listener,
+            &plain,
+            &format!("sasl-{mechanism}"),
+            json!({ "security": "sasl_plaintext", "sasl_mechanism": mechanism,
+                    "username": "etl", "password": "etl-secret" }),
+        );
+    }
+}
+
+#[test]
+fn tls_with_the_clusters_ca_connects_and_without_it_is_refused() {
+    let Some((listener, plain, ca)) = secured("ETL_TEST_KAFKA_TLS") else {
+        return;
+    };
+    round_trip_through(
+        &listener,
+        &plain,
+        "tls",
+        json!({ "security": "ssl", "ca_cert": ca }),
+    );
+
+    // The public roots do not include a CA made a moment ago, so trusting only
+    // them must fail: TLS that trusted anything would pass the line above too.
+    let mut out: Vec<Record> = Vec::new();
+    let error = KafkaSource
+        .read(
+            &json!({ "brokers": listener, "topic": "anything", "security": "ssl",
+                     "timeout_ms": 3000 }),
+            &mut out,
+            &Context::default(),
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.starts_with(&format!("connecting to {listener} (ssl)")),
+        "{error}"
+    );
+    assert!(
+        error.contains("UnknownIssuer"),
+        "says why, not only that: {error}"
+    );
+}
+
+#[test]
+fn sasl_over_tls_signs_in() {
+    let Some((listener, plain, ca)) = secured("ETL_TEST_KAFKA_SASL_TLS") else {
+        return;
+    };
+    round_trip_through(
+        &listener,
+        &plain,
+        "sasl-tls",
+        json!({ "security": "sasl_ssl", "sasl_mechanism": "scram-sha-512",
+                "username": "etl", "password": "etl-secret", "ca_cert": ca }),
+    );
+}
+
+#[test]
+fn a_wrong_password_fails_naming_the_mechanism_and_not_the_password() {
+    let Some((listener, _, _)) = secured("ETL_TEST_KAFKA_SASL") else {
+        return;
+    };
+    let mut out: Vec<Record> = Vec::new();
+    let error = KafkaSource
+        .read(
+            &json!({ "brokers": listener, "topic": "anything", "security": "sasl_plaintext",
+                     "sasl_mechanism": "scram-sha-256", "username": "etl",
+                     "password": "not-the-password", "timeout_ms": 5000 }),
+            &mut out,
+            &Context::default(),
+        )
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("SCRAM-SHA-256 as 'etl'"), "{error}");
+    // The reason, not a timeout: rskafka retries a failed sign-in until any
+    // timeout wins, and an error that only said "no answer" hid this once.
+    assert!(error.contains("SaslAuthenticationFailed"), "{error}");
+    assert!(!error.contains("not-the-password"), "{error}");
 }

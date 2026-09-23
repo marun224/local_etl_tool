@@ -21,7 +21,9 @@ mod fixture;
 pub mod graphql;
 mod http;
 pub mod kafka;
+pub mod nats;
 pub mod rest;
+mod tls;
 pub mod xml;
 
 /// Every native connector, in registry order.
@@ -37,6 +39,9 @@ pub fn all() -> &'static [(String, Connector)] {
             Connector::Source(&graphql::GraphqlSource),
             Connector::Sink(&graphql::GraphqlSink),
             Connector::Source(&kafka::KafkaSource),
+            Connector::Sink(&kafka::KafkaSink),
+            Connector::Source(&nats::NatsSource),
+            Connector::Sink(&nats::NatsSink),
         ]
         .into_iter()
         .map(|connector| (connector.spec().id, connector))

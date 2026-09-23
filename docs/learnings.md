@@ -456,3 +456,68 @@ the fuller record. From Phase 10 on, a section is added at the end of each phase
   anything with a comma.*
 - **Mangled line continuations had happened before.** Four messages from earlier phases had
   lost their `\`. *When a mistake is found, search for its siblings.*
+
+## Phase 10f — the Kafka sink, TLS and SASL (2026-09-23)
+
+**Concepts**
+- **Partitioning is a contract with other producers.** Consumers rely on "one key, one
+  partition, in order". A sink that hashed keys its own way would split a key's history across
+  partitions. Matching Java's murmur2 bit for bit is what keeps the contract.
+- **SASL and TLS are separate choices**: TLS is who the broker is and privacy on the wire;
+  SASL is who we are. `sasl_ssl` is both, and it is what hosted Kafka uses.
+- **SCRAM** keeps the password off the wire and off the server (it stores a salted hash);
+  PLAIN sends it, so PLAIN without TLS is only for tests.
+- **At-least-once, precisely.** A batch spans partitions, so "the batch failed" can mean "some
+  of it landed". Saying which is part of the semantics.
+
+**Decisions and why**
+- **Diagnose instead of wait.** When connecting times out, one attempt with retries off finds
+  the real reason. Changing the library's retry policy was not an option; asking once more
+  was.
+- **A private CA is a file, public roots are the default**: right for hosted Kafka, and an
+  explicit `UnknownIssuer` for a private cluster that forgot `ca_cert`.
+- **Refuse settings that would be ignored** (a password without SASL, a CA without TLS): a
+  silent no-op is how "it connected, so it must be secure" happens.
+
+**Mistakes worth not repeating**
+- **A test that checks a prefix passes a useless message.** The wrong-password test passed
+  while the error said only "no answer". *Assert the reason, not just that it failed.*
+- **Library deadlines may not mean wall time.** `rskafka`'s counts only the waits between
+  attempts. *Measure what a timeout covers before relying on it.*
+- **BOMs, again, three times this session.** *Anything read from a pipe or a Windows-written
+  file should be checked for one where it matters: passwords, JSON, pipeline files.*
+- **New resources are eventually consistent.** A topic just created is not yet listed.
+  *Wait for what you made to be visible before using it, in tests at least.*
+- **Backslashes through heredocs, once more** (`\015` vanished from a tracker line). The rule
+  from 10d holds: the editor tool for anything with a backslash.
+
+## Phase 10g — NATS JetStream, both ways (2026-09-24)
+
+**Concepts**
+- **Persistence decides what can be a batch source.** Core NATS forgets a message once it is
+  delivered; JetStream keeps it in a stream with sequence numbers. Only something that keeps
+  messages can be read "since last time".
+- **One sequence number is a simpler position than Kafka's offset per partition**, but a
+  subject filter means the next message to read is not always the next sequence: the
+  position moves past the stream's end, not the filter's last match.
+- **Idempotent publishing.** A message ID plus a server-side duplicate window turns
+  at-least-once into "no copies within the window", which is the difference between a safe
+  re-run and a messy one.
+- **Operator mode** (operator, account, user as signed JWTs; an NKey seed to prove who you
+  are) is how multi-tenant NATS is run, and why a `.creds` file is the usual credential.
+
+**Decisions and why**
+- **Share before adding.** TLS set-up and value decoding moved out of Kafka before NATS used
+  them, each proved by Kafka's untouched tests, so the second broker did not copy the first.
+- **Interior deletes are not gaps.** A stream losing its head to limits is data this pipeline
+  never saw; a message removed from the middle is ordinary JetStream behaviour.
+- **End a read by what the server says is pending, not by a timeout.** Waiting for silence
+  would make every run as slow as the timeout.
+
+**Mistakes worth not repeating**
+- **A command in a `while read` loop that reads standard input** eats the rest of the loop's
+  input. *Give it `< /dev/null`.* It turned a 12-message check into a 1-message one.
+- **Stale build artifacts again**: the frontend test read an `etl.exe` built before the new
+  components. *Build `etl` before the frontend tests, every time.*
+- **Probing in the wrong place**: a throwaway project went into `%TEMP%` instead of the
+  scratchpad. Harmless, deleted, recorded. *The scratchpad is for exactly this.*

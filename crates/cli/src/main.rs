@@ -1876,9 +1876,7 @@ fn command_secret(action: SecretAction, settings: &Settings) -> u8 {
                     eprintln!("error: could not read the value from stdin: {error}");
                     return exit::USAGE;
                 }
-                // A trailing newline is an artefact of how it was piped in, not
-                // part of the password.
-                text.trim_end_matches(['\n', '\r']).to_string()
+                stdin_secret(&text)
             } else {
                 value.unwrap_or_default()
             };
@@ -2431,6 +2429,18 @@ fn incremental_nodes(document: &PipelineDoc) -> Vec<&str> {
         .filter(|node| node.data.incremental.is_some())
         .map(|node| node.id.as_str())
         .collect()
+}
+
+/// A secret as `secret set --stdin` received it, without what the piping
+/// added: a trailing newline, and a leading UTF-8 byte-order mark, which
+/// Windows PowerShell 5.1 puts in front of text piped to a program. Neither is
+/// ever part of a password, and a BOM is invisible, so a password stored with
+/// one fails at the server with nothing on screen to explain it. Found in 10f
+/// signing in to Kafka.
+fn stdin_secret(text: &str) -> String {
+    text.trim_start_matches('\u{feff}')
+        .trim_end_matches(['\n', '\r'])
+        .to_string()
 }
 
 /// The nodes that read a stream, and so keep a position between runs.

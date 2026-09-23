@@ -1,6 +1,6 @@
 {
   "formatVersion": 1,
-  "name": "kafka_orders",
+  "name": "nats_orders",
   "nodes": [
     {
       "id": "read_orders",
@@ -10,11 +10,11 @@
         "y": 0.0
       },
       "data": {
-        "label": "Orders topic",
-        "componentId": "src.stream.kafka",
+        "label": "Orders stream",
+        "componentId": "src.stream.nats",
         "properties": {
-          "brokers": "${kafka_brokers}",
-          "topic": "${topic}",
+          "url": "${nats_url}",
+          "stream": "${stream}",
           "start": "earliest",
           "max_records": 1000,
           "columns": {
@@ -23,8 +23,8 @@
             "order_ts": "TIMESTAMP",
             "amount": "DECIMAL(10,2)",
             "status": "VARCHAR",
-            "_partition": "INTEGER",
-            "_offset": "BIGINT",
+            "_subject": "VARCHAR",
+            "_sequence": "BIGINT",
             "_timestamp": "TIMESTAMP"
           }
         },
@@ -57,26 +57,25 @@
         "label": "Large orders",
         "componentId": "snk.file.parquet",
         "properties": {
-          "path": "${workspace}/samples/out/kafka_large_orders.parquet",
+          "path": "${workspace}/samples/out/nats_large_orders.parquet",
           "mode": "overwrite"
         }
       }
     },
     {
-      "id": "send_large",
+      "id": "publish_large",
       "type": "sink",
       "position": {
         "x": 560.0,
         "y": 160.0
       },
       "data": {
-        "label": "Large orders topic",
-        "componentId": "snk.stream.kafka",
+        "label": "Large orders subject",
+        "componentId": "snk.stream.nats",
         "properties": {
-          "brokers": "${kafka_brokers}",
-          "topic": "${large_topic}",
-          "key_column": "order_id",
-          "compression": "zstd"
+          "url": "${nats_url}",
+          "subject": "${large_subject}",
+          "msg_id_column": "order_id"
         }
       }
     }
@@ -99,29 +98,29 @@
     {
       "id": "e3",
       "source": "large_only",
-      "target": "send_large",
+      "target": "publish_large",
       "sourceHandle": "main",
       "targetHandle": "in"
     }
   ],
   "parameters": {
-    "kafka_brokers": {
+    "nats_url": {
       "type": "string",
       "required": true,
-      "default": "127.0.0.1:59092",
-      "description": "The brokers, host:port. The committed default is the test broker scripts/test-services.ps1 starts."
+      "default": "nats://127.0.0.1:54222",
+      "description": "The NATS server. The committed default is the open test server scripts/test-services.ps1 starts."
     },
-    "topic": {
+    "stream": {
       "type": "string",
       "required": true,
-      "default": "etl-sample-orders",
-      "description": "The topic to read. Each run reads what arrived since the last successful one."
+      "default": "ORDERS",
+      "description": "The JetStream stream to read. Each run reads what arrived since the last successful one."
     },
-    "large_topic": {
+    "large_subject": {
       "type": "string",
       "required": true,
-      "default": "etl-sample-large-orders",
-      "description": "Where the large orders are sent back to, keyed by order_id. Like the source topic, it must already exist."
+      "default": "large.orders",
+      "description": "Where the large orders are published, with order_id as the message ID so a re-run adds no copies. A stream must capture it."
     }
   }
 }

@@ -520,9 +520,51 @@ fn kafka_topic(broker: &str, test: &str, orders: &[serde_json::Value]) -> String
             .create_topic(topic.as_str(), 3, 1, 10_000)
             .await
             .expect("creates the topic");
+        // Where the sample sends its large orders back to (Phase 10f).
+        client
+            .controller_client()
+            .unwrap()
+            .create_topic(format!("{topic}-large"), 3, 1, 10_000)
+            .await
+            .expect("creates the large-orders topic");
+        // Creation is asynchronous: wait until both are listed, or the
+        // connectors, which list topics first, would call them missing.
+        let large = format!("{topic}-large");
+        for _ in 0..100 {
+            let listed = client.list_topics().await.expect("lists topics");
+            if [&topic, &large]
+                .iter()
+                .all(|name| listed.iter().any(|t| &t.name == *name))
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        panic!("topics {topic} and {large} were created but never listed");
     });
     produce(broker, &topic, orders, 0);
     topic
+}
+
+/// How many records a topic holds: the sum of its partitions' high watermarks.
+fn topic_size(broker: &str, topic: &str) -> i64 {
+    tokio().block_on(async {
+        let client = ClientBuilder::new(vec![broker.to_string()])
+            .build()
+            .await
+            .unwrap();
+        let mut total = 0;
+        for partition in 0..3 {
+            total += client
+                .partition_client(topic, partition, UnknownTopicHandling::Retry)
+                .await
+                .unwrap()
+                .get_offset(rskafka::client::partition::OffsetAt::Latest)
+                .await
+                .unwrap();
+        }
+        total
+    })
 }
 
 /// Produce `orders` as JSON values; the n-th goes to partition (n + skip) % 3.
@@ -595,7 +637,8 @@ fn kafka_orders(
     }
     let resolver = Resolver::new(workspace)
         .bind("kafka_brokers", broker)
-        .bind("topic", topic);
+        .bind("topic", topic)
+        .bind("large_topic", &format!("{topic}-large"));
     let resolved = resolve(&document(&json.to_string()), &resolver).expect("resolves");
     compile_with(
         &resolved.document,
@@ -643,7 +686,12 @@ fn the_sample_carries_on(name: &str, policy: Option<serde_json::Value>) {
         &options(&workspace),
     )
     .expect("runs");
-    assert_eq!(rows(&first), [Some(10), Some(5), Some(5)]);
+    assert_eq!(rows(&first), [Some(10), Some(5), Some(5), Some(5)]);
+    assert_eq!(
+        topic_size(&broker, &format!("{topic}-large")),
+        5,
+        "the large orders went back to Kafka too"
+    );
     let saved = positions(&first);
     assert_eq!(
         saved["read_orders"]["offsets"]
@@ -679,7 +727,12 @@ fn the_sample_carries_on(name: &str, policy: Option<serde_json::Value>) {
         &options(&workspace),
     )
     .expect("runs");
-    assert_eq!(rows(&second), [Some(0), Some(0), Some(0)]);
+    assert_eq!(rows(&second), [Some(0), Some(0), Some(0), Some(0)]);
+    assert_eq!(
+        topic_size(&broker, &format!("{topic}-large")),
+        5,
+        "nothing sent twice"
+    );
 
     // Two more orders arrive: exactly those are read.
     produce(&broker, &topic, &orders[10..], 10);
@@ -767,5 +820,191 @@ fn previewing_a_kafka_source_reads_from_the_saved_position() {
     assert!(
         nothing.rows.is_empty(),
         "a preview reads what the next run would"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// NATS JetStream, as bounded micro-batches (Phase 10g)
+// ---------------------------------------------------------------------------
+
+/// Two streams of their own for one test: `<name>` capturing `<name>.>`, with
+/// `orders` published into it, and `<name>_LARGE` capturing
+/// `<name>.large`-bound publishes under their own subject space.
+fn nats_streams(url: &str, test: &str, orders: &[serde_json::Value]) -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .subsec_nanos();
+    let name = format!("ETL_VERIFIED_{}_{nanos}", test.to_uppercase());
+    tokio().block_on(async {
+        let client = async_nats::connect(url)
+            .await
+            .expect("the test server answers");
+        let jetstream = async_nats::jetstream::new(client);
+        for (stream, subject) in [
+            (name.clone(), format!("{name}.orders.>")),
+            (format!("{name}_LARGE"), format!("{name}.large")),
+        ] {
+            jetstream
+                .create_stream(async_nats::jetstream::stream::Config {
+                    name: stream,
+                    subjects: vec![subject],
+                    ..Default::default()
+                })
+                .await
+                .expect("creates the stream");
+        }
+    });
+    nats_publish(url, &name, orders);
+    name
+}
+
+fn nats_publish(url: &str, stream: &str, orders: &[serde_json::Value]) {
+    tokio().block_on(async {
+        let client = async_nats::connect(url).await.unwrap();
+        let jetstream = async_nats::jetstream::new(client);
+        for order in orders {
+            jetstream
+                .publish(format!("{stream}.orders.eu"), order.to_string().into())
+                .await
+                .unwrap()
+                .await
+                .unwrap();
+        }
+    });
+}
+
+/// How many messages a stream holds.
+fn nats_size(url: &str, stream: &str) -> u64 {
+    tokio().block_on(async {
+        let client = async_nats::connect(url).await.unwrap();
+        let mut stream = async_nats::jetstream::new(client)
+            .get_stream(stream)
+            .await
+            .unwrap();
+        stream.info().await.unwrap().state.messages
+    })
+}
+
+fn nats_orders(
+    workspace: &Path,
+    url: &str,
+    stream: &str,
+    checkpoints: &BTreeMap<String, serde_json::Value>,
+    policy: Option<serde_json::Value>,
+) -> etl_duckdb_engine::Plan {
+    let text = std::fs::read_to_string(repo_root().join("samples/pipelines/nats_orders.json"))
+        .expect("the sample is committed");
+    let mut json: serde_json::Value = serde_json::from_str(&text).unwrap();
+    if let Some(policy) = policy {
+        json["nodes"][1]["data"]["policy"] = policy;
+    }
+    let resolver = Resolver::new(workspace)
+        .bind("nats_url", url)
+        .bind("stream", stream)
+        .bind("large_subject", &format!("{stream}.large"));
+    let resolved = resolve(&document(&json.to_string()), &resolver).expect("resolves");
+    compile_with(
+        &resolved.document,
+        &CompileOptions {
+            checkpoints: checkpoints.clone(),
+            ..CompileOptions::default()
+        },
+    )
+    .expect("compiles")
+}
+
+fn the_nats_sample_carries_on(name: &str, policy: Option<serde_json::Value>) {
+    let Some(url) = server("ETL_TEST_NATS") else {
+        return;
+    };
+    let Some((workspace, binary)) = workspace(name, &[]) else {
+        return;
+    };
+    let orders = sample_orders();
+    let stream = nats_streams(&url, name, &orders[..10]);
+
+    let first = run(
+        &nats_orders(&workspace, &url, &stream, &BTreeMap::new(), policy.clone()),
+        &options(&workspace),
+    )
+    .expect("runs");
+    assert_eq!(rows(&first), [Some(10), Some(5), Some(5), Some(5)]);
+    assert_eq!(nats_size(&url, &format!("{stream}_LARGE")), 5);
+    assert_eq!(
+        query(
+            &binary,
+            &workspace,
+            "SELECT count(*) AS n, min(_sequence) AS s, typeof(any_value(_timestamp)) AS t \
+             FROM 'samples/out/nats_large_orders.parquet';"
+        ),
+        r#"[{"n":5,"s":1,"t":"TIMESTAMP"}]"#
+    );
+
+    // Nothing new.
+    let second = run(
+        &nats_orders(
+            &workspace,
+            &url,
+            &stream,
+            &positions(&first),
+            policy.clone(),
+        ),
+        &options(&workspace),
+    )
+    .expect("runs");
+    assert_eq!(rows(&second), [Some(0), Some(0), Some(0), Some(0)]);
+
+    // Two arrive, and a first run's saved position is lost, so the next run
+    // reads everything again: the large orders are published again, and the
+    // message IDs keep the second copies out.
+    nats_publish(&url, &stream, &orders[10..]);
+    let again = run(
+        &nats_orders(&workspace, &url, &stream, &BTreeMap::new(), policy),
+        &options(&workspace),
+    )
+    .expect("runs");
+    assert_eq!(rows(&again)[0], Some(12));
+    let large_in_all_twelve = orders
+        .iter()
+        .filter(|order| order["amount"].as_f64().unwrap() > 100.0)
+        .count() as u64;
+    assert_eq!(
+        nats_size(&url, &format!("{stream}_LARGE")),
+        large_in_all_twelve,
+        "re-published large orders were dropped as duplicates"
+    );
+}
+
+#[test]
+fn the_nats_sample_carries_on_between_runs_on_the_one_script_path() {
+    the_nats_sample_carries_on("nats_script", None);
+}
+
+#[test]
+fn the_nats_sample_carries_on_between_runs_on_the_session_path() {
+    the_nats_sample_carries_on(
+        "nats_session",
+        Some(serde_json::json!({ "retryAttempts": 1 })),
+    );
+}
+
+#[test]
+fn previewing_a_nats_source_reads_and_publishes_nothing() {
+    let Some(url) = server("ETL_TEST_NATS") else {
+        return;
+    };
+    let Some((workspace, _)) = workspace("nats_preview", &[]) else {
+        return;
+    };
+    let stream = nats_streams(&url, "preview", &sample_orders()[..9]);
+
+    let plan = nats_orders(&workspace, &url, &stream, &BTreeMap::new(), None);
+    let rows = preview(&plan, "read_orders", 50, &options(&workspace)).expect("previews");
+    assert_eq!(rows.rows.len(), 9);
+    assert_eq!(
+        nats_size(&url, &format!("{stream}_LARGE")),
+        0,
+        "a preview publishes nothing"
     );
 }

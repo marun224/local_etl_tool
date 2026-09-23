@@ -1374,6 +1374,25 @@ back to a second topic. **62 components.**
 
 **Done.** Both Kafka components, every security mode, verified against a real broker.
 
+**Amended 2026-09-23, on completion.** Built as designed, with these additions:
+
+- **A failed sign-in is diagnosed, not timed out.** `rskafka` retries it until any timeout
+  wins, so a connect that times out makes one attempt with retries off and reports its reason.
+  Every broker call also gets 5 s of slack past `timeout_ms`, for the same reason.
+- **Murmur2 was also checked live** against Kafka's Java console producer (30 keys, identical
+  partitions), beyond the published values.
+- **The listeners are named `TLS`, `SASL` and `SASLTLS`**, not `SSL`/`SASL_*`, to step around the
+  image's own start-up rules; certificates come from `scripts/kafka-test-secrets.sh` in a
+  throwaway container, into a Docker volume.
+- **`etl secret set --stdin` drops a leading BOM**, found signing in with a password piped from
+  PowerShell.
+- **Test helpers wait for a new topic to be listed**, because Kafka creates topics
+  asynchronously.
+- **A refused batch may have partly landed** (it goes to each partition in turn); the error and
+  `connectors.md` say so.
+- **Not supported, and documented as such:** OAUTHBEARER, Kerberos, mutual TLS, idempotent or
+  transactional producing, headers.
+
 ###### Question 12 (new, raised while planning)
 
 **Should a built artifact remember state?** The runner calls `compile` with no state, so an
@@ -1388,9 +1407,116 @@ artifact yet. For Kafka it would mean re-reading the whole topic every run.
   checkpointing source.
 - (c) Artifacts stay stateless, documented.
 
-**Later families**, planned one at a time when reached: the other streaming brokers (NATS
-JetStream and Kinesis fit the checkpoint model; Pub/Sub and RabbitMQ acknowledge instead and
-need their own design), then NoSQL, warehouses over their own protocols, vector DBs.
+##### Phase 10g — NATS JetStream, both ways
+
+**Questions answered 2026-09-23, all as recommended** (Settled decisions 37–46 in the
+tracker). One sub-phase: the checkpoint machinery exists since 10e, and the connection and
+security patterns since 10f.
+
+**Goal.** Read a JetStream stream in bounded micro-batches and publish to one, with every
+way hosted NATS signs in, verified against a real server.
+
+**Why JetStream only.** Core NATS keeps nothing: a message goes to whoever is listening at
+that moment. There is nothing to read back in a batch, so only JetStream, NATS's persistence
+layer, is a source. The sink publishes to a subject a stream captures, and waits for
+JetStream's acknowledgement.
+
+**Crates.** `async-nats` 0.50 with `default-features = false` and `jetstream`, `ring` and
+`nkeys`. Checked in a throwaway project before planning: `ring` and one `rustls` 0.23 (the
+ones already in use), `nkeys` on pure-Rust `ed25519-dalek`, no `aws-lc-rs`, OpenSSL or CMake.
+It always brings `rustls-native-certs`, which uses `schannel` on Windows: bindings to an
+operating-system API, not a C library we compile or ship. Its trust store is not used,
+because the connector passes its own `rustls` config (decision 42). The runtime is Kafka's
+pattern: single-threaded `tokio`, built and dropped inside each read or write (decision 43).
+
+**Files.** `crates/connectors/src/{nats.rs, nats/tests.rs, lib.rs}`; the shared TLS set-up
+moves out of `kafka.rs` into a small `tls.rs` both use; `crates/connectors/Cargo.toml`;
+`scripts/test-services.ps1` and a NATS config and credentials script; `gate.yml`;
+`crates/duckdb-engine/tests/verified.rs`; `samples/pipelines/nats_orders.json`;
+`docs/connectors.md`; `frontend/src/icons.ts` (nothing, if `radio` serves).
+
+**Do.**
+
+1. **Shared TLS.** `Connection::tls` from 10f becomes `tls::client_config(ca_cert, context)`,
+   used by Kafka and NATS alike, with Kafka's tests unchanged to prove the move.
+2. **`src.stream.nats`** (decisions 37–39). Properties: `url` (e.g. `nats://host:4222`,
+   comma-separated for a cluster), `stream` (required), `filter_subject` (optional, e.g.
+   `orders.eu.>`), `start` (`earliest`/`latest`), `max_records` (100,000), `value_format`
+   (`json`/`text`/`bytes`), the sign-in set, `timeout_ms`, `columns`.
+   - **A batch** is from the saved next sequence up to the stream's last sequence recorded at
+     the start, or `max_records`, read through an ordered, ephemeral consumer
+     (`DeliverPolicy::ByStartSequence`). **Nothing is left on the server**: no durable consumer
+     (decision 38).
+   - **The checkpoint** is `{stream, filter_subject, next}`. A changed stream or filter starts
+     from `start`, with a note, as Kafka's changed topic does.
+   - **Gaps:** a saved position older than the stream's first sequence means the stream's
+     limits (age, count, size) discarded messages this pipeline never read. The read fails and
+     counts them, as for Kafka. **Messages deleted from the middle** of a stream (by
+     `max_msgs_per_subject`, or by hand) are normal in JetStream and are simply not there;
+     they are not a gap error, and `connectors.md` says so.
+   - **Rows:** the value as Kafka's (`json`/`text`/`bytes`, the same refusals and BOM hint),
+     plus `_stream`, `_subject`, `_sequence`, `_timestamp` and `_headers` (a JSON object of
+     name to value, repeated names as a list; null when there are none).
+3. **`snk.stream.nats`** (decision 40). Properties: `url`, the sign-in set, `subject`
+   (required; the stream that captures it must exist), `batch_size` (500), `msg_id_column`
+   (optional). Each row is published as JSON and each batch's acknowledgements are awaited
+   before the next batch. **`msg_id_column`** sets `Nats-Msg-Id`, so JetStream drops a
+   re-sent message within the stream's duplicate window: the one place in this project
+   where a re-run can be free of duplicates, and `connectors.md` says exactly how far that
+   goes. At-least-once per batch otherwise, with the delivered count in the error.
+4. **Sign-in, both directions** (decision 41): `auth` = `none`, `user_password` (`username`,
+   `password`), `token` (`token`), `creds` (`creds_file`, a `.creds` file of JWT and NKey seed,
+   relative to the workspace); `tls` = `true`/`false` (default `false`), with `ca_cert`. The
+   secret-bearing values take `${SECRET:...}` and are masked. `check` refuses a setting that
+   would be ignored, as Kafka's does.
+5. **Test services** (decision 45): NATS 2.x containers with JetStream: one open, one with
+   users, one with a token, one with TLS (the certificate from 10f's script, in the same
+   volume), and one in operator mode for `.creds`, its operator, account and user made by
+   `nsc` in a throwaway `nats-box` container. Variables `ETL_TEST_NATS`,
+   `ETL_TEST_NATS_USERS`, `ETL_TEST_NATS_TOKEN`, `ETL_TEST_NATS_TLS`, `ETL_TEST_NATS_CREDS`
+   (the server) and `ETL_TEST_NATS_CREDS_FILE`. **Operator mode is the riskiest part**; if it
+   will not come up in a day, `.creds` is verified by hand against it and the automated test
+   follows, recorded as such.
+6. **The sample**, `samples/pipelines/nats_orders.json`: a stream of orders to a filter to
+   Parquet, and the large orders published back to another subject, in `verified.rs`.
+
+**Verify.**
+- Kafka's tests pass unchanged after the TLS move (step 1).
+- Unit, no server: settings and every refusal; the checkpoint's shape, a changed stream or
+  filter, the gap arithmetic; rows in each format, headers, a missing value.
+- Against the server: batches of 10/10/5/0 continuing exactly; a run not saved reads again;
+  `latest`; a filter reading only its subjects; a stream whose limit discarded unread messages
+  fails with the count; a stream with interior deletes reads what remains without error; the
+  sink's round trip; `msg_id_column` publishing twice lands once; a refused publish reports
+  what was delivered; each sign-in method; a wrong password names the method and not the
+  password; TLS without the right CA is refused with the reason.
+- The sample in `verified.rs`, both transports and preview; a built artifact continuing
+  between runs, by hand.
+- The gate: fmt, clippy, all tests with every server up and without them, frontend, samples;
+  **64 components**.
+
+**Done.** Both NATS components, every sign-in method, verified against real servers, and
+their semantics in `docs/connectors.md`.
+
+**Amended 2026-09-24, on completion.** Built as designed, in one sitting, with these notes:
+
+- **`.creds` got its automated test after all.** Operator mode came up at the first attempt,
+  tried in throwaway containers before it went into the project.
+- **Value decoding became shared** (`kafka::value_columns`, `key_text`) alongside the TLS
+  move, both proved by Kafka's unchanged tests.
+- **A read ends by count, not by waiting**: the consumer's pending count at creation, and each
+  message's own pending count, say when the batch is done.
+- **A filtered read's position moves past the end of the stream**, so unmatched messages are
+  not revisited.
+- **The frontend's sample test needs `etl` rebuilt first**, since it reads the built manifest;
+  noted in the tracker.
+- **Components: 64.** The icon is `radio`, shared with Kafka; the canvas needed nothing new.
+
+**After NATS** (decision 46): decided then, among Kinesis, a design for the
+acknowledgement-based brokers (Pub/Sub, RabbitMQ), and the plan's next family, NoSQL.
+
+**Later families**, planned one at a time when reached: the rest of the streaming brokers,
+then NoSQL, warehouses over their own protocols, vector DBs.
 
 ### Phase 11 — AI assistant + MCP server
 

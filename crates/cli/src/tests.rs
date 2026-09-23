@@ -911,6 +911,14 @@ fn every_incremental_node_is_named_so_the_build_note_can_say_which() {
 }
 
 #[test]
+fn a_piped_secret_loses_what_the_piping_added_and_nothing_else() {
+    assert_eq!(stdin_secret("etl-secret\r\n"), "etl-secret");
+    assert_eq!(stdin_secret("\u{feff}etl-secret\r\n"), "etl-secret");
+    // Spaces are the user's: a password may start or end with one.
+    assert_eq!(stdin_secret(" pass word \n"), " pass word ");
+}
+
+#[test]
 fn a_stream_source_is_named_so_the_build_note_can_say_which() {
     let document = PipelineDoc::from_json(
         r#"{
