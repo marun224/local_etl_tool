@@ -112,6 +112,13 @@ jobs:
       - name: Tests
         run: cargo test ${{ matrix.scope }}
 
+      # `cargo test` builds the CLI only as a test harness under target/debug/deps
+      # and never writes target/debug/etl. Every machine this was rehearsed on had
+      # an earlier `cargo build` lying around, which is why the first CI run was
+      # the first place that showed.
+      - name: Build the CLI the next two steps run
+        run: cargo build -p etl-cli
+
       # The gate passing and the product working are different claims. These are
       # the numbers the tracker records, checked rather than described.
       - name: The registry is all there
@@ -250,8 +257,11 @@ jobs:
       # cache key is wrong.
       - name: Running it again is a no-op
         shell: pwsh
+        # 6>&1 because the script reports with Write-Host, which is the
+        # information stream, and a plain pipe captures none of it -- the first
+        # CI run skipped correctly and then failed for not having heard it say so.
         run: |
-          $out = ./scripts/build-runner.ps1 -Platform linux_amd64 | Out-String
+          $out = ./scripts/build-runner.ps1 -Platform linux_amd64 6>&1 | Out-String
           Write-Host $out
           if ($out -notmatch 'already present') { throw 'expected the second run to skip' }
 

@@ -67,7 +67,12 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$binary = Join-Path $repoRoot 'tools\duckdb\duckdb.exe'
+# The host's engine, named the way fetch-duckdb.ps1 names it: no suffix off
+# Windows. `$IsWindows` is absent in Windows PowerShell 5.1, where the answer is
+# always Windows. This was the same host-detection bug fetch-duckdb.ps1 had, left
+# behind here, and Linux CI's first run is what found it.
+$exeSuffix = if ($null -eq $IsWindows -or $IsWindows) { '.exe' } else { '' }
+$binary = Join-Path $repoRoot "tools\duckdb\duckdb$exeSuffix"
 $destination = Join-Path $repoRoot 'tools\duckdb\extensions'
 
 if (-not (Test-Path $binary)) {
