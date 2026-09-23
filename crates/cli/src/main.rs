@@ -340,6 +340,45 @@ enum Command {
         #[command(flatten)]
         settings: Settings,
     },
+
+    /// Bake a pipeline into a standalone executable.
+    ///
+    /// The output is one file with the resolved pipeline inside it. Copy it to
+    /// a machine with no Rust, no workspace and no contexts, and run it.
+    Build {
+        /// The pipeline JSON file.
+        pipeline: PathBuf,
+
+        /// Where to write the executable. Defaults to the pipeline's name in
+        /// the current directory.
+        #[arg(long, short = 'o', value_name = "FILE")]
+        out: Option<PathBuf>,
+
+        /// The runner to copy. Defaults to the `etl-runner` built beside this
+        /// `etl`. Phase 9c is where this becomes a target-OS selector.
+        #[arg(long, value_name = "FILE")]
+        runner: Option<PathBuf>,
+
+        /// Bake in a pipeline that resolves a secret, writing that secret's
+        /// plaintext into the output file.
+        #[arg(long)]
+        allow_secrets: bool,
+
+        /// Leave the engine out, producing a small artifact that needs a DuckDB
+        /// wherever it runs. The default embeds one.
+        #[arg(long)]
+        no_embed: bool,
+
+        /// Build for another operating system, named as DuckDB names its
+        /// platforms: `linux_amd64`, `windows_amd64`, `osx_arm64`. Defaults to
+        /// this machine. See `scripts/fetch-duckdb.ps1 -Platform` and
+        /// `scripts/build-runner.ps1` for what a target needs vendored first.
+        #[arg(long, value_name = "PLATFORM")]
+        target: Option<String>,
+
+        #[command(flatten)]
+        settings: Settings,
+    },
 }
 
 fn main() -> ExitCode {
@@ -392,6 +431,24 @@ fn main() -> ExitCode {
             no_counts,
             settings,
         } => command_plan(&pipeline, script, !no_counts, &settings),
+
+        Command::Build {
+            pipeline,
+            out,
+            runner,
+            allow_secrets,
+            no_embed,
+            target,
+            settings,
+        } => command_build(
+            &pipeline,
+            out,
+            runner,
+            allow_secrets,
+            !no_embed,
+            target.as_deref(),
+            &settings,
+        ),
     };
 
     ExitCode::from(code)
@@ -560,58 +617,16 @@ fn command_run(
 
 /// The per-stage table `etl run` prints.
 fn print_report(report: &RunReport) {
-    let width = report
-        .stages
-        .iter()
-        .map(|s| s.label.chars().count())
-        .max()
-        .unwrap_or(0);
-
-    for stage in &report.stages {
-        let rows = match (&stage.skipped, stage.rows) {
-            // A stage that did not run says why, rather than showing a dash
-            // that reads the same as "no counts were collected".
-            (Some(reason), _) => reason.describe(),
-            (None, Some(rows)) => format!("{rows} rows"),
-            (None, None) => "-".to_string(),
-        };
-
-        // A quality node's rejected count is shown even when it is zero. Zero
-        // rejects is the result someone ran the check to see, and hiding it
-        // would make a passing check look like a node that did nothing.
-        let rejected = match stage.rejected {
-            Some(rejected) => format!("  {rejected} rejected"),
-            None => String::new(),
-        };
-
-        // Most stages have no timing and must not be padded into a column of
-        // blanks; the ones that do have earned it. See `StageOutcome::elapsed`
-        // for which those are and why.
-        let took = match stage.elapsed {
-            Some(elapsed) => format!("  {:.0}ms", elapsed.as_secs_f64() * 1000.0),
-            None => String::new(),
-        };
-
-        println!(
-            "  {:width$}  {:>12}  {}{}{}",
-            stage.label, rows, stage.component_id, rejected, took
-        );
+    // The formatting lives in the engine, beside the type it formats, so that
+    // `etl run` and a standalone runner cannot drift apart on what a rejected
+    // count or a missing timing means. See `etl_duckdb_engine::report`.
+    for line in etl_duckdb_engine::report_lines(report) {
+        println!("{line}");
     }
 
-    for failure in &report.failures {
-        println!(
-            "  ! {} ({}): {}",
-            failure.label, failure.node_id, failure.message
-        );
-    }
-
-    for note in &report.notes {
-        println!("  · {note}");
-    }
-
+    println!();
     println!(
-        "
-Ran {} stage(s) in {:.2}s",
+        "Ran {} stage(s) in {:.2}s",
         report.stages.len(),
         report.elapsed.as_secs_f64()
     );
@@ -1948,6 +1963,571 @@ fn command_secret(action: SecretAction, settings: &Settings) -> u8 {
             exit::OK
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Baking a pipeline into a binary
+// ---------------------------------------------------------------------------
+
+/// `etl build` — copy the runner and append this pipeline to the copy.
+///
+/// The document baked in is the **resolved** one, because the machine that runs
+/// the artifact has none of what would resolve it: no contexts, no `.etl/`, no
+/// secret key. That is also the reason for both refusals below — each is a case
+/// where the resolved document would be quietly wrong on the far end rather
+/// than obviously wrong here.
+fn command_build(
+    pipeline: &Path,
+    out: Option<PathBuf>,
+    runner: Option<PathBuf>,
+    allow_secrets: bool,
+    embed: bool,
+    target: Option<&str>,
+    settings: &Settings,
+) -> u8 {
+    let target = match target {
+        Some(named) => Target::named(named),
+        None => Target::host(),
+    };
+
+    // Compiled, not merely parsed: shipping a file that turns out not to
+    // compile is the one failure the far end is least equipped to diagnose.
+    //
+    // Built-ins are deferred rather than substituted. `${workspace}` means
+    // "wherever this runs" and `${date}` means "the day it runs"; baking either
+    // into an artifact meant to be copied elsewhere and run repeatedly freezes
+    // this machine's directory layout and today's date into it. Everything
+    // else -- parameters, contexts, secrets -- must be resolved here, because
+    // the far side has nothing to resolve them with.
+    let Loaded {
+        plan,
+        resolved,
+        state_key,
+    } = match load_and_compile_deferring_built_ins(pipeline, settings) {
+        Ok(loaded) => loaded,
+        Err(code) => return code,
+    };
+
+    report_warnings(&plan);
+
+    // An incremental source needs somewhere to keep its high-water mark, and
+    // the runner has no state store. Shipping one anyway would produce a
+    // pipeline that re-reads everything on every run and says nothing about it,
+    // which is worse than refusing. Lifting this means giving the runner state.
+    let incremental = incremental_nodes(&resolved.document);
+
+    if !incremental.is_empty() {
+        eprintln!(
+            "error: {} loads incrementally, and a standalone binary has nowhere to keep a watermark.",
+            incremental.join(", ")
+        );
+        eprintln!("       It would re-read everything on every run. Remove the incremental");
+        eprintln!(
+            "       setting, or run this pipeline with `etl run`, which has the state store."
+        );
+        return exit::INVALID;
+    }
+
+    if resolved.uses_secrets() && !allow_secrets {
+        eprintln!("error: this pipeline resolves a secret, and baking it would write that");
+        eprintln!("       secret's plaintext into the output file. Anyone holding the file");
+        eprintln!("       holds the credential.");
+        eprintln!("       Pass --allow-secrets if that is what you want.");
+        return exit::USAGE;
+    }
+
+    let runner = match runner {
+        Some(explicit) if explicit.is_file() => explicit,
+        Some(explicit) => {
+            eprintln!("error: no runner at {}", explicit.display());
+            return exit::USAGE;
+        }
+        None => match locate_runner(&target, settings) {
+            Some(found) => found,
+            None if target.is_host => {
+                eprintln!("error: no `etl-runner` found beside this executable.");
+                eprintln!("       Build it with `cargo build -p etl-runner`, or name one");
+                eprintln!("       with --runner.");
+                return exit::USAGE;
+            }
+            None => {
+                eprintln!(
+                    "error: no runner vendored for {}. Expected one at {}.",
+                    target.platform,
+                    target.runner_path(&toolchain_roots(settings)[0]).display()
+                );
+                eprintln!("       Build it with:");
+                eprintln!(
+                    "         .\\scripts\\build-runner.ps1 -Platform {}",
+                    target.platform
+                );
+                return exit::USAGE;
+            }
+        },
+    };
+
+    let destination = out.unwrap_or_else(|| {
+        // A cross-built artifact gets the target in its name, because a
+        // directory holding two files called `orders` that run on different
+        // operating systems is a bad afternoon.
+        if target.is_host {
+            PathBuf::from(format!("{state_key}{}", target.exe_suffix()))
+        } else {
+            PathBuf::from(format!(
+                "{state_key}-{}{}",
+                target.platform,
+                target.exe_suffix()
+            ))
+        }
+    });
+
+    let mut payload =
+        etl_runner::Payload::new(&state_key, state::now_utc(), resolved.document.clone());
+    payload.carries_secrets = resolved.uses_secrets();
+
+    // The engine and whichever extensions this plan's components asked for --
+    // not all nine, which would be 284 MB of which most is never loaded. The
+    // registry already knows the answer; `Plan::extensions` is it.
+    let blobs = if embed {
+        match gather_embedded(&plan, settings, &target, &mut payload) {
+            Ok(blobs) => blobs,
+            Err(message) => {
+                eprintln!("error: {message}");
+                return exit::USAGE;
+            }
+        }
+    } else {
+        Vec::new()
+    };
+
+    if let Err(error) = payload.write_built(&runner, &destination, &blobs) {
+        eprintln!("error: {error}");
+        return exit::USAGE;
+    }
+
+    let size = std::fs::metadata(&destination)
+        .map(|meta| meta.len())
+        .unwrap_or(0);
+
+    println!("Built {}", destination.display());
+    println!("  pipeline   {state_key}");
+    println!("  stages     {}", plan.stages.len());
+    println!("  size       {:.1} MB", size as f64 / 1_048_576.0);
+
+    if payload.carries_secrets {
+        println!();
+        println!("This file has a secret baked into it. Treat it as a credential.");
+    }
+
+    if payload.files.is_empty() {
+        // Said plainly rather than left to be discovered.
+        println!();
+        println!("No engine is embedded, so this needs a DuckDB where it runs.");
+    } else {
+        println!(
+            "  engine     DuckDB {}{}",
+            payload.duckdb_version,
+            if payload.platform.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", payload.platform)
+            }
+        );
+
+        let extensions: Vec<&str> = payload
+            .files
+            .iter()
+            .filter(|file| file.role == etl_runner::Role::Extension)
+            .filter(|file| file.name.ends_with(".duckdb_extension"))
+            .map(|file| file.name.trim_end_matches(".duckdb_extension"))
+            .collect();
+
+        if extensions.is_empty() {
+            println!("  extensions none needed");
+        } else {
+            println!("  extensions {}", extensions.join(", "));
+        }
+    }
+
+    exit::OK
+}
+
+/// `load_and_compile`, with `${workspace}` and `${date}` left in the document.
+///
+/// Only `etl build` wants this. Compiling still happens here so that a document
+/// that will not compile is caught before it is shipped — the built-ins are
+/// text inside a path literal, so a plan compiles identically whether they are
+/// substituted or not.
+fn load_and_compile_deferring_built_ins(
+    pipeline: &Path,
+    settings: &Settings,
+) -> Result<Loaded, u8> {
+    let text = std::fs::read_to_string(pipeline).map_err(|error| {
+        eprintln!("error: cannot read {}: {error}", pipeline.display());
+        exit::USAGE
+    })?;
+
+    let document = PipelineDoc::from_json(&text).map_err(|error| {
+        eprintln!(
+            "error: {} is not a valid pipeline: {error}",
+            pipeline.display()
+        );
+        exit::USAGE
+    })?;
+
+    let resolver = settings.resolver()?.defer_built_ins();
+
+    let resolved = params::resolve(&document, &resolver).map_err(|error| {
+        eprintln!("error: {error}");
+        exit::INVALID
+    })?;
+
+    report_param_warnings(&resolved.warnings);
+
+    let state_key = state::key_for(resolved.document.name.as_deref(), pipeline);
+
+    let plan = compile_with(&resolved.document, &CompileOptions::default()).map_err(
+        |error: EngineError| {
+            eprintln!("error: {error}");
+            exit::INVALID
+        },
+    )?;
+
+    Ok(Loaded {
+        plan,
+        resolved,
+        state_key,
+    })
+}
+
+/// Collect the engine and the extensions this plan needs into the blob region.
+///
+/// Reads the same vendored `tools/duckdb/` the executor runs against, through
+/// the same two lookup functions, so an artifact can never be built against a
+/// different engine from the one the pipeline was tested on.
+fn gather_embedded(
+    plan: &Plan,
+    settings: &Settings,
+    target: &Target,
+    payload: &mut etl_runner::Payload,
+) -> Result<Vec<u8>, String> {
+    use etl_duckdb_engine::exec::{locate_duckdb, locate_extension_dir, PINNED_DUCKDB_VERSION};
+
+    // Searched from several roots, in order, because `--workspace` says where
+    // the pipeline's *data* is and the vendored engine lives near the checkout.
+    // A pipeline that reads a folder somewhere else must still find the toolchain
+    // it is being built against.
+    let roots = toolchain_roots(settings);
+
+    // The host's engine is found by the same lookup the executor uses, so an
+    // artifact is built against the binary the pipeline was tested on. Another
+    // platform's has to be vendored deliberately -- there is nothing on this
+    // machine that could stand in for it.
+    let engine = if target.is_host {
+        roots
+            .iter()
+            .map(|root| RunOptions {
+                working_dir: Some(root.clone()),
+                ..Default::default()
+            })
+            .find_map(|options| locate_duckdb(&options).ok())
+            .ok_or_else(|| {
+                format!(
+                    "no vendored DuckDB found. Looked under: {}. Run scripts/fetch-duckdb.ps1.",
+                    roots
+                        .iter()
+                        .map(|root| root.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })?
+    } else {
+        roots
+            .iter()
+            .map(|root| target.engine_path(root))
+            .find(|candidate| candidate.is_file())
+            .ok_or_else(|| {
+                format!(
+                    "no DuckDB vendored for {}. Run: .\\scripts\\fetch-duckdb.ps1 -Platform {}",
+                    target.platform, target.platform
+                )
+            })?
+    };
+
+    let mut blobs = Vec::new();
+    let mut files = Vec::new();
+
+    let bytes = std::fs::read(&engine)
+        .map_err(|error| format!("could not read {}: {error}", engine.display()))?;
+
+    files.push(etl_runner::EmbeddedFile {
+        // Named for the target rather than copied from the source file, so a
+        // Linux artifact never carries something called `duckdb.exe`.
+        name: format!("duckdb{}", target.exe_suffix()),
+        role: etl_runner::Role::Engine,
+        offset: 0,
+        length: bytes.len() as u64,
+        // The one file that has to be runnable on the far side. On Windows the
+        // extension decides and this is a no-op; on Linux it is the difference
+        // between a working artifact and a confusing one.
+        executable: true,
+        extra: Default::default(),
+    });
+    blobs.extend_from_slice(&bytes);
+
+    payload.duckdb_version = PINNED_DUCKDB_VERSION.to_string();
+    // Recorded whether or not anything needs it: it is what `--info` shows, and
+    // it is how an artifact says which platform it was built for.
+    payload.platform = target.platform.clone();
+
+    let wanted = plan.extensions();
+
+    if !wanted.is_empty() {
+        // Searched across the same roots as the engine, for the same reason: the
+        // workspace holds the pipeline's data, and the vendored extensions live
+        // near the checkout.
+        let directory = roots
+            .iter()
+            .find_map(|root| {
+                locate_extension_dir(&RunOptions {
+                    working_dir: Some(root.clone()),
+                    ..Default::default()
+                })
+            })
+            .ok_or_else(|| {
+                format!(
+                    "no vendored extension directory found under: {}.                      Run scripts/fetch-duckdb-extensions.ps1.",
+                    roots
+                        .iter()
+                        .map(|root| root.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })?;
+
+        // Addressed by platform rather than by "the only one there", which is
+        // what 9b left behind and what stopped working the moment a second
+        // platform was vendored beside the first.
+        let platform_dir = directory.join(PINNED_DUCKDB_VERSION).join(&target.platform);
+
+        if !platform_dir.is_dir() {
+            return Err(format!(
+                "no {} extensions vendored at {}. Run: \
+                 .\\scripts\\fetch-duckdb-extensions.ps1 -Platform {}",
+                target.platform,
+                platform_dir.display(),
+                target.platform
+            ));
+        }
+
+        for extension in wanted {
+            // A component says `postgres`; the file it installed is called
+            // `postgres_scanner.duckdb_extension`. The fetch script resolves the
+            // same two spellings, and this has to agree with it.
+            let found = [
+                format!("{extension}.duckdb_extension"),
+                format!("{extension}_scanner.duckdb_extension"),
+            ]
+            .into_iter()
+            .map(|name| platform_dir.join(name))
+            .find(|candidate| candidate.is_file())
+            .ok_or_else(|| {
+                let nodes: Vec<&str> = plan
+                    .stages_needing(extension)
+                    .map(|stage| stage.node_id.as_str())
+                    .collect();
+
+                format!(
+                    "'{}' needs the {extension} extension, which is not in {}. Run scripts/fetch-duckdb-extensions.ps1.",
+                    nodes.join(", "),
+                    platform_dir.display()
+                )
+            })?;
+
+            // The `.info` sidecar travels with it. DuckDB writes one beside
+            // every installed extension and reads it back; shipping the
+            // extension alone is the sort of thing that works until it does not.
+            for path in [found.clone(), with_info_suffix(&found)] {
+                if !path.is_file() {
+                    continue;
+                }
+
+                let bytes = std::fs::read(&path)
+                    .map_err(|error| format!("could not read {}: {error}", path.display()))?;
+
+                files.push(etl_runner::EmbeddedFile {
+                    name: path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    role: etl_runner::Role::Extension,
+                    offset: blobs.len() as u64,
+                    length: bytes.len() as u64,
+                    executable: false,
+                    extra: Default::default(),
+                });
+                blobs.extend_from_slice(&bytes);
+            }
+        }
+    }
+
+    payload.files = files;
+
+    Ok(blobs)
+}
+
+/// Where to look for the vendored engine and extensions, most specific first.
+///
+/// The workspace, then wherever `etl` was run from, then the directory holding
+/// `etl` itself — which is the one that still works when somebody runs a built
+/// `etl` from an unrelated directory against a pipeline somewhere else again.
+fn toolchain_roots(settings: &Settings) -> Vec<PathBuf> {
+    let mut roots = vec![settings.workspace_root()];
+
+    if let Ok(current) = std::env::current_dir() {
+        if !roots.contains(&current) {
+            roots.push(current);
+        }
+    }
+
+    if let Some(beside) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+    {
+        if !roots.contains(&beside) {
+            roots.push(beside);
+        }
+    }
+
+    roots
+}
+
+/// `x.duckdb_extension` to `x.duckdb_extension.info`.
+fn with_info_suffix(path: &Path) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".info");
+
+    path.with_file_name(name)
+}
+
+/// The nodes in a document that ask to load incrementally.
+///
+/// Its own function so the refusal above can be tested rather than only
+/// demonstrated: it is a safety check, and a safety check nothing exercises is
+/// one that quietly stops working.
+fn incremental_nodes(document: &PipelineDoc) -> Vec<&str> {
+    document
+        .nodes
+        .iter()
+        .filter(|node| node.data.incremental.is_some())
+        .map(|node| node.id.as_str())
+        .collect()
+}
+
+/// Find the `etl-runner` to copy for a target.
+///
+/// For this machine: beside the executable, where cargo just built it.
+/// Embedding it into `etl` instead would mean `etl-cli`'s build script building
+/// another binary in the target directory cargo is already building, which is a
+/// recursion worth avoiding for a property nothing needs — what ships is the
+/// built artifact, not `etl` itself.
+///
+/// For anywhere else: vendored under `tools/runners/<platform>/`, because there
+/// is no way to produce a Linux binary on demand from a Windows machine with no
+/// cross toolchain. `scripts/build-runner.ps1` is what puts one there.
+fn locate_runner(target: &Target, settings: &Settings) -> Option<PathBuf> {
+    if target.is_host {
+        let here = std::env::current_exe().ok()?;
+        let candidate = here
+            .parent()?
+            .join(format!("etl-runner{}", target.exe_suffix()));
+
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+
+    toolchain_roots(settings)
+        .iter()
+        .map(|root| target.runner_path(root))
+        .find(|candidate| candidate.is_file())
+}
+
+/// Which operating system an artifact is being built for.
+///
+/// Named the way DuckDB names its platforms — `windows_amd64`, `linux_amd64`,
+/// `osx_arm64` — rather than as a Rust target triple. The extension directory
+/// layout is DuckDB's and already keys on these, so borrowing the vocabulary
+/// means one name for one concept instead of a mapping table to keep in step.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Target {
+    platform: String,
+    is_host: bool,
+}
+
+impl Target {
+    /// The machine this is running on.
+    fn host() -> Self {
+        Target {
+            platform: host_platform(),
+            is_host: true,
+        }
+    }
+
+    fn named(platform: &str) -> Self {
+        Target {
+            is_host: platform == host_platform(),
+            platform: platform.to_string(),
+        }
+    }
+
+    /// What an executable is called on this target.
+    fn exe_suffix(&self) -> &'static str {
+        if self.platform.starts_with("windows") {
+            ".exe"
+        } else {
+            ""
+        }
+    }
+
+    /// Where a cross-target's runner is vendored.
+    fn runner_path(&self, root: &Path) -> PathBuf {
+        root.join("tools")
+            .join("runners")
+            .join(&self.platform)
+            .join(format!("etl-runner{}", self.exe_suffix()))
+    }
+
+    /// Where a cross-target's DuckDB CLI is vendored.
+    ///
+    /// Under `targets/` rather than beside the host's copy, so that the
+    /// executor's own lookup — which finds `tools/duckdb/duckdb.exe` by
+    /// searching upward — cannot accidentally pick up a Linux binary and try to
+    /// run it.
+    fn engine_path(&self, root: &Path) -> PathBuf {
+        root.join("tools")
+            .join("duckdb")
+            .join("targets")
+            .join(&self.platform)
+            .join(format!("duckdb{}", self.exe_suffix()))
+    }
+}
+
+/// This machine, in DuckDB's platform vocabulary.
+fn host_platform() -> String {
+    let os = match std::env::consts::OS {
+        "windows" => "windows",
+        "macos" => "osx",
+        other => other,
+    };
+
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        other => other,
+    };
+
+    format!("{os}_{arch}")
 }
 
 fn command_plan(pipeline: &Path, as_script: bool, counts: bool, settings: &Settings) -> u8 {

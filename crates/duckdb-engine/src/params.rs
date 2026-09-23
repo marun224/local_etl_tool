@@ -228,6 +228,9 @@ pub struct Resolver {
     /// Opened lazily by the caller: a pipeline with no `${SECRET:...}` in it
     /// must not need a workspace key to run.
     secrets: Option<Arc<SecretStore>>,
+    /// Leave `${workspace}` and `${date}` for whoever runs the document. See
+    /// [`Resolver::defer_built_ins`].
+    defer_built_ins: bool,
 }
 
 impl Resolver {
@@ -240,12 +243,32 @@ impl Resolver {
             workspace: workspace.into(),
             today: today_utc(),
             secrets: None,
+            defer_built_ins: false,
         }
     }
 
     /// Bind a parameter explicitly, as `--param name=value` does.
     pub fn bind(mut self, name: &str, value: &str) -> Self {
         self.explicit.insert(name.to_string(), value.to_string());
+        self
+    }
+
+    /// Leave `${workspace}` and `${date}` in the document rather than
+    /// substituting them.
+    ///
+    /// For `etl build`, which resolves a document on one machine so it can run
+    /// on another. Parameters, contexts and secrets *must* be resolved at build
+    /// time — the far side has none of what would resolve them. The two
+    /// built-ins are the opposite: `${workspace}` means "wherever this runs"
+    /// and `${date}` means "the day it runs", and baking either one in freezes
+    /// the build machine's directory layout and the build date into an artifact
+    /// meant to be copied elsewhere and run repeatedly.
+    ///
+    /// Found by cross-building for Linux and watching it look for
+    /// `D:/workspace/...`, which is also how this went unnoticed while every
+    /// artifact happened to run on the machine that built it.
+    pub fn defer_built_ins(mut self) -> Self {
+        self.defer_built_ins = true;
         self
     }
 
@@ -292,6 +315,18 @@ impl Resolver {
 
     /// A built-in's value.
     fn built_in(&self, name: &str) -> Option<String> {
+        if !BUILT_INS.contains(&name) {
+            return None;
+        }
+
+        // Deferred: the reference resolves to *itself*, so it survives into the
+        // resolved document intact and is resolved again later by whoever runs
+        // it. The interpolator makes a single pass and never rescans what it
+        // wrote, so substituting a reference with itself terminates.
+        if self.defer_built_ins {
+            return Some(format!("${{{name}}}"));
+        }
+
         match name {
             // Forward slashes: the value is usually pasted into a path literal,
             // and `quote_path` would normalise it anyway.

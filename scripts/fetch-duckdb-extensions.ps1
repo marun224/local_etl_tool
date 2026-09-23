@@ -25,9 +25,17 @@
     Roughly 250 MB when complete. tools/ is git-ignored; this script is how it
     is reproduced.
 
+    Another platform's extensions can be fetched with -Platform, for Phase 9c's
+    cross-builds. Those cannot be INSTALLed, because a Windows DuckDB installs
+    Windows binaries and nothing here can run a Linux one; they are downloaded
+    from DuckDB's extension repository directly and gunzipped into the same
+    layout. The consequence is that they cannot be *verified* by loading them,
+    which the host's are -- see the note where they are written.
+
 .EXAMPLE
     ./scripts/fetch-duckdb-extensions.ps1
     ./scripts/fetch-duckdb-extensions.ps1 -Force
+    ./scripts/fetch-duckdb-extensions.ps1 -Platform linux_amd64
 #>
 [CmdletBinding()]
 param(
@@ -47,6 +55,11 @@ param(
         'delta',
         'ducklake'
     ),
+
+    # DuckDB's platform vocabulary: windows_amd64, linux_amd64, osx_arm64.
+    # Empty means this machine, which is the only one that can be installed
+    # through DuckDB itself and the only one that gets verified.
+    [string] $Platform = '',
 
     [switch] $Force
 )
@@ -70,11 +83,83 @@ New-Item -ItemType Directory -Force $destination | Out-Null
 
 # Ask DuckDB for its own platform triple rather than guessing it, so this keeps
 # working on arm64 and on whatever comes next.
-$platform = (& $binary -noheader -list -c 'PRAGMA platform;') -join ''
-$platform = $platform.Trim()
-$installed = Join-Path $destination "$Version\$platform"
+$hostPlatform = (& $binary -noheader -list -c 'PRAGMA platform;') -join ''
+$hostPlatform = $hostPlatform.Trim()
 
-Write-Host "DuckDB $Version ($platform)"
+if (-not $Platform) { $Platform = $hostPlatform }
+
+$isHost = $Platform -eq $hostPlatform
+$installed = Join-Path $destination "$Version\$Platform"
+
+if (-not $isHost) {
+    # Downloaded rather than installed. DuckDB will only install binaries for
+    # the platform it is itself, so a cross-target's extensions have to come
+    # from the repository by hand -- the same files INSTALL would have fetched,
+    # from the same place, gzipped.
+    Write-Host "DuckDB $Version ($Platform, cross-target)"
+    Write-Host "Extension directory: $destination"
+
+    New-Item -ItemType Directory -Force $installed | Out-Null
+
+    foreach ($extension in $Extensions) {
+        $candidates = @($extension, "${extension}_scanner")
+        $already = @(Get-ChildItem -Path $installed -Filter '*.duckdb_extension' -ErrorAction SilentlyContinue |
+            Where-Object { $candidates -contains $_.BaseName })
+
+        if ($already.Count -gt 0 -and -not $Force) {
+            Write-Host "  $extension already present"
+            continue
+        }
+
+        # The repository knows one of the two spellings; try the bare name and
+        # fall back to the _scanner form, the same pair resolved everywhere else.
+        $fetched = $false
+
+        foreach ($name in $candidates) {
+            $url = "http://extensions.duckdb.org/$Version/$Platform/$name.duckdb_extension.gz"
+            $temp = Join-Path ([System.IO.Path]::GetTempPath()) "$name.duckdb_extension.gz"
+
+            try {
+                Invoke-WebRequest -Uri $url -OutFile $temp -ErrorAction Stop
+            } catch {
+                continue
+            }
+
+            $target = Join-Path $installed "$name.duckdb_extension"
+
+            $source = [System.IO.File]::OpenRead($temp)
+            $output = [System.IO.File]::Create($target)
+            $gzip = New-Object System.IO.Compression.GZipStream($source, [System.IO.Compression.CompressionMode]::Decompress)
+            try {
+                $gzip.CopyTo($output)
+            } finally {
+                $gzip.Dispose(); $output.Dispose(); $source.Dispose()
+            }
+
+            Remove-Item $temp
+            $size = [math]::Round((Get-Item $target).Length / 1MB, 1)
+            Write-Host "  downloaded $name ($size MB)"
+            $fetched = $true
+            break
+        }
+
+        if (-not $fetched) {
+            throw "Could not download the '$extension' extension for $Platform from extensions.duckdb.org"
+        }
+    }
+
+    # No verification step, and it is worth being explicit about why: loading
+    # these would need a DuckDB of that platform, and this machine has none. A
+    # cross-target's extensions are trusted on the strength of the URL they came
+    # from. The artifact that embeds them is what finally proves they work, which
+    # is why Phase 9c's acceptance is running one rather than building one.
+    Write-Host ""
+    Write-Host "Downloaded, not verified: nothing here can load a $Platform extension."
+    Write-Host "Build an artifact and run it on that platform to find out."
+    exit 0
+}
+
+Write-Host "DuckDB $Version ($Platform)"
 Write-Host "Extension directory: $destination"
 
 foreach ($extension in $Extensions) {

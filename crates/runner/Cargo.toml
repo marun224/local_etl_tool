@@ -1,22 +1,23 @@
 [package]
-name = "etl-cli"
-description = "Command-line runner for pipelines."
+name = "etl-runner"
+description = "A pipeline baked into a single executable, and the payload format that puts it there."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
 [[bin]]
-name = "etl"
+name = "etl-runner"
 path = "src/main.rs"
+
+[lib]
+name = "etl_runner"
+path = "src/lib.rs"
 
 [dependencies]
 etl-duckdb-engine.workspace = true
 etl-metadata.workspace = true
-etl-secrets.workspace = true
-etl-state.workspace = true
-etl-console.workspace = true
-etl-scheduler.workspace = true
-etl-runner.workspace = true
 clap.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true

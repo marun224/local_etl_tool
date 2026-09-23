@@ -3,28 +3,54 @@
 **State only.** Design lives in [PLAN_duckle_parity.md](PLAN_duckle_parity.md). Read this file
 first when picking the project back up.
 
-> ## ⏸ Paused 2026-09-16, after Phase 8d — **Phase 8 is complete**
+> ## ⏸ Paused 2026-09-17, after Phase 9d — **CI is written; it has never run**
 >
-> Stopped at a clean boundary — gate green, nothing mid-edit. **Phases 0–8 are all done.**
-> There is a CLI, a desktop canvas, watermark incremental loading, run history and lineage, a
-> scheduler, and a web console. What is left is packaging (9), breadth (10), AI (11) and
-> benchmarks (12) — none of which the working product needs in order to work.
+> Stopped at a clean boundary — local gate green, nothing mid-edit. **Phases 0–8 are done and
+> 9a–9d are written.** `.github/workflows/gate.yml` is the project's first CI.
 >
-> Phases 0–5 are dated 2026-09-15 because that is when the work was done; the clock rolled
-> past midnight while pausing, which is the only reason those lines read a day later.
+> **9d is not proven, and cannot be from here.** Phase 9's "done" is *cross-build matrix green
+> in CI*, and nothing has been pushed — `origin/main` is behind by everything since `c6830a4`.
+> The workflow has never been run by GitHub. What *has* been done is verify every command in it
+> locally, including running the whole suite on Linux in a container.
 >
-> **To resume:** read this file, then Phase 9 in the plan. Phase 9 is the standalone binary
-> export — one self-contained executable with a pipeline baked into it, cross-built. Two things
-> from earlier phases are waiting for it and are the reason it should be next: Settled decision
-> 3 made the vendored, air-gapped extension path *the only path* from Phase 4 onward, so Phase 9
-> is exercising something that has been in use for days rather than discovering it at the end;
-> and Settled decision 5 reserved the name `etl-runner` for exactly this artifact. The known
-> risk is the cross-build matrix, not the embedding — bundling the right native DuckDB and
-> extension binaries per target is the part that will take the time.
+> **To resume:** push, watch the first run, and fix what it finds. A first CI run finding
+> nothing would be the surprising outcome.
+>
+> ```powershell
+> git add -A ; git commit    # 9a, 9b, 9c and 9d are all uncommitted
+> git push
+> gh run watch
+> ```
+>
+> **What the workflow does**, and what was checked locally before writing it:
+>
+> | Job | Checked locally by |
+> |---|---|
+> | `gate (windows)` — fmt, clippy, 678 tests, samples | running it, repeatedly |
+> | `gate (ubuntu)` — fmt, clippy, **668 tests**, samples | `cargo test` in `rust:1.96-slim-bookworm` |
+> | `artifact (both)` — bake, run from elsewhere, run in a bare container | Phase 9b and 9c |
+> | `cross-build-script` — `build-runner.ps1`, ELF check, unbaked contract, no-op rerun | each assertion run by hand |
+> | `frontend` — 114 tests, typecheck, build | running it |
+>
+> **The Linux job excludes `apps/desktop`.** Tauri needs WebKitGTK, GTK, glib and `pkg-config`
+> to compile, and `cargo test --workspace` on Linux fails on exactly that. Installing system
+> libraries on every run to build a window no server opens is the wrong trade, so Linux tests
+> the headless product — 668 of the 678 — and Windows tests everything. **668 + 10 desktop = 678**,
+> which is the arithmetic to check if either number moves.
+>
+> **CI fetches only the `excel` extension, not all nine.** Exactly one test loads one
+> (`an_excel_round_trip_loads_the_extension_and_moves_the_rows`); the rest would be ~250 MB per
+> run to prove nothing. Verified by parking `tools/duckdb/extensions` and re-running: 1 failure,
+> that test, naming that extension.
+>
+> **CI cannot do the Windows-to-Linux cross-build.** GitHub's Windows runners do not run Linux
+> containers, so 9c's developer workflow has no runner. CI proves the *output* instead — a Linux
+> artifact built on Linux and run in a bare container. The container hop itself stays
+> hand-verified.
 >
 > ```powershell
 > cd D:\workspace\ETL_Local_Tool
-> cargo test --workspace                                            # expect 615 passing
+> cargo test --workspace                                            # expect 678 passing
 > npm --prefix frontend run test                                    # expect 114 passing
 > npm --prefix frontend run typecheck                               # expect clean
 > npm --prefix frontend run build                                   # expect clean
@@ -34,83 +60,36 @@ first when picking the project back up.
 > .\target\debug\etl.exe run samples\pipelines\orders_guarded.json  # expect 12 through, branch taken
 > ```
 >
-> Phase 7's acceptance criterion, which should print the same 12/6/6 twice into two different
-> directories:
+> Phase 9's own acceptance, still reproducible and still the thing worth re-running:
 >
 > ```powershell
-> $c = "--contexts", "samples\contexts.json"
-> .\target\debug\etl.exe run samples\pipelines\orders_by_context.json @c
-> .\target\debug\etl.exe run samples\pipelines\orders_by_context.json @c --context prod
+> .\scripts\build-runner.ps1 -Platform linux_amd64
+> .\target\debug\etl.exe build samples\pipelines\orders_checked.json --target linux_amd64
+> docker run --rm --network none -v "${PWD}:/w" -w /w debian:12-slim ./orders_checked-linux_amd64
 > ```
 >
-> Phase 8a's, which is the whole point of a watermark — **run it twice**:
+> **State of the tree:** the last phase commit is **`c6830a4` — Phase 8d**. After it come this
+> file, `ac36f1f` (the CLI's first tests), and **Phases 9a, 9b, 9c and 9d, all uncommitted**.
+> The remote is `github.com/marun224/local_etl_tool` (private) and is behind by all of it.
 >
-> ```powershell
-> .\target\debug\etl.exe run samples\pipelines\orders_incremental.json  # 12 rows, mark recorded
-> .\target\debug\etl.exe run samples\pipelines\orders_incremental.json  # 0 rows, nothing new
-> .\target\debug\etl.exe state list
-> ```
->
-> 8b's:
->
-> ```powershell
-> .\target\debug\etl.exe runs list --limit 5
-> .\target\debug\etl.exe lineage samples\pipelines\orders_checked.json
-> ```
->
-> 8c's:
->
-> ```powershell
-> $s = "--schedules", "samples\schedules.json", "--contexts", "samples\contexts.json"
-> .\target\debug\etl.exe schedule list @s      # 4 schedules, 3 enabled, times in UTC
-> .\target\debug\etl.exe schedule check @s     # all runnable
-> .\target\debug\etl.exe schedule start --once @s
-> ```
->
-> And 8d's — open the operator link it prints:
->
-> ```powershell
-> .\target\debug\etl.exe serve @s              # 6 pipelines, 4 schedules, run history
-> ```
->
-> All of these were run verbatim at the moment of pausing and printed exactly what is written
-> above. If any of them disagrees with this file later, trust the commands and fix the file.
->
-> `schedule start --once` prints nothing on a second run within fifteen minutes, which is
-> correct rather than broken: the interval is anchored on the run it just did.
->
-> **`etl serve` holds the terminal** and is stopped with Ctrl-C. On Windows a killed `etl.exe`
-> keeps its port until the process really goes; `taskkill /F /IM etl.exe` is the blunt way, and
-> `pkill` does not exist in Git Bash here. A port already in use is reported clearly and exits 1.
->
-> **`.etl/` was reset before those runs**, so the incremental sample really did start from
-> nothing. It is git-ignored local state; a fresh clone starts empty anyway, and
-> `etl state forget` and `etl runs prune` are how you get back here deliberately.
->
-> **State of the tree:** clean and committed. The last phase commit is **`c6830a4` — Phase 8d**;
-> after it come this file and one between-phases commit that gave `etl-cli` its first tests
-> (39 of them, no behaviour changed — see the last session-log entry). The remote is
-> `github.com/marun224/local_etl_tool` (private); **it is behind by that commit and this
-> file** until somebody pushes.
->
-> (This line used to carry a commit count, which was wrong twice and could not be right for
-> long: correcting it is itself a commit, so the number was stale the moment it was written.
-> `git log --oneline` answers it properly.)
->
-> **Phases 0–5 are one commit, not six.** The phases happened on the dates recorded below;
-> the commits did not exist, and dating them after the fact would have git assert a history
-> it never saw. Every phase from 6a on has its own commit, which is the arrangement to keep.
->
-> **`tools/` is still not backed up, deliberately.** It is git-ignored and holds the DuckDB
-> CLI (37 MB) plus 9 extension files (247 MB) — 284 MB that does not belong in a repo and is
-> reproducible with `.\scripts\fetch-duckdb.ps1` and `.\scripts\fetch-duckdb-extensions.ps1`.
-> A fresh clone needs both scripts run before the tests will pass.
+> **`tools/` is git-ignored and reproducible**, now with a Linux side: host DuckDB and 9
+> extensions, a Linux DuckDB, one Linux extension, and a Linux `etl-runner`. `fetch-duckdb.ps1`,
+> `fetch-duckdb-extensions.ps1` and `build-runner.ps1` each take a `-Platform`.
+
 
 ## Where things stand
 
-- **Next phase:** Phase 9 — standalone binary export and air-gapped packaging.
-- **In progress:** nothing. **Phase 8 is complete** (8a–8d, all 2026-09-16).
-- **Blocked on:** nothing.
+- **Next phase:** Phase 10 — Rust-native connectors — once 9d's workflow has actually run.
+- **In progress:** **9d, written but unproven.** The workflow exists and every command in it was
+  verified locally, including the whole suite on Linux in a container. It has never been run by
+  GitHub, because nothing has been pushed. 9a, 9b and 9c are complete (all 2026-09-17).
+- **Blocked on:** nothing technical. Phase 9 cannot be *called* done until CI has run, and that
+  needs a push, which is the user's call.
+
+Phase 9 was split into 9a–9d on 2026-09-17 before starting, the same way 6 and 8 were:
+**9a** the artifact and the payload format, **9b** the engine and extensions inside it,
+**9c** cross-building, **9d** the CI matrix that makes Phase 9's "done" true. 9a–9c are
+complete; 9d is written and has not run.
 
 Phase 6 was split into 6a and 6b on 2026-09-16 before starting; **both are complete**
 (2026-09-16). The execution-model decision 6b turned on is recorded in
@@ -127,7 +106,7 @@ pass), `ctl.throttle` (nothing to throttle until Phase 10 has a row cursor).
 **a scheduler that runs them**, and **a console to watch it from**. From the repo root:
 
 ```powershell
-cargo test --workspace        # 615 tests: 254 engine, 113 scheduler, 65 console, 51 e2e, 45 state, 39 cli, 23 secrets, 15 metadata, 10 desktop
+cargo test --workspace        # 678 tests: 282 engine, 113 scheduler, 65 console, 51 e2e, 48 cli, 45 state, 26 runner, 23 secrets, 15 metadata, 10 desktop
 .\target\debug\etl.exe run samples\pipelines\orders_enriched.json
 .\target\debug\etl.exe validate samples\pipelines\orders_enriched.json
 .\target\debug\etl.exe plan samples\pipelines\orders_enriched.json --script
@@ -535,7 +514,11 @@ fail the run. That is `ctl.fail`'s shape and it needs 6b's execution-model decis
 | 8b | — the runner: history, `--json`, lineage | **done** | 2026-09-16 |
 | 8c | — scheduler: interval, cron, file-watch | **done** | 2026-09-16 |
 | 8d | — web console: serve, token auth, roles | **done** | 2026-09-16 |
-| 9 | Standalone binary export + air-gapped packaging | not started | |
+| 9 | Standalone binary export + air-gapped packaging | **in progress** (9d unrun) | |
+| 9a | — the artifact, and the payload format | **done** | 2026-09-17 |
+| 9b | — the engine and its extensions inside the file | **done** | 2026-09-17 |
+| 9c | — cross-building (Linux from Windows) | **done** | 2026-09-17 |
+| 9d | — the CI matrix | **written, never run** | 2026-09-17 |
 | 10 | Rust-native connectors | not started | |
 | 11 | AI assistant + MCP server | not started | |
 | 12 | Benchmarks + parity audit | not started | |
@@ -757,6 +740,180 @@ Settled decisions 5–8.)
 - **The console compiles every pipeline on every listing.** That is what lets it say which ones
   will not run, which is the thing worth knowing before 3am — but it is real work per page
   refresh, and a workspace with many pipelines is where that would first be felt.
+
+### From Phase 9a
+
+- **A built artifact is not self-contained yet, and says so on every build.** It carries the
+  pipeline and nothing else, so it needs a DuckDB where it runs. 9b is what changes that. The
+  worse half is that the engine's not-found error tells you to run `scripts/fetch-duckdb.ps1`
+  — sensible in a checkout, nonsense on the server the artifact was shipped to. Whichever
+  phase makes the engine travel inside the file should fix that message at the same time.
+- **Baking is a copy and an append, not a compile.** The alternative — generate Rust, compile
+  it — would make exporting need a toolchain on the machine doing the exporting, which is fine
+  on this laptop and wrong for a Build Pipeline button in a shipped app. It also makes 9c
+  *choosing a different runner to copy* rather than cross-compiling on demand.
+- **Appending invalidates a code signature**, on both Windows and Linux. Nothing here is signed
+  yet, so nothing is broken yet; it is a 9d packaging constraint and is written down now
+  because it is the kind of thing found late and expensively.
+- **`etl build` refuses an incremental pipeline.** The runner has no state store, so a baked
+  incremental pipeline would re-read everything on every run and say nothing about it. Refusing
+  is not the permanent answer — giving the runner `etl-state` is — but a silent wrong answer is
+  the one outcome worth ruling out first.
+- **`etl build` refuses to bake a secret without `--allow-secrets`.** The baked document is the
+  *resolved* one, so a `${SECRET:...}` becomes plaintext inside the file and anyone holding the
+  file holds the credential. Confirmed by grepping a built artifact for the password, rather
+  than assumed: the warning is true, not decorative. `--info` on such an artifact says so, and
+  `Payload::carries_secrets` is recorded at build time so it can be said on a machine that has
+  no way to check.
+- **The run report's formatting moved into the engine** (`etl_duckdb_engine::report`), because
+  the runner needed the same lines. It returns lines rather than printing them, so the rules —
+  which timings are honest, why a zero rejected count is shown and a `None` is not — are
+  testable without a terminal. `etl run` and a built artifact now print byte-identical output
+  for the same pipeline, which was checked rather than assumed.
+- **The payload format has room for 9b already.** `Payload::files` and the blob region are
+  written, read and tested; 9a simply leaves them empty. That was deliberate — a second format
+  later is a migration, and an empty list now is free.
+
+### From Phase 9b
+
+- **An artifact is now self-contained, and about 38 MB.** That is the DuckDB CLI, and it is the
+  floor: a pipeline needing `excel` is about 60 MB, one needing `delta` would be about 94 MB.
+  `--no-embed` produces the small 9a-shaped artifact for anyone who would rather install DuckDB
+  on the target. Only the extensions a plan actually asked for are embedded, which is what
+  `Plan::extensions` has been for since Phase 4.
+- **Unpacking is cached, and the cache key needs the blob digest to be correct.** The key is
+  FNV-1a over the *header*, which is a few hundred bytes, because it is computed on every run.
+  The header alone distinguishes embedded files by **length**, not content — so two builds
+  whose engines happened to be the same size would have shared a directory, and the second
+  artifact would have silently run the first one's engine. `Payload::blob_digest` is computed
+  once at build time to close that, and `write_built` sets it rather than the caller, because a
+  digest that can be forgotten will be. A test pins the collision case.
+- **`rename` will not land on a non-empty directory**, on Windows or POSIX. An extraction
+  interrupted between creating the directory and writing its marker therefore wedged every
+  later run until somebody cleared the temp directory by hand. An incomplete directory — one
+  with no `.complete` marker — is now removed before the rename. Nothing reads a directory
+  without a marker, which is what makes that safe.
+- **Extraction publishes with a single `rename`, and needs no lock.** Work happens in a
+  `.partial-<pid>` directory and is renamed into place at the end. Two processes racing produce
+  one winner; the loser sees the destination is complete, discards its own copy and uses the
+  winner's. Compare the scheduler's lock file, which needs one because it is coordinating
+  *runs* rather than bytes.
+- **An artifact's header is data somebody else wrote.** An embedded file's name is refused
+  unless it is a plain filename — no separators, no `..`, no drive letters — and every name is
+  checked before any byte is written, so a bad one leaves nothing on disk. Refused rather than
+  sanitised.
+- **`INSTALL` is refused in `compile`**, so `validate`, `plan`, `run`, `build`, the console and
+  the scheduler all reject the same document. The scanner skips string literals, quoted
+  identifiers, dollar-quoted blocks and both comment forms, because a check that fires on
+  `SELECT 'preinstall'` is one people learn to route around. It is not a SQL parser and does
+  not need to be: the failure it can still have is refusing SQL that was harmless, never
+  passing SQL that was not.
+- **Building searches several roots for the vendored toolchain.** `--workspace` says where the
+  pipeline's *data* is, and the engine lives near the checkout; a pipeline reading a folder
+  somewhere else could not be built at all until the lookup tried the workspace, then the
+  current directory, then the directory holding `etl`.
+- **The platform is recorded even when no extension needs it.** It costs nothing and it is the
+  field 9c will use to say which of two platforms an artifact was built for.
+- **Still true from 9a:** appending invalidates a code signature, and the engine's
+  "run scripts/fetch-duckdb.ps1" message is still wrong advice on a server — though an
+  embedded artifact no longer reaches it.
+
+### From Phase 9c
+
+- **Cross-building is done by building natively inside a Linux container**, not by
+  cross-compiling on Windows. Inside the container the target *is* the host, so it is an
+  ordinary `cargo build` — no cross toolchain, no linker configuration, nothing installed
+  globally. `cross` and `cargo-zigbuild` were both considered and declined for the option that
+  adds nothing to the machine, which is the same call Settled decision 3 made for DuckDB.
+- **Only `linux_amd64` can be built this way, and the script says so.** macOS needs Apple's SDK,
+  which is not redistributable and has no licensed image; a second Windows platform would need
+  a Windows container. Both need a different approach, and `build-runner.ps1` refuses rather
+  than failing obscurely.
+- **A cross-target's extensions cannot be verified here, and that is a real gap.** The host's
+  are installed *through* DuckDB and then load-tested, which has caught every genuine mistake so
+  far. A Linux extension has to be downloaded from `extensions.duckdb.org` directly, because a
+  Windows DuckDB will only install Windows binaries — so it is trusted on the strength of its
+  URL. The artifact running on Linux is the only thing that can confirm it, which is exactly why
+  9c's acceptance is *running* a cross-built artifact rather than building one.
+- **A downloaded extension has no `.info` sidecar.** `INSTALL` writes one; a direct download
+  does not, and the build simply embeds fewer files. Whether DuckDB needs it to `LOAD` from an
+  extension directory is **not known** and is the most likely thing to go wrong when the Linux
+  artifact is first run. If it does, the fix is to synthesise the sidecar at download time.
+- **A cross-target's engine is vendored under `tools/duckdb/targets/<platform>/`**, not beside
+  the host's. The executor finds its engine by searching upward for `tools/duckdb/`, and a Linux
+  binary sitting where it looks would be found and then fail to run. Verified by fetching the
+  Linux engine and re-running the whole suite.
+- **Having two platforms vendored at once is what 9b could not do.** Its extension lookup took
+  "the only platform directory there" and errored on a second — a stub left deliberately, with a
+  comment saying 9c was where choosing belonged. It now addresses by target.
+- **The extension lookup was pinned to the wrong root for one commit.** It searched only the
+  workspace, not the roots the engine lookup walks, so building a pipeline whose data lived
+  outside the checkout failed with "no vendored extension directory". Caught by the same scratch
+  workspace that caught the engine version of this in 9b, which is an argument for keeping that
+  check in the loop rather than only building samples in place.
+
+### From Phase 9c, once it actually ran
+
+- **`${workspace}` and `${date}` are no longer resolved at build time**, and this was a real bug
+  rather than a cross-build inconvenience. `etl build` bakes a *resolved* document, and the
+  sample pipelines write `${workspace}/samples/data/orders.csv` — so every artifact built before
+  this carried `D:/workspace/ETL_Local_Tool/...` inside it. It went unnoticed through 9a and 9b
+  because every artifact happened to run on the machine that built it; a Linux container has no
+  `D:` drive and said so immediately. **A host artifact copied to another machine would have
+  failed the same way.**
+  The fix is `Resolver::defer_built_ins`: parameters, contexts and secrets are resolved at build
+  time, because the far side has nothing to resolve them with, and the two built-ins are left in
+  the document for the runner to answer against its own workspace and its own clock. `${date}`
+  is the worse of the two to have got wrong — a scheduled artifact writing to `out/2026-09-17/`
+  forever, because that is the day somebody built it.
+- **The base image sets the oldest Linux an artifact can run on.** `rust:1.96-slim` is trixie
+  (glibc 2.39) and produced a runner that would not start on Debian 12. Pinned to
+  `rust:1.96-slim-bookworm` (glibc 2.36), which is where DuckDB's own published Linux CLI runs —
+  so the artifact's floor is DuckDB's floor rather than one we added on top. Moving that image
+  forward silently raises the floor for everybody.
+- **A container build tree is only reusable by the image that made it.** Cargo caches compiled
+  *build scripts* and runs them next time, so switching images left a bookworm build dying with
+  "GLIBC_2.39 not found" while compiling `proc-macro2` — a confusing way to say "wrong
+  leftovers". The target directory is now keyed by image, and each keeps its cache.
+- **Windows cannot set the Unix executable bit**, so a cross-built artifact is written `rw-r--r--`.
+  Docker Desktop's bind mount presents it as executable, which is why the acceptance run works;
+  copying one to a Linux box over `scp` would need a `chmod +x` first. `make_executable` is
+  `#[cfg(unix)]` and a no-op on the building machine. Worth solving before anyone ships one.
+- **The `.info` sidecar question is still open.** `orders_checked` needs no extension, so the
+  acceptance run never loaded one. A cross-target's extensions are downloaded without the
+  `.info` file `INSTALL` would have written, and whether DuckDB needs it is still unverified —
+  it now just needs an extension-using pipeline cross-built and run, which is no longer blocked
+  on anything.
+
+### From Phase 9d
+
+- **`cargo test --workspace` does not build on Linux**, and this was news. `apps/desktop` is
+  Tauri and needs WebKitGTK, GTK, glib and `pkg-config` as *system* packages; the build dies in
+  `glib-sys` looking for `pkg-config`. Linux CI therefore runs
+  `--workspace --exclude etl-desktop`. Anyone running the suite on Linux by hand needs the same
+  flag or the same apt install.
+- **668 of the 678 tests pass on Linux**, verified in `rust:1.96-slim-bookworm` before writing a
+  workflow that claims it. The missing 10 are the desktop crate's. Nothing else needed changing
+  — no path-separator or CRLF failures, which the plan's "Windows-first" risk had warned about.
+- **Only one test needs an extension.** Parking `tools/duckdb/extensions` and re-running leaves
+  exactly one failure, `an_excel_round_trip_loads_the_extension_and_moves_the_rows`, naming
+  `excel`. CI fetches that one and skips ~250 MB per run. If a second test ever needs another,
+  the failure will say which.
+- **`fetch-duckdb.ps1` detected the host with `$env:PROCESSOR_ARCHITECTURE`**, which is
+  Windows-only — on a Linux runner it silently concluded `windows_amd64` and would have
+  downloaded the wrong engine. Now uses PowerShell Core's `$IsWindows`/`$IsLinux`/`$IsMacOS`,
+  with the 5.1 case (where those are absent) meaning Windows.
+- **GitHub's Windows runners cannot run Linux containers**, so 9c's Windows-to-Linux Docker path
+  has no runner. CI proves the output instead: a Linux artifact built on Linux and run in a bare
+  container. The container hop stays hand-verified, and the workflow says so at the top rather
+  than leaving somebody to wonder why it is missing.
+- **No toolchain action and no `rust-cache` action.** `rust-toolchain.toml` already pins 1.96.0
+  with rustfmt and clippy and rustup honours it, so a toolchain action would be a second place
+  to keep in step. Caching uses first-party `actions/cache`, which is the same dependency
+  posture the rest of the project takes.
+- **Windows will not execute a file with no extension**, so the baked artifact is named
+  `checked.exe` there and `checked` on Linux. Obvious in hindsight, and exactly the kind of
+  thing that fails on the first CI run rather than locally.
 
 ## Session log
 
@@ -1270,3 +1427,181 @@ Nothing under test changed. **615 Rust tests**, 114 frontend, clippy clean, fmt 
   name by looking it up in the workspace's own list, so there is no join for `../../etc/passwd`
   to escape through. Pinning "404" rather than "403" is what stops somebody later replacing the
   lookup with a join plus a check, which is the shape that has holes in it.
+
+### 2026-09-17 — Phase 9a: the artifact, and the payload format
+
+Phase 9 split into 9a–9d before starting. 9a is the part that makes the phase real: one file
+you can copy somewhere else and run.
+
+- `crates/runner/` — new crate, and the first with both a lib and a bin:
+  - `lib.rs` — the payload format. A trailer at the very end of the file (header length, blob
+    length, magic), found by reading backwards, because the end is the only anchor that does
+    not depend on knowing how long the executable is. 15 tests.
+  - `main.rs` — `etl-runner`: reads its own tail, compiles, runs, prints. `--info`,
+    `--workspace`, `--sql`, `--no-counts`, and the same four exit codes `etl` uses.
+- `crates/duckdb-engine/src/report.rs` — the run report's formatting, moved out of the CLI so
+  the runner could share it rather than grow a second copy. 8 tests.
+- `crates/cli/src/main.rs` — `etl build`, `incremental_nodes`, and `print_report` reduced to a
+  caller of the above.
+
+**640 Rust tests** (15 runner, 8 report, 2 CLI new). Gate green: fmt, clippy with `-D warnings`,
+frontend typecheck and build.
+
+#### What running it changed
+
+- **The runner printed less than `etl run` did, and it took building a real artifact to see
+  it.** The first version formatted stages itself and quietly dropped rejected counts, skipped
+  reasons and control-flow notes — so `orders_checked` reported `10 rows` where `etl run` says
+  `10 rows  2 rejected`. Two printers for one report is the drift Settled decision 5 exists to
+  prevent, so the formatting moved into the engine and both now call it. They print identical
+  lines for the same pipeline, timing aside.
+- **`--allow-secrets` was checked by grepping the built file for the password.** It is there,
+  in plaintext, exactly as the warning says. Worth doing once: a security warning nobody has
+  verified is a security warning that might be wrong in the reassuring direction.
+- **`orders_guarded` exercises the session transport, and was built and run on purpose.**
+  Control flow and per-stage policy take a different execution path, and "it worked on the
+  simple sample" would not have said anything about it.
+- **An exit code read through a pipe is `tail`'s, not the binary's.** Two of the first
+  measurements were meaningless because of it. Re-checked without the pipe: 0 for a good run,
+  1 for a missing engine, 1 for an unbaked runner, 2 for the incremental refusal.
+- **`git checkout` is not a safe undo for a scratch mutation** when the file also holds
+  uncommitted work — the same lesson as the previous session, arrived at from the other side.
+
+### 2026-09-17 — Phase 9b: the engine and its extensions inside the file
+
+The half of Phase 9 that makes the artifact worth shipping: it now carries DuckDB and whichever
+extensions its pipeline asked for, and runs where there is neither.
+
+- `crates/runner/src/lib.rs` — the payload format gains `Role`, `duckdbVersion`, `platform` and
+  `blobDigest`; `write_built` takes `&mut self` so it can record the digest itself.
+- `crates/runner/src/extract.rs` — new. Unpack to a keyed directory, once, published by a single
+  rename. 12 tests.
+- `crates/duckdb-engine/src/sql.rs` — `contains_install`, a scanner that skips literals,
+  identifiers, dollar-quoted blocks and comments. 14 tests.
+- `crates/duckdb-engine/src/plan/mod.rs` — `EngineError::RawInstall`, raised in `compile`.
+- `crates/cli/src/main.rs` — `gather_embedded`, `toolchain_roots`, `platform_directory`, and
+  `--no-embed`.
+
+**665 Rust tests** (26 runner, 276 engine). Gate green: fmt, clippy with `-D warnings`, frontend
+typecheck and build.
+
+#### What running it changed
+
+- **Two tests failed the first time, and both were real.** The cache key could not tell two
+  builds apart whose engines were the same length — the header records lengths, not content —
+  so the second artifact would have run the first one's engine. And `rename` refused to land on
+  the directory left by an interrupted extraction, wedging every later run. Both are written up
+  under *From Phase 9b*. The tests were written to catch exactly these and did.
+- **The first version of those tests was wrong in a way worth remembering.** They isolated
+  themselves by setting an environment variable for the cache location, which is
+  process-global: five tests failed, clobbering each other's value, and one read another's
+  directory. The fix was to remove the global rather than serialise the tests — `extract_into`
+  takes the base directory as an argument, and `extract` is the thin wrapper that reads the
+  environment. Where to unpack is an input; pretending otherwise was the bug.
+- **Building a pipeline whose data lived elsewhere could not find the engine at all.** The
+  lookup searched from `--workspace`, and the vendored toolchain is near the checkout. Found by
+  building a scratch pipeline in a temp directory, which is the first thing a real user would
+  do.
+- **`cargo fmt` collapsed three `\`-continued error messages onto one line and left the
+  indentation inside the string**, so the messages read "...the extensions          vendored
+  with it...". Caught by reading the output of the refusal rather than trusting the source.
+- **The extension path was written one directory too high** in the first draft —
+  `<root>/extensions` rather than `<root>/extensions/<version>/<platform>` — which DuckDB would
+  simply not have found. Caught while re-reading before building, not by a test.
+
+### 2026-09-17 — Phase 9c, part done: cross-building
+
+Chose Docker directly over `cross` and `cargo-zigbuild`, on the grounds that it installs nothing
+on the machine. Then found the Docker daemon is not running, so the phase stops one step short.
+
+- `crates/cli/src/main.rs` — `Target`, `host_platform`, `--target`, per-target runner and engine
+  lookup; the 9b "single platform directory" helper deleted.
+- `crates/cli/src/tests.rs` — 7 tests for the target model.
+- `scripts/fetch-duckdb.ps1` — `-Platform`; cross-targets to `tools/duckdb/targets/<platform>/`.
+- `scripts/fetch-duckdb-extensions.ps1` — `-Platform`; cross-targets downloaded and gunzipped
+  from `extensions.duckdb.org`, with an explicit note that they are not verified.
+- `scripts/build-runner.ps1` — new. Builds the runner inside `rust:1.96-slim`, caching the cargo
+  registry in a named volume. **Written and parsed, never executed.**
+
+**672 Rust tests.** Gate green: fmt, clippy with `-D warnings`.
+
+#### What running it changed
+
+- **The Bash heredoc had been silently eating one level of backslashes all session.** It turned
+  `tools\duckdb\targets` into `tools\duckdb<TAB>argets` in a generated PowerShell path, and it
+  explains the mangled paths in two earlier sessions as well. Anything containing a backslash
+  now goes through the Write tool instead. Worth knowing before debugging a path that looks fine
+  in the source.
+- **`$input` is an automatic variable in PowerShell.** Used it for a gzip stream, renamed it
+  before running rather than after.
+- **The Linux extension is a different size from the Windows one**, which is what made the
+  selection verifiable without ever running it: 11.9 MB against 22.7 MB for `excel`, and 61.9 MB
+  against 37 MB for the engine. Reading those back out of a built artifact is a real check, not
+  a proxy for one.
+- **Docker is installed and its daemon is not running.** Found by asking it to run `alpine`
+  before building anything around it, which is the right order.
+
+### 2026-09-17 — Phase 9c finished: a Linux artifact that runs
+
+Docker was started, and the three remaining commands took four attempts rather than one. Every
+failure was real, and the last one was a bug that had been in the project since 9a.
+
+- `scripts/build-runner.ps1` — pinned to `rust:1.96-slim-bookworm`; target directory keyed by
+  image.
+- `crates/duckdb-engine/src/params.rs` — `Resolver::defer_built_ins`.
+- `crates/duckdb-engine/src/params/tests.rs` — 6 tests for it.
+- `crates/cli/src/main.rs` — `etl build` resolves with built-ins deferred.
+- `crates/runner/src/main.rs` — the runner resolves them at startup, against its own workspace.
+
+**678 Rust tests.** Gate green: fmt, clippy with `-D warnings`, frontend typecheck and build.
+
+#### What running it changed
+
+Nothing in this section was predicted; all four came out of running the thing.
+
+1. **The runner would not start on Debian 12** — built against glibc 2.39 by a trixie image.
+2. **Switching to bookworm failed on stale build scripts** left by the trixie build.
+3. **The artifact looked for `D:/workspace/...`** — the `${workspace}` bug above, the one that
+   mattered.
+4. **A stale runner made the fix look like it had not worked.** `tools/runners/linux_amd64/` still
+   held the previous binary, so the first rebuild-and-test after the fix failed identically.
+   Worth remembering: there are now *two* artifacts to rebuild after a runner change, and the
+   embedded one does not rebuild itself.
+
+Also: three `str.replace` calls in a patch script had no assertion on them, and one of them
+silently did nothing — which is what made (4) hard to read. Every anchored replacement in a
+patch script gets an assert.
+
+### 2026-09-17 — Phase 9d: CI, written and unrun
+
+The project's first `.github/`. Four jobs, and the work was less in the YAML than in finding out
+what would actually be true on a Linux runner before claiming it.
+
+- `.github/workflows/gate.yml` — `gate` (windows + ubuntu), `artifact` (both),
+  `cross-build-script` (ubuntu), `frontend`.
+- `scripts/fetch-duckdb.ps1` — host detection that works off Windows.
+
+**678 tests on Windows, 668 on Linux.** Local gate green: fmt, clippy with `-D warnings`,
+frontend typecheck.
+
+#### What running it changed
+
+Everything here came from running things rather than from writing YAML.
+
+- **The Linux build failed on Tauri's system dependencies**, which is why the Linux job excludes
+  the desktop crate. Found by running `cargo test --workspace` in a container, which is the only
+  reason the workflow does not claim something false.
+- **Parking the extensions directory** showed exactly one test depends on one extension, which
+  turned a 250 MB per-run download into a 23 MB one.
+- **The host-detection bug in `fetch-duckdb.ps1`** would have had Linux CI download a Windows
+  binary and then fail confusingly. Found by reading the script while thinking about where it
+  would run, not by running it.
+- **The two `build-runner.ps1` assertions were checked by hand first** — the unbaked runner's
+  exit 1 and message, and the second-run no-op — because a CI assertion nobody has seen pass is
+  a guess.
+
+#### What is not done
+
+**CI has never run.** Phase 9's "done" is a green matrix, and this has only been reasoned about
+and locally rehearsed. The first real run should be expected to find something; that is what
+first CI runs do.

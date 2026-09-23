@@ -135,3 +135,117 @@ mod tests {
         assert_eq!(quote_literal(""), "''");
     }
 }
+
+#[cfg(test)]
+#[path = "sql/install_tests.rs"]
+mod install_tests;
+
+/// Whether this SQL contains an `INSTALL` statement.
+///
+/// `INSTALL` is the one statement this engine will not carry. Everything it
+/// needs is vendored and loaded with `LOAD`, so an `INSTALL` reaching DuckDB
+/// means one of two things: a run that quietly depends on reaching the
+/// internet, or — in an air-gapped or standalone artifact, where there is no
+/// internet to reach — a confusing failure a long way from its cause. Worse, it
+/// fetches and loads a native binary that nothing here vetted.
+///
+/// Generated SQL never contains one; this exists for the components that let
+/// somebody write their own, `xf.sql` above all. Checked at compile time, so
+/// `etl validate`, the console's listing, a run and a build all refuse the same
+/// document rather than only the path somebody happened to take.
+///
+/// # Why a scanner and not a search
+///
+/// `contains("INSTALL")` would refuse `SELECT 'preinstall' AS stage`, and a
+/// check that fires on a string literal is a check people learn to work around.
+/// So string literals, quoted identifiers, dollar-quoted blocks and both
+/// comment forms are skipped, and the keyword has to appear as a word.
+///
+/// This is deliberately *not* a SQL parser and does not need to be: it decides
+/// one question, and the failure it can still have is refusing SQL that was
+/// harmless, never passing SQL that was not.
+pub fn contains_install(sql: &str) -> bool {
+    let bytes = sql.as_bytes();
+    let mut at = 0;
+
+    while at < bytes.len() {
+        match bytes[at] {
+            // A single-quoted literal. Doubling is the escape, and it falls out
+            // of this loop naturally: the second quote simply opens a new one.
+            b'\'' => {
+                at += 1;
+                while at < bytes.len() && bytes[at] != b'\'' {
+                    at += 1;
+                }
+                at += 1;
+            }
+
+            b'"' => {
+                at += 1;
+                while at < bytes.len() && bytes[at] != b'"' {
+                    at += 1;
+                }
+                at += 1;
+            }
+
+            // `$tag$ ... $tag$`, which DuckDB accepts and which would otherwise
+            // be a way to hide anything at all.
+            b'$' => match dollar_tag(bytes, at) {
+                Some(tag_len) => {
+                    let tag = &bytes[at..at + tag_len];
+                    at += tag_len;
+
+                    while at < bytes.len() && !bytes[at..].starts_with(tag) {
+                        at += 1;
+                    }
+
+                    at += tag_len;
+                }
+                None => at += 1,
+            },
+
+            b'-' if bytes.get(at + 1) == Some(&b'-') => {
+                while at < bytes.len() && bytes[at] != b'\n' {
+                    at += 1;
+                }
+            }
+
+            b'/' if bytes.get(at + 1) == Some(&b'*') => {
+                at += 2;
+                while at < bytes.len() && !bytes[at..].starts_with(b"*/") {
+                    at += 1;
+                }
+                at += 2;
+            }
+
+            byte if byte.is_ascii_alphabetic() || byte == b'_' => {
+                let start = at;
+                while at < bytes.len() && (bytes[at].is_ascii_alphanumeric() || bytes[at] == b'_') {
+                    at += 1;
+                }
+
+                if sql[start..at].eq_ignore_ascii_case("install") {
+                    return true;
+                }
+            }
+
+            _ => at += 1,
+        }
+    }
+
+    false
+}
+
+/// The length of a dollar-quote tag starting at `at`, if there is one.
+///
+/// `$$` and `$tag$` open one; a bare `$` followed by anything else — including
+/// `$1`, which is a parameter — does not.
+fn dollar_tag(bytes: &[u8], at: usize) -> Option<usize> {
+    let mut end = at + 1;
+
+    while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
+        end += 1;
+    }
+
+    (bytes.get(end) == Some(&b'$')).then_some(end + 1 - at)
+}

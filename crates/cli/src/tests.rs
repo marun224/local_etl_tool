@@ -870,3 +870,137 @@ fn a_pipeline_with_no_watermarks_writes_no_state_file() {
     // watermarks is a file somebody later has to explain.
     assert!(!state::Store::at(&root).path_for("orders").exists());
 }
+
+// ---------------------------------------------------------------------------
+// What `etl build` refuses
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_document_with_no_incremental_source_has_nothing_to_refuse() {
+    let document = PipelineDoc::from_json(&one_source("orders")).expect("a document");
+
+    assert!(incremental_nodes(&document).is_empty());
+}
+
+#[test]
+fn every_incremental_node_is_named_so_the_refusal_can_say_which() {
+    let document = PipelineDoc::from_json(
+        r#"{
+  "nodes": [
+    { "id": "read_orders", "type": "source", "position": { "x": 0, "y": 0 },
+      "data": { "label": "Orders", "componentId": "src.file.csv",
+                "incremental": { "column": "order_ts" } } },
+    { "id": "read_events", "type": "source", "position": { "x": 0, "y": 0 },
+      "data": { "label": "Events", "componentId": "src.file.csv",
+                "incremental": { "column": "seen_at" } } },
+    { "id": "read_static", "type": "source", "position": { "x": 0, "y": 0 },
+      "data": { "label": "Customers", "componentId": "src.file.csv" } }
+  ],
+  "edges": []
+}"#,
+    )
+    .expect("a document");
+
+    // Named rather than counted: "two nodes load incrementally" leaves somebody
+    // hunting a canvas for which two.
+    assert_eq!(
+        incremental_nodes(&document),
+        vec!["read_orders", "read_events"]
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Which platform an artifact is built for
+// ---------------------------------------------------------------------------
+
+#[test]
+fn this_machine_is_its_own_target() {
+    let host = Target::host();
+
+    assert!(host.is_host);
+    // Named the way DuckDB names platforms, because the extension directory
+    // layout is DuckDB's and keys on exactly these strings.
+    assert_eq!(host.platform, Target::named(&host.platform).platform);
+    assert!(Target::named(&host.platform).is_host);
+}
+
+#[test]
+fn naming_another_platform_is_not_the_host() {
+    let other = if Target::host().platform == "linux_amd64" {
+        "windows_amd64"
+    } else {
+        "linux_amd64"
+    };
+
+    assert!(!Target::named(other).is_host);
+}
+
+#[test]
+fn only_a_windows_target_gets_an_exe_suffix() {
+    assert_eq!(Target::named("windows_amd64").exe_suffix(), ".exe");
+    assert_eq!(Target::named("windows_arm64").exe_suffix(), ".exe");
+    assert_eq!(Target::named("linux_amd64").exe_suffix(), "");
+    assert_eq!(Target::named("osx_arm64").exe_suffix(), "");
+}
+
+#[test]
+fn a_cross_targets_runner_and_engine_are_kept_out_of_the_hosts_path() {
+    let root = Path::new("/work");
+    let target = Target::named("linux_amd64");
+
+    assert_eq!(
+        target.runner_path(root),
+        Path::new("/work/tools/runners/linux_amd64/etl-runner")
+    );
+
+    // Under `targets/` rather than beside the host's copy: the executor finds
+    // its engine by searching upward for `tools/duckdb/`, and a Linux binary
+    // sitting where it looks would be found and then fail to run.
+    assert_eq!(
+        target.engine_path(root),
+        Path::new("/work/tools/duckdb/targets/linux_amd64/duckdb")
+    );
+}
+
+#[test]
+fn a_windows_targets_paths_carry_the_suffix() {
+    let root = Path::new("/work");
+    let target = Target::named("windows_amd64");
+
+    assert!(target.runner_path(root).ends_with("etl-runner.exe"));
+    assert!(target.engine_path(root).ends_with("duckdb.exe"));
+}
+
+#[test]
+fn the_host_platform_is_spelled_the_way_duckdb_spells_it() {
+    let platform = host_platform();
+
+    // Two parts, an OS and an architecture, both in DuckDB's vocabulary rather
+    // than Rust's: `osx` not `macos`, `amd64` not `x86_64`.
+    let (os, arch) = platform.split_once('_').expect("os_arch");
+
+    assert!(
+        ["windows", "linux", "osx"].contains(&os),
+        "unexpected os: {os}"
+    );
+    assert!(
+        ["amd64", "arm64"].contains(&arch),
+        "unexpected arch: {arch}"
+    );
+    assert_ne!(os, "macos", "DuckDB calls it osx");
+}
+
+#[test]
+fn the_toolchain_is_looked_for_in_the_workspace_first_and_beside_etl_last() {
+    let root = workspace("toolchain-roots");
+    let roots = toolchain_roots(&settings_for(&root));
+
+    // The workspace leads, because that is where somebody keeping their own
+    // vendored copy would put it.
+    assert_eq!(roots[0], root);
+    // No duplicates: the list is walked and every entry costs a stat.
+    let mut unique = roots.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(unique.len(), roots.len(), "duplicate roots: {roots:?}");
+}

@@ -1052,6 +1052,17 @@ fn build_stages(
                 (None, None)
             };
 
+            // LOAD-only, at the one place every stage's SQL passes through, so
+            // that `validate`, `plan`, `run`, `build`, the console and the
+            // scheduler all refuse the same document. Generated SQL never has an
+            // INSTALL in it; this is for the components that let somebody write
+            // their own.
+            if crate::sql::contains_install(&sql) {
+                return Err(EngineError::RawInstall {
+                    id: node.id.clone(),
+                });
+            }
+
             Ok(Stage {
                 node_id: node.id.clone(),
                 component_id,

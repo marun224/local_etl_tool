@@ -1,0 +1,272 @@
+# The standing gate, on both operating systems, plus the acceptance that makes
+# Phase 9 mean something: an artifact that runs where nothing is installed.
+#
+# Why two operating systems. The project was built Windows-first and the plan
+# names that as a risk -- path escaping, long paths and CRLF were expected to
+# bite. Linux here is not for completeness; it is the half that has never been
+# exercised, and it is where a cross-built artifact actually has to run.
+#
+# What this cannot do. Phase 9c's developer workflow is a Windows machine
+# producing a Linux artifact through Docker, and GitHub's Windows runners do not
+# run Linux containers -- so that exact path has no runner to run on. What CI
+# checks instead is the *output*: a Linux artifact is built on Linux and proved
+# to run in a bare container. The Windows job proves the same artifact story on
+# Windows. The one thing left uncovered is the container hop itself, which is a
+# developer convenience rather than a property of what ships.
+
+name: gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A second push to the same branch makes the first one's answer irrelevant.
+concurrency:
+  group: gate-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # A failing build should not also be a slow one.
+  CARGO_INCREMENTAL: 0
+  # The version scripts/fetch-duckdb.ps1 pins. Named here as well so the cache
+  # key moves when it does; they must not disagree.
+  DUCKDB_VERSION: v1.5.5
+
+jobs:
+  gate:
+    name: gate (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Both answers are wanted. A Windows failure must not hide the Linux
+      # result, which is the newer and less-trodden of the two.
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            etl: ./target/debug/etl.exe
+            # Everything, desktop app included: this is where the GUI is
+            # developed and where it has to keep working.
+            scope: --workspace
+          - os: ubuntu-latest
+            etl: ./target/debug/etl
+            # The headless product, which is what Linux is for. `apps/desktop`
+            # is Tauri, and building it here would need WebKitGTK, GTK, glib and
+            # pkg-config installed on every run -- an apt install of system
+            # libraries to compile a window that nothing on a server opens. The
+            # 10 desktop tests run on Windows; the CLI, runner, scheduler and
+            # console -- the things that actually run on Linux -- run on both.
+            scope: --workspace --exclude etl-desktop
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins 1.96.0 with rustfmt and clippy, and rustup
+      # honours it on the first cargo invocation. No toolchain action, because
+      # the file is already the single source of truth and a second one would
+      # be a second place to keep in step.
+      - name: Show the toolchain
+        run: rustup show && cargo --version && rustc --version
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-${{ matrix.os }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-${{ matrix.os }}-
+
+      # tools/ is git-ignored on purpose -- 284 MB of build inputs do not belong
+      # in a repo -- so CI fetches it. Cached on the pinned version, because the
+      # engine only moves when somebody decides it moves.
+      - name: Cache the vendored engine
+        id: duckdb-cache
+        uses: actions/cache@v4
+        with:
+          path: tools/duckdb
+          key: duckdb-${{ matrix.os }}-${{ env.DUCKDB_VERSION }}
+
+      # Only `excel`, not all nine. Exactly one test loads an extension
+      # (an_excel_round_trip_loads_the_extension_and_moves_the_rows) and it
+      # wants that one; fetching the rest would be ~250 MB per run to prove
+      # nothing. If a second test ever needs another, this line is where it goes
+      # and the failure will say which extension is missing.
+      - name: Fetch DuckDB and the one extension the tests load
+        if: steps.duckdb-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          ./scripts/fetch-duckdb.ps1 -Version $env:DUCKDB_VERSION
+          ./scripts/fetch-duckdb-extensions.ps1 -Version $env:DUCKDB_VERSION -Extensions excel
+
+      - name: Formatting
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy ${{ matrix.scope }} --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test ${{ matrix.scope }}
+
+      # The gate passing and the product working are different claims. These are
+      # the numbers the tracker records, checked rather than described.
+      - name: The registry is all there
+        shell: bash
+        run: |
+          count=$(${{ matrix.etl }} components | tail -1 | grep -oE '^[0-9]+')
+          echo "components: $count"
+          test "$count" = "54"
+
+      - name: The samples still print what they printed
+        shell: bash
+        run: |
+          set -e
+          ${{ matrix.etl }} run samples/pipelines/orders_enriched.json
+          ${{ matrix.etl }} run samples/pipelines/orders_checked.json
+          ${{ matrix.etl }} run samples/pipelines/orders_guarded.json
+
+  # Phase 9's "done": a self-contained artifact, built and then run somewhere it
+  # has no right to work.
+  artifact:
+    name: artifact (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    needs: gate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            etl: ./target/debug/etl.exe
+            # Windows will not execute a file with no extension, so the baked
+            # artifact has to be named like one.
+            baked: checked.exe
+          - os: ubuntu-latest
+            etl: ./target/debug/etl
+            baked: checked
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-${{ matrix.os }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-${{ matrix.os }}-
+
+      - name: Cache the vendored engine
+        id: duckdb-cache
+        uses: actions/cache@v4
+        with:
+          path: tools/duckdb
+          key: duckdb-${{ matrix.os }}-${{ env.DUCKDB_VERSION }}
+
+      - name: Fetch DuckDB
+        if: steps.duckdb-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: ./scripts/fetch-duckdb.ps1 -Version $env:DUCKDB_VERSION
+
+      - name: Build etl and the runner
+        run: cargo build -p etl-cli -p etl-runner
+
+      - name: Bake a pipeline into an executable
+        shell: bash
+        run: |
+          set -e
+          ${{ matrix.etl }} build samples/pipelines/orders_checked.json --out ${{ matrix.baked }}
+          ls -l ${{ matrix.baked }}
+
+      # The property the ${workspace} fix bought, and the one that was broken
+      # until Phase 9c ran a cross-built artifact: an artifact must not carry the
+      # build machine's directory layout inside it.
+      - name: It runs from somewhere else entirely
+        shell: bash
+        run: |
+          set -e
+          mkdir -p "$RUNNER_TEMP/elsewhere"
+          cp ${{ matrix.baked }} "$RUNNER_TEMP/elsewhere/"
+          cd "$RUNNER_TEMP/elsewhere"
+          ./${{ matrix.baked }} --workspace "$GITHUB_WORKSPACE" | tee out.txt
+          grep -q "Ran 6 stage(s)" out.txt
+
+      # The air-gap claim, and the only test that actually makes it. A base image
+      # with no Rust, no DuckDB and -- with --network none -- nothing to reach
+      # for. Linux only: Windows runners cannot run Linux containers, and a
+      # Windows container image with nothing in it is not a thing.
+      - name: It runs in a bare container with no network
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          set -e
+          docker run --rm --network none \
+            -v "$PWD:/w" -w /w \
+            debian:12-slim ./${{ matrix.baked }} | tee container.txt
+          grep -q "Ran 6 stage(s)" container.txt
+
+  # `scripts/build-runner.ps1` is the only part of the cross-build story that
+  # nothing else covers, and both of its failure modes -- the wrong base image,
+  # and a build tree left by a different one -- were found by hand rather than
+  # by a test. Running it here is redundant work (a Linux binary, built in a
+  # Linux container, on a Linux host) and that is fine: what is being checked is
+  # the script, not the binary.
+  cross-build-script:
+    name: build-runner.ps1
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build a runner through the script
+        shell: pwsh
+        run: ./scripts/build-runner.ps1 -Platform linux_amd64
+
+      - name: It produced a Linux executable
+        run: |
+          set -e
+          file tools/runners/linux_amd64/etl-runner
+          file tools/runners/linux_amd64/etl-runner | grep -q 'ELF 64-bit'
+          test -x tools/runners/linux_amd64/etl-runner
+
+      # The runner with nothing baked into it is a state, not a failure, and it
+      # says so. Exit 1 and that sentence are the contract.
+      - name: An unbaked runner says it has no pipeline
+        run: |
+          set +e
+          out=$(./tools/runners/linux_amd64/etl-runner 2>&1)
+          code=$?
+          set -e
+          echo "$out"
+          test "$code" = "1"
+          echo "$out" | grep -q "no pipeline is baked into this runner"
+
+      # Rerunning must be cheap and must not rebuild. This is the guard on the
+      # image-keyed target directory: a second run that rebuilt would mean the
+      # cache key is wrong.
+      - name: Running it again is a no-op
+        shell: pwsh
+        run: |
+          $out = ./scripts/build-runner.ps1 -Platform linux_amd64 | Out-String
+          Write-Host $out
+          if ($out -notmatch 'already present') { throw 'expected the second run to skip' }
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: npm --prefix frontend ci
+      - run: npm --prefix frontend run test
+      - run: npm --prefix frontend run typecheck
+      - run: npm --prefix frontend run build

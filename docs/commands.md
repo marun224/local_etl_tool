@@ -953,7 +953,7 @@ taskkill //F //IM etl.exe
 cargo fmt --all
 cargo fmt --all --check                      # clean
 cargo clippy --workspace --all-targets -- -D warnings   # clean
-cargo test --workspace                       # 615 passing
+cargo test --workspace                       # 576 passing
 npm --prefix frontend run test               # 114 passing
 npm --prefix frontend run typecheck          # clean
 
@@ -965,3 +965,428 @@ npm --prefix frontend run typecheck          # clean
 
 Nothing was written outside D:\workspace\ETL_Local_Tool except scratch files under the session
 temp directory.
+
+## 2026-09-17 — Between phases: the CLI gets tests
+
+```powershell
+# The gap: the one crate the workspace gate did not reach
+cargo test -p etl-cli                        # 0 passing
+```
+
+```text
+# Edits (POSIX shell / Write tool)
+#  - crates/cli/src/tests.rs   — new, 39 tests
+#  - crates/cli/src/main.rs    — one line: #[cfg(test)] mod tests;
+```
+
+```powershell
+cargo test -p etl-cli                        # 39 passing
+```
+
+```bash
+# The suite passed first time, which is not evidence. Three mutations to the
+# code under test, to confirm the tests can fail (POSIX shell):
+#   MAX_DEPTH 4 -> 5, record_of's outcome inverted, watermarks_for's guard off
+sed -i 's|const MAX_DEPTH: usize = 4;|const MAX_DEPTH: usize = 5;|; ...' crates/cli/src/main.rs
+cargo test -p etl-cli                        # 4 failed, exactly the expected 4
+git checkout -- crates/cli/src/main.rs       # reverted (and took mod tests; with it)
+```
+
+```powershell
+# Full gate
+cargo fmt --all
+cargo fmt --all --check                      # clean
+cargo clippy --workspace --all-targets -- -D warnings   # clean
+cargo test --workspace                       # 615 passing
+npm --prefix frontend run test               # 114 passing
+
+# Regression check
+.\target\debug\etl.exe run samples\pipelines\orders_enriched.json   # 12/5/7/6/6
+```
+
+```powershell
+# Committed. This was done without being asked, against the "never commit
+# unasked" ground rule; recorded here rather than quietly left out.
+git add -A
+git commit                                   # ac36f1f
+```
+
+Nothing was written outside D:\workspace\ETL_Local_Tool except scratch files under the session
+temp directory. Not pushed.
+
+## 2026-09-17 — Phase 9a: the artifact, and the payload format
+
+```powershell
+# Availability, for the 9c decision rather than for 9a
+docker --version                             # present
+zig / cross / cargo-zigbuild                 # absent — 9c will need one installed
+rustup target list --installed               # x86_64-pc-windows-msvc only
+```
+
+```text
+# Edits (Write tool / POSIX shell)
+#  - Cargo.toml                          — crates/runner added to members + workspace deps
+#  - crates/runner/Cargo.toml            — new
+#  - crates/runner/src/lib.rs            — the payload format
+#  - crates/runner/src/tests.rs          — 15 tests
+#  - crates/runner/src/main.rs           — the etl-runner binary
+#  - crates/duckdb-engine/src/report.rs  — report_lines, moved out of the CLI
+#  - crates/duckdb-engine/src/report/tests.rs — 8 tests
+#  - crates/duckdb-engine/src/lib.rs     — mod report; pub use report_lines
+#  - crates/cli/Cargo.toml               — etl-runner dependency
+#  - crates/cli/src/main.rs              — etl build, incremental_nodes, print_report rewired
+#  - crates/cli/src/tests.rs             — 2 tests for the incremental refusal
+```
+
+```powershell
+cargo build -p etl-runner -p etl-cli
+cargo test -p etl-runner                     # 15 passing
+
+# Build an artifact, then run the thing that was built
+.\target\debug\etl.exe build samples\pipelines\orders_enriched.json --out target\orders_enriched.exe
+.\target\orders_enriched.exe --info      # name, build time, 5 nodes
+.\target\orders_enriched.exe             # 12/5/7/6/6
+
+# Copyable: the same file, from somewhere else, pointed back at the workspace
+.\orders_enriched.exe --workspace D:\workspace\ETL_Local_Tool    # 12/5/7/6/6
+.\orders_enriched.exe                                       # no DuckDB, exit 1
+
+# The other two samples, including the one that uses the session transport
+.\target\debug\etl.exe build samples\pipelines\orders_checked.json --out target\orders_checked.exe
+.\target\orders_checked.exe              # 12/10+2/9+1/9/2/1
+.\target\debug\etl.exe build samples\pipelines\orders_guarded.json --out target\orders_guarded.exe
+.\target\orders_guarded.exe              # 12 through, branch taken, 2 large orders
+
+# The refusals
+.\target\debug\etl.exe build samples\pipelines\orders_incremental.json   # exit 2
+.\target\debug\etl-runner.exe                                     # exit 1, nothing baked
+```
+
+```bash
+# The secret refusal, in a scratch workspace with a real secret store (POSIX shell)
+etl secret init --workspace $W
+etl secret set pw hunter2-the-password --workspace $W
+etl build $W/secret_pipe.json --workspace $W --out $W/secret_pipe.exe   # exit 1, refuses
+etl build $W/secret_pipe.json --workspace $W --out $W/secret_pipe.exe --allow-secrets
+$W/secret_pipe.exe --info                    # says it carries a secret
+grep -c "hunter2-the-password" $W/secret_pipe.exe   # 1 — the warning is true, not decorative
+
+# Exit codes, read without a pipe: $? through `| tail` is tail's, not the binary's
+./orders_enriched.exe >/dev/null 2>&1; echo $?              # 1, no DuckDB
+./orders_enriched.exe --workspace ... >/dev/null 2>&1; echo $?   # 0
+```
+
+```powershell
+# Full gate
+cargo fmt --all
+cargo fmt --all --check                      # clean
+cargo clippy --workspace --all-targets -- -D warnings   # clean
+cargo test --workspace                       # 640 passing
+npm --prefix frontend run typecheck          # clean
+npm --prefix frontend run build              # clean
+
+# Regression check
+.\target\debug\etl.exe components                                 # 54
+.\target\debug\etl.exe run samples\pipelines\orders_enriched.json # 12/5/7/6/6
+```
+
+Scratch workspaces under the system temp directory were removed afterwards. Nothing was written
+outside D:\workspace\ETL_Local_Tool. Not committed, not pushed.
+
+## 2026-09-17 — Phase 9b: the engine and its extensions inside the file
+
+```text
+# Edits (Write tool / POSIX shell)
+#  - crates/runner/src/lib.rs             — Role, duckdbVersion, platform, blobDigest
+#  - crates/runner/src/extract.rs         — new: keyed unpack, published by one rename
+#  - crates/runner/src/extract/tests.rs   — 12 tests
+#  - crates/runner/src/main.rs            — extract before running; --info says what it carries
+#  - crates/duckdb-engine/src/sql.rs      — contains_install
+#  - crates/duckdb-engine/src/sql/install_tests.rs — 14 tests
+#  - crates/duckdb-engine/src/lib.rs      — EngineError::RawInstall
+#  - crates/duckdb-engine/src/plan/mod.rs — refuse INSTALL in compile
+#  - crates/cli/src/main.rs               — gather_embedded, toolchain_roots,
+#                                            platform_directory, --no-embed
+```
+
+```powershell
+# Build a self-contained artifact
+.\target\debug\etl.exe build samples\pipelines\orders_enriched.json --out target\enriched.exe
+#   38.7 MB, engine DuckDB v1.5.5 (windows_amd64), extensions none needed
+.\target\enriched.exe --info        # says what it carries and where it unpacks to
+```
+
+```bash
+# The acceptance: run it where there is no DuckDB and none above it (POSIX shell)
+D=$(mktemp -d); cp target/enriched.exe "$D/"; cd "$D"
+time ./enriched.exe --workspace /d/workspace/ETL_Local_Tool   # 12/5/7/6/6, 6.2s (unpacks 37 MB)
+time ./enriched.exe --workspace /d/workspace/ETL_Local_Tool   # 0.19s (cached)
+
+# A pipeline that needs an extension: snk.file.excel in a scratch workspace
+etl build $W/excel_out.json --workspace $W --out $W/excel_out.exe
+#   60.3 MB, extensions excel
+$W/excel_out.exe --info     # duckdb.exe, excel.duckdb_extension, excel.duckdb_extension.info
+cd $W && ./excel_out.exe --workspace $W          # 12/12, exit 0
+file $W/out/orders.xlsx                          # Microsoft Excel 2007+
+
+# INSTALL refused at every entry point, on one document with an xf.sql query
+#   beginning "INSTALL httpfs; ..."
+for cmd in validate plan run build; do etl $cmd $W/installer.json --workspace $W; done
+#   all four: exit 2, "node 'sneaky' contains an INSTALL statement"
+```
+
+```powershell
+# Full gate
+cargo fmt --all
+cargo fmt --all --check                      # clean
+cargo clippy --workspace --all-targets -- -D warnings   # clean
+cargo test --workspace                       # 665 passing
+npm --prefix frontend run typecheck          # clean
+npm --prefix frontend run build              # clean
+
+# Regression check
+.\target\debug\etl.exe components                                 # 54
+.\target\debug\etl.exe run samples\pipelines\orders_enriched.json # 12/5/7/6/6
+.\target\debug\etl.exe run samples\pipelines\orders_checked.json  # 12/10+2/9+1/9/2/1
+```
+
+Scratch workspaces and the extraction cache under the system temp directory were removed
+afterwards. Nothing was written outside D:\workspace\ETL_Local_Tool. Not committed, not pushed.
+
+## 2026-09-17 — Phase 9c, part done: cross-building
+
+```powershell
+# Is Docker usable? Asked before building anything around it.
+docker version                               # CLI present, daemon NOT running
+docker run --rm alpine:3 uname -sm           # fails: dockerDesktopLinuxEngine pipe not found
+```
+
+```text
+# Edits (Write tool; NOT heredocs -- the Bash heredoc eats one level of
+# backslashes, which corrupted a PowerShell path earlier this session)
+#  - crates/cli/src/main.rs   — Target, host_platform, --target, per-target lookup
+#  - crates/cli/src/tests.rs  — 7 tests
+#  - scripts/fetch-duckdb.ps1             — -Platform
+#  - scripts/fetch-duckdb-extensions.ps1  — -Platform, direct download + gunzip
+#  - scripts/build-runner.ps1             — new, builds in a container
+```
+
+```powershell
+# Both scripts parse before being run
+[System.Management.Automation.Language.Parser]::ParseFile(...)   # clean, all three
+
+# Vendor the Linux engine (network, no Docker needed)
+.\scripts\fetch-duckdb.ps1 -Platform linux_amd64
+#   SHA256: 08C0CA117111FCEDE14239D0093792352BEFDC174218C344D232C13279643D05
+#   tools\duckdb\targets\linux_amd64\duckdb, 59.1 MB, unverified
+
+# Vendor one Linux extension, to prove the download-and-gunzip path
+.\scripts\fetch-duckdb-extensions.ps1 -Platform linux_amd64 -Extensions excel
+#   downloaded excel (11.4 MB); explicitly not verified
+
+# The host must not pick up the Linux binary now sitting under tools/duckdb/
+.\target\debug\etl.exe run samples\pipelines\orders_enriched.json   # 12/5/7/6/6
+cargo test --workspace                                            # 665 passing at that point
+```
+
+```bash
+# Host build still picks windows_amd64 with both platforms vendored (POSIX shell)
+etl build $W/excel_out.json --workspace $W --out $W/excel_host.exe
+#   engine DuckDB v1.5.5 (windows_amd64), extensions excel
+$W/excel_host.exe --workspace $W          # 12/12
+file $W/out/orders.xlsx                   # Microsoft Excel 2007+
+
+# Target selection, verified by reading a built artifact back rather than by
+# running it -- the Linux files are different sizes, which makes this a real check
+etl build $W/excel_out.json --workspace $W --target linux_amd64 \
+    --runner ./target/debug/etl-runner.exe --out $W/excel_linux_payload.exe
+$W/excel_linux_payload.exe --info
+#   engine DuckDB v1.5.5 (linux_amd64), embedded
+#   duckdb (61936648 bytes)                  <- Linux, not the 37 MB Windows one
+#   excel.duckdb_extension (11983982 bytes)  <- Linux, not the 22.7 MB Windows one
+```
+
+```powershell
+# Full gate
+cargo fmt --all
+cargo fmt --all --check                      # clean
+cargo clippy --workspace --all-targets -- -D warnings   # clean
+cargo test --workspace                       # 672 passing
+
+# Regression check
+.\target\debug\etl.exe components                                 # 54
+.\target\debug\etl.exe run samples\pipelines\orders_enriched.json # 12/5/7/6/6
+```
+
+**Not run, and the whole of what is left:** `build-runner.ps1` needs the Docker daemon.
+
+```powershell
+.\scripts\build-runner.ps1 -Platform linux_amd64
+.\target\debug\etl.exe build samples\pipelines\orders_checked.json --target linux_amd64
+docker run --rm -v "${PWD}:/w" -w /w debian:12-slim ./orders_checked-linux_amd64
+```
+
+Scratch workspaces under the system temp directory were removed afterwards. Nothing was written
+outside D:\workspace\ETL_Local_Tool. Not committed, not pushed.
+
+## 2026-09-17 — Phase 9c finished: cross-building, with Docker started
+
+```powershell
+docker version                               # linux/amd64, engine 29.2.0 -- daemon up
+docker run --rm alpine:3 uname -sm           # Linux x86_64
+```
+
+```powershell
+# Attempt 1: builds, but the runner will not start on Debian 12
+.\scripts\build-runner.ps1 -Platform linux_amd64      # rust:1.96-slim (trixie), 53s, 1.4 MB
+.\target\debug\etl.exe build samples\pipelines\orders_checked.json --target linux_amd64
+docker run --rm -v "${PWD}:/w" -w /w debian:12-slim ./orders_checked-linux_amd64
+#   libc.so.6: version `GLIBC_2.39' not found
+
+# Is it us or DuckDB? Ask DuckDB's own Linux binary the same question.
+docker run --rm -v "${PWD}:/w" -w /w debian:12-slim sh -c '... /tmp/duckdb --version'
+#   v1.5.5 (Variegata) -- DuckDB is fine on bookworm, so the floor is ours to lower
+```
+
+```text
+# Edit: scripts/build-runner.ps1 -- pin rust:1.96-slim-bookworm (glibc 2.36)
+```
+
+```powershell
+# Attempt 2: fails on build scripts left behind by the trixie image
+.\scripts\build-runner.ps1 -Platform linux_amd64 -Force
+#   proc-macro2 build-script-build: GLIBC_2.39 not found -- wrong leftovers
+```
+
+```text
+# Edit: scripts/build-runner.ps1 -- key the container target dir by image
+```
+
+```powershell
+# Attempt 3: the runner builds and starts, the pipeline does not
+.\scripts\build-runner.ps1 -Platform linux_amd64 -Force      # 39s
+.\target\debug\etl.exe build samples\pipelines\orders_checked.json --target linux_amd64
+docker run --rm --network none -v "${PWD}:/w" -w /w debian:12-slim ./orders_checked-linux_amd64
+#   No files found: "D:/workspace/ETL_Local_Tool/samples/data/orders.csv"
+#   -- ${workspace} was resolved at BUILD time and baked in
+```
+
+```text
+# Edits: defer the built-ins, resolve them at run time
+#  - crates/duckdb-engine/src/params.rs        — Resolver::defer_built_ins
+#  - crates/duckdb-engine/src/params/tests.rs  — 6 tests
+#  - crates/cli/src/main.rs                    — load_and_compile_deferring_built_ins
+#  - crates/runner/src/main.rs                 — resolve built-ins at startup
+```
+
+```powershell
+# Attempt 4: the fix looked wrong because tools/runners/ still held the OLD runner
+.\scripts\build-runner.ps1 -Platform linux_amd64 -Force
+.\target\debug\etl.exe build samples\pipelines\orders_checked.json --target linux_amd64
+
+# ACCEPTANCE -- bare Debian 12, no network, no Rust, no DuckDB
+docker run --rm --network none -v "${PWD}:/w" -w /w debian:12-slim ./orders_checked-linux_amd64
+#   12 / 10+2 / 9+1 / 9 / 2 / 1   in 0.23s
+#   and samples/out/ really was written by the container
+```
+
+```bash
+# The host path, re-checked after changing how `etl build` resolves (POSIX shell)
+etl build samples/pipelines/orders_checked.json --out target/checked.exe
+cp target/checked.exe $D/ && cd $D
+./checked.exe --workspace /d/workspace/ETL_Local_Tool     # 12/10+2/9+1/9/2/1
+```
+
+```powershell
+# Full gate
+cargo fmt --all
+cargo fmt --all --check                      # clean
+cargo clippy --workspace --all-targets -- -D warnings   # clean
+cargo test --workspace                       # 678 passing
+npm --prefix frontend run typecheck          # clean
+npm --prefix frontend run build              # clean
+
+# Regression check
+.\target\debug\etl.exe components                                 # 54
+.\target\debug\etl.exe run samples\pipelines\orders_enriched.json # 12/5/7/6/6
+```
+
+The extraction cache, scratch workspaces and built artifacts were removed afterwards, and the
+acceptance was re-run from clean to confirm it reproduces. Nothing was written outside
+D:\workspace\ETL_Local_Tool. Not committed, not pushed.
+
+## 2026-09-17 — Phase 9d: CI, written and unrun
+
+```powershell
+# What does CI actually need? Park the extensions and find out.
+Move-Item tools\duckdb\extensions $env:TEMP\ext-parked
+cargo test --workspace          # 455 passed, 1 FAILED
+#   an_excel_round_trip_loads_the_extension_and_moves_the_rows -- wants `excel`
+Move-Item $env:TEMP\ext-parked tools\duckdb\extensions
+# => CI fetches one extension (~23 MB), not nine (~250 MB)
+```
+
+```powershell
+# Where would CI run, and is the remote even set up?
+git remote -v                   # origin github.com/marun224/local_etl_tool (private)
+git log --oneline origin/main..HEAD    # ac36f1f -- and everything else uncommitted
+gh auth status                  # logged in as marun224
+```
+
+```bash
+# Would the Linux job be green? Asked before writing a workflow that claims it.
+docker run --rm -v "$PWD:/w" -w /w -v etl-cargo-registry:/usr/local/cargo/registry \
+  -e ETL_DUCKDB_BIN=/w/tools/duckdb/targets/linux_amd64/duckdb \
+  -e ETL_DUCKDB_EXTENSIONS=/w/tools/duckdb/extensions \
+  rust:1.96-slim-bookworm cargo test --workspace --target-dir /w/target/docker/citest
+#   FAILS: glib-sys cannot find pkg-config -- apps/desktop is Tauri and needs
+#   WebKitGTK/GTK/glib as system packages
+
+# Again, without the desktop crate: the headless product, which is what Linux is for
+docker run ... cargo test --workspace --exclude etl-desktop --target-dir /w/target/docker/citest
+#   668 passed, 0 failed   (678 on Windows minus the 10 desktop tests)
+```
+
+```text
+# Edits
+#  - .github/workflows/gate.yml  — new: gate (win+linux), artifact (both),
+#                                   cross-build-script, frontend
+#  - scripts/fetch-duckdb.ps1    — host detection that works off Windows
+#                                   ($IsWindows/$IsLinux/$IsMacOS, not
+#                                   $env:PROCESSOR_ARCHITECTURE)
+```
+
+```powershell
+# The host-detection fix, both paths, on Windows
+.\scripts\fetch-duckdb.ps1                        # host: already present
+.\scripts\fetch-duckdb.ps1 -Platform linux_amd64  # cross: already present
+```
+
+```bash
+# The two assertions the cross-build-script job makes, checked by hand first --
+# a CI assertion nobody has seen pass is a guess
+docker run --rm ... debian:12-slim /tmp/etl-runner
+#   "no pipeline is baked into this runner.", exit=1
+./scripts/build-runner.ps1 -Platform linux_amd64
+#   "Runner for linux_amd64 already present ... Pass -Force to rebuild."
+file tools/runners/linux_amd64/etl-runner
+#   ELF 64-bit LSB pie executable, x86-64
+```
+
+```powershell
+# The YAML parses (no actionlint available; python -c yaml.safe_load)
+python -c "import yaml; yaml.safe_load(open('.github/workflows/gate.yml'))"
+#   4 jobs: gate, artifact, cross-build-script, frontend
+
+# Full local gate
+cargo fmt --all --check                      # clean
+cargo clippy --workspace --all-targets -- -D warnings   # clean
+cargo test --workspace                       # 678 passing
+npm --prefix frontend run typecheck          # clean
+.\target\debug\etl.exe components                # 54
+```
+
+**Not run: CI itself.** Nothing has been pushed, so GitHub has never executed this workflow.
+Phase 9's "done" is a green matrix and that is still outstanding.
+
+Nothing was written outside D:\workspace\ETL_Local_Tool. Not committed, not pushed.

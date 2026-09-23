@@ -777,3 +777,97 @@ fn todays_date_is_shaped_like_a_date() {
     assert!(looks_like_a_date(&today), "{today}");
     assert_eq!(today.len(), 10, "{today}");
 }
+
+// ---------------------------------------------------------------------------
+// Deferring the built-ins, for `etl build`
+// ---------------------------------------------------------------------------
+//
+// `${workspace}` means "wherever this runs" and `${date}` means "the day it
+// runs". An artifact is resolved on one machine and run on another, repeatedly,
+// so substituting either at build time freezes the build machine's directory
+// layout and the build date into it. Found by cross-building for Linux and
+// watching it go looking for `D:/workspace/...`.
+
+#[test]
+fn a_deferred_built_in_survives_resolution_unchanged() {
+    let document = doc(json!({ "path": "${workspace}/data/orders.csv" }));
+
+    let deferred = path_of(&document, &resolver().defer_built_ins());
+
+    assert_eq!(deferred, "${workspace}/data/orders.csv");
+}
+
+#[test]
+fn the_date_built_in_is_deferred_too() {
+    // The worse of the two to get wrong: a scheduled artifact writing to
+    // `out/2026-09-17/` forever, because that is the day somebody built it.
+    let document = doc(json!({ "path": "out/${date}/orders.parquet" }));
+
+    assert_eq!(
+        path_of(&document, &resolver().defer_built_ins()),
+        "out/${date}/orders.parquet"
+    );
+}
+
+#[test]
+fn deferring_changes_nothing_else() {
+    // Parameters, contexts and secrets *must* still be resolved at build time:
+    // the machine that runs the artifact has none of what would resolve them.
+    let document = document(
+        vec![node(
+            "n",
+            "src.file.csv",
+            json!({ "path": "${workspace}/${since}/orders.csv" }),
+        )],
+        vec![],
+    );
+
+    let resolver = resolver().defer_built_ins().bind("since", "2026-03-01");
+
+    assert_eq!(
+        path_of(&document, &resolver),
+        "${workspace}/2026-03-01/orders.csv"
+    );
+}
+
+#[test]
+fn a_deferred_document_resolves_normally_on_the_second_pass() {
+    // The property the runner depends on: build resolves with deferral, the
+    // artifact carries the reference, and the runner resolves it again against
+    // its own workspace. Two passes, and the second one finishes the job.
+    let document = doc(json!({ "path": "${workspace}/data/orders.csv" }));
+
+    let built = resolve(&document, &resolver().defer_built_ins())
+        .expect("resolves")
+        .document;
+
+    let on_the_far_side = Resolver::new("/srv/etl");
+
+    assert_eq!(
+        path_of(&built, &on_the_far_side),
+        "/srv/etl/data/orders.csv"
+    );
+}
+
+#[test]
+fn deferring_is_off_unless_asked_for() {
+    // `etl run` resolves built-ins immediately, which is right: it is running
+    // the thing here and now.
+    let document = doc(json!({ "path": "${workspace}/data/orders.csv" }));
+
+    assert_eq!(path_of(&document, &resolver()), "D:/work/data/orders.csv");
+}
+
+#[test]
+fn resolving_a_deferred_document_twice_is_stable() {
+    // The interpolator makes a single pass and never rescans what it wrote, so
+    // a reference that resolves to itself terminates rather than looping. This
+    // is what makes substituting `${workspace}` with `${workspace}` safe.
+    let document = doc(json!({ "path": "${workspace}/data/orders.csv" }));
+    let resolver = resolver().defer_built_ins();
+
+    let once = resolve(&document, &resolver).expect("resolves").document;
+    let twice = resolve(&once, &resolver).expect("resolves").document;
+
+    assert_eq!(path_of(&once, &resolver), path_of(&twice, &resolver));
+}

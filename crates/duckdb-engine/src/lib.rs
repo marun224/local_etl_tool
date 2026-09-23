@@ -15,6 +15,7 @@ pub mod exec;
 pub mod lineage;
 pub mod params;
 pub mod plan;
+pub mod report;
 pub mod session;
 pub mod sql;
 
@@ -32,6 +33,7 @@ pub use plan::{
     compile, compile_with, reject_relation, CompileOptions, CountProbe, Input, Plan, Stage,
     StageIncremental, StageKind, Warning, REJECT_SUFFIX,
 };
+pub use report::report_lines;
 pub use session::{Answer, Session, SessionError};
 pub use sql::{quote_identifier, quote_literal, quote_path};
 
@@ -87,6 +89,11 @@ pub enum EngineError {
     #[error("node '{id}' uses component '{component_id}', which is not implemented yet")]
     UnsupportedComponent { id: String, component_id: String },
 
+    #[error(
+        "node '{id}' contains an INSTALL statement. This engine loads only the extensions vendored with it, so an INSTALL would reach for the network — and in a standalone artifact there is none to reach. Declare the extension on the component instead."
+    )]
+    RawInstall { id: String },
+
     #[error("node '{id}' ({component_id}) takes {expected} input(s) but {actual} are wired to it")]
     WrongInputCount {
         id: String,
@@ -125,6 +132,7 @@ impl EngineError {
             | EngineError::MissingProperty { id, .. }
             | EngineError::InvalidProperty { id, .. }
             | EngineError::UnsupportedComponent { id, .. }
+            | EngineError::RawInstall { id }
             | EngineError::WrongInputCount { id, .. }
             | EngineError::UnknownPort { id, .. }
             | EngineError::ReservedNodeId { id, .. } => Some(id),
