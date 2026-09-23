@@ -1390,3 +1390,174 @@ npm --prefix frontend run typecheck          # clean
 Phase 9's "done" is a green matrix and that is still outstanding.
 
 Nothing was written outside D:\workspace\ETL_Local_Tool. Not committed, not pushed.
+
+## 2026-09-23 — Resume on a new machine (E:\workspace_09212026)
+
+Not a phase. Analysed both repos in the workspace, found the tracker out of date (Phase 9 was
+already committed and pushed as `ad7fc51`), and brought it level. **No git writes** — the user
+now handles all commits.
+
+```powershell
+# State of both repos (read-only git)
+git log --oneline -25
+git remote -v
+git status -sb
+git diff --stat
+git diff docs/workflow_instructions_file.md
+git log -1 --format='%H %ad %s' origin/main
+git show --stat ad7fc51
+git log origin/main..main --oneline          # empty: nothing to push
+git -C E:\workspace_09212026\ETL_Local_WebApp status -sb
+git -C E:\workspace_09212026\ETL_Local_WebApp log --oneline -8
+git -C E:\workspace_09212026\ETL_Local_WebApp diff --stat
+
+# CI status
+gh run list --limit 5                        # FAILED: gh not installed
+winget install --id GitHub.cli --exact --silent --accept-package-agreements --accept-source-agreements
+#   GitHub CLI 2.101.0 installed (global install; approved by the user)
+& "$env:ProgramFiles\GitHub CLI\gh.exe" auth status
+#   "You are not logged into any GitHub hosts" -- needs `gh auth login`, interactively
+
+# The Rust gate
+cargo fmt --all --check                      # FAILED: cargo not recognised
+cargo clippy --workspace --all-targets -- -D warnings   # FAILED: same
+cargo test --workspace                       # FAILED: same
+#   No Rust toolchain on this machine at all: no ~/.cargo, no cargo.exe under
+#   C:\Users, C:\Program Files, D:\ or E:\ (searched 5 levels deep)
+Get-Command cargo,rustup,node,npm,git,docker,gh,winget,python
+
+# Frontend gate
+npm --prefix frontend run test               # 114 passing
+npm --prefix frontend run typecheck          # clean
+npm --prefix frontend run build              # clean
+
+# Smoke test with the prebuilt etl.exe (built 2026-09-17 on the old machine)
+.\target\debug\etl.exe components                                 # 54
+.\target\debug\etl.exe run samples\pipelines\orders_enriched.json # 12/5/7/6/6
+.\target\debug\etl.exe run samples\pipelines\orders_checked.json  # 12/10+2/9+1/9/2/1
+.\target\debug\etl.exe run samples\pipelines\orders_guarded.json  # 12 through, branch taken
+
+# Two empty, untracked stray directories removed (approved by the user)
+Remove-Item -LiteralPath '${workspace}' -Recurse -Force    # only empty samples\out inside
+Remove-Item -LiteralPath 'D<U+F03A>' -Recurse -Force       # D:\workspace\ETL_Local_Tool\samples\out,
+#                                                            all empty; first attempt by the
+#                                                            name 'D' FAILED: path not found
+
+# Checking exercise details against the binary before writing assignments.md
+.\target\debug\etl.exe --help
+.\target\debug\etl.exe build --help
+.\target\debug\etl.exe runs --help
+.\target\debug\etl.exe plan <scratchpad>\pol.json          # no transport line in CLI output
+.\target\debug\etl.exe run <scratchpad>\pol.json --no-counts # sink timing appears: session
+```
+
+```text
+# Edits (Write/Edit tools, plus python for the tracker splice)
+#  - .gitignore                  — *.code-workspace
+#  - docs/task_tracker.md        — pause note rewritten (pushed, new machine, no Rust,
+#                                  gh not logged in, user owns commits); Where things stand;
+#                                  Phase 9/9d rows; Environment repo path and toolchain
+#  - docs/learnings.md           — new; Phases 0-9 back-filled from the tracker
+#  - docs/assignments.md         — new; 17 exercises, all but one runnable without Rust
+# A python heredoc edit to assignments.md FAILED on a mangled backslash -- the Phase 9c
+# heredoc lesson again; redone with the Edit tool.
+```
+
+Noticed, not touched: `docs/ETL_Local_Tool.code-workspace` and `docs/workflow_instructions_file.md`
+are **staged** in the index (not by Claude). A staged file is not affected by `.gitignore`.
+
+Nothing was written outside E:\workspace_09212026\ETL_Local_Tool except the `gh` install and
+Claude's scratchpad. Not committed, not pushed.
+
+## 2026-09-23 — The first CI run, read and answered
+
+```powershell
+# Rust toolchain (global install; approved by the user)
+winget install --id Rustlang.Rustup --exact --silent --accept-package-agreements --accept-source-agreements
+#   rustup 1.29.1 installed
+& "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" ...
+#   FAILED: vswhere not found -- no Visual Studio or Build Tools on this machine
+rustup show active-toolchain     # triggers the 1.96.0 download from rust-toolchain.toml;
+#                                  over 10 minutes, moved to the background, still going
+docker info                      # FAILED: exit 255, daemon not running
+
+# The linker question, answered with rustup's own `stable` toolchain in the scratchpad
+cargo run --manifest-path <scratchpad>\hello\Cargo.toml
+#   FAILED: "the msvc targets depend on the msvc linker but `link.exe` was not found"
+
+# CI (the user ran `gh auth login` first, as marun224)
+gh run list --limit 5
+#   35809441173  failure  gate  main  push  8m52s
+gh run view 35809441173
+gh run view 35809441173 --log-failed
+#   gate (windows)      tests passed; "The registry is all there": ./target/debug/etl.exe: No such file
+#   gate (ubuntu)       fetch-duckdb-extensions.ps1:74 "No DuckDB CLI at .../duckdb.exe"
+#   build-runner.ps1    "already present" printed, then "expected the second run to skip"
+#   frontend            passed
+#   artifact (both)     skipped: needs gate
+
+# Reproducing the no-op failure locally, before fixing it
+$out = ./scripts/build-runner.ps1 -Platform linux_amd64 | Out-String       # length 0: the bug
+$out = ./scripts/build-runner.ps1 -Platform linux_amd64 6>&1 | Out-String  # length 151: the fix
+
+# Checking the fixes
+./scripts/fetch-duckdb-extensions.ps1 -Extensions excel   # Windows: present, loads, exit 0
+python -c "import yaml; ..."                              # FAILED: no PyYAML on this machine
+node -e "require('yaml')..."                              # with NODE_PATH pointed at the WebApp's
+#                                                           node_modules: parses, 4 jobs
+```
+
+```bash
+# The registry and samples steps, exactly as the workflow runs them
+count=$(./target/debug/etl.exe components | tail -1 | grep -oE '^[0-9]+')   # 54
+./target/debug/etl.exe run samples/pipelines/orders_{enriched,checked,guarded}.json  # all ok
+
+# The Windows artifact job, rehearsed (it has never run in CI)
+./target/debug/etl.exe build samples/pipelines/orders_checked.json --out samples/out/ci/checked.exe
+cp samples/out/ci/checked.exe "$TEMP/etl_elsewhere/" && cd "$TEMP/etl_elsewhere"
+./checked.exe --workspace "E:/workspace_09212026/ETL_Local_Tool"   # Ran 6 stage(s)
+```
+
+```text
+# Edits
+#  - .github/workflows/gate.yml           — `cargo build -p etl-cli` before the registry step;
+#                                            `6>&1` on the no-op check
+#  - scripts/fetch-duckdb-extensions.ps1  — host binary is duckdb.exe only on Windows
+#  - docs/task_tracker.md                 — pause note: the CI result and the fixes; Where
+#                                            things stand; phase rows; "From Phase 9d, once CI
+#                                            actually ran"
+```
+
+Not committed, not pushed. Nothing written outside the project except the rustup install
+(`~/.cargo`, `~/.rustup`) and Claude's scratchpad.
+
+## 2026-09-23 — Toolchain installed; the local gate on the new machine
+
+```powershell
+# Rust 1.96.0 (rustup's background install finished: cargo, clippy, rust-docs,
+# rust-std, rustc, rustfmt)
+rustc --version                  # 1.96.0 (ac68faa20 2026-05-25)
+cargo fmt --all --check          # clean, before the linker existed
+
+# MSVC linker (global install; approved by the user)
+winget install --id Microsoft.VisualStudio.2022.BuildTools --exact --silent `
+  --accept-package-agreements --accept-source-agreements `
+  --override "--quiet --wait --norestart --nocache --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+#   exit 0, "Restart your PC to finish installation" -- not restarted; builds work
+vswhere -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64
+#   Visual Studio Build Tools 2022, 17.14.37710.0; Windows SDK 10.0.26100.0
+
+# The gate
+cargo clippy --workspace --all-targets -- -D warnings   # clean, 4m26s cold
+cargo test --workspace                                  # 678 passing, 8m39s total
+
+# The CI fix's step, as written
+cargo build -p etl-cli           # etl.exe 2026-09-17 09:50 -> 2026-09-23 12:51
+.\target\debug\etl.exe components                     # 54
+.\target\debug\etl.exe run samples\pipelines\orders_enriched.json   # 12/5/7/6/6
+.\target\debug\etl.exe run samples\pipelines\orders_checked.json    # exit 0
+.\target\debug\etl.exe run samples\pipelines\orders_guarded.json    # exit 0
+```
+
+Not committed, not pushed. Written outside the project: the Build Tools install and
+`~/.cargo` registry downloads.

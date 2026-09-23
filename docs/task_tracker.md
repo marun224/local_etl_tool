@@ -3,24 +3,73 @@
 **State only.** Design lives in [PLAN_duckle_parity.md](PLAN_duckle_parity.md). Read this file
 first when picking the project back up.
 
-> ## ⏸ Paused 2026-09-17, after Phase 9d — **CI is written; it has never run**
+> ## ▶ Resumed 2026-09-23 — CI's first run **failed**; three fixes written, **not yet pushed**
 >
-> Stopped at a clean boundary — local gate green, nothing mid-edit. **Phases 0–8 are done and
-> 9a–9d are written.** `.github/workflows/gate.yml` is the project's first CI.
+> **Phase 9 is committed and pushed** as `ad7fc51` (2026-09-23 07:42 +0530), and `gate.yml`
+> ran on it: [run 35809441173](https://github.com/marun224/local_etl_tool/actions/runs/35809441173),
+> **failure**. Read on 2026-09-23. **The Rust itself passed**: on Windows, fmt, clippy and all the
+> tests were green. What failed was the workflow and one script, in three places:
 >
-> **9d is not proven, and cannot be from here.** Phase 9's "done" is *cross-build matrix green
-> in CI*, and nothing has been pushed — `origin/main` is behind by everything since `c6830a4`.
-> The workflow has never been run by GitHub. What *has* been done is verify every command in it
-> locally, including running the whole suite on Linux in a container.
+> | Job | Failed at | Cause | Fix (uncommitted) |
+> |---|---|---|---|
+> | `gate (windows)` | *The registry is all there* | `target/debug/etl.exe` not found. `cargo test` builds the CLI only as a test harness under `deps/`; every rehearsal machine had an old `cargo build` lying around | `gate.yml`: new step `cargo build -p etl-cli` after the tests |
+> | `gate (ubuntu)` | *Fetch DuckDB…* | `fetch-duckdb-extensions.ps1` hard-coded `duckdb.exe`. 9d fixed host detection in `fetch-duckdb.ps1` and missed this script | the script picks `.exe` only on Windows |
+> | `build-runner.ps1` | *Running it again is a no-op* | the second run **did** skip; the script says so with `Write-Host` (stream 6) and `\| Out-String` captured nothing | `gate.yml`: `6>&1` |
+> | `artifact` (both) | never ran | `needs: gate` | — |
+> | `frontend` | **passed** | | |
 >
-> **To resume:** push, watch the first run, and fix what it finds. A first CI run finding
-> nothing would be the surprising outcome.
+> **How each fix was checked locally, before any push:**
+> - The no-op bug was **reproduced on this machine**. Captured length 0 without `6>&1`, and 151
+>   with it and a match. The Linux runner left in `tools/` from 9c makes the script take the
+>   same "already present" branch without Docker.
+> - The extensions script still works on Windows: `excel already present`, `excel loads`, exit 0.
+>   The Linux branch is checked only by reading it, because Docker's daemon is not running here.
+> - The registry and samples steps' exact bash lines pass against the prebuilt `etl.exe`.
+> - The Windows `artifact` job, which has never run in CI, was rehearsed: bake `orders_checked`,
+>   copy it out of the repo, run it with `--workspace` pointing back, and `Ran 6 stage(s)`.
+> - The YAML parses: 4 jobs, and the new step sits between *Tests* and *The registry…*.
+>
+> **Expect the second run to find more.** The Ubuntu gate never got past its fetch step, so
+> fmt, clippy, tests and samples have still not run on a Linux runner. Neither `artifact` job
+> has run at all.
+>
+> **The project is on a new machine.** It moved from `D:\workspace\ETL_Local_Tool` (user `mr`)
+> to `E:\workspace_09212026\ETL_Local_Tool` (user `admin`). What came across and what did not,
+> checked 2026-09-23:
+>
+> | Thing | State here |
+> |---|---|
+> | `tools/` (DuckDB 1.5.5, extensions, Linux engine and runner) | present — copied with the folder |
+> | `target\debug\etl.exe` | present, built 2026-09-17 on the old machine; runs |
+> | Rust toolchain | `rustup` 1.29.1 and the pinned **1.96.0** with rustfmt and clippy, installed 2026-09-23 via winget (approved). `~/.cargo/bin` is not on PATH in terminals opened before the install |
+> | MSVC Build Tools (the linker Rust needs on Windows) | **VS Build Tools 2022 17.14**, C++ workload, Windows SDK 10.0.26100, installed 2026-09-23 via winget (approved). The installer asks for a restart; builds work without one |
+> | node 24, npm, git, Docker (daemon not running), Python 3.12 (no PyYAML) | present |
+> | `gh` | 2.101.0, installed 2026-09-23, logged in as `marun224`. Not on PATH in terminals opened before the install: use `"C:\Program Files\GitHub CLI\gh.exe"` or restart VS Code |
+>
+> **Checked here on 2026-09-23 without Rust:** frontend 114 tests passing, typecheck clean,
+> build clean; the prebuilt `etl.exe` lists 54 components and the three samples print
+> 12/5/7/6/6, 12/10+2/9+1/9/2/1, and 12 through with the branch taken.
+> **The full local gate is green on this machine** (2026-09-23, after the toolchain install):
+> `cargo fmt --all --check` clean, `cargo clippy --workspace --all-targets -- -D warnings`
+> clean, **`cargo test --workspace` 678 passing** (48 cli, 65 console, 10 desktop, 282 engine,
+> 51 e2e, 15 metadata, 26 runner, 113 scheduler, 23 secrets, 45 state). A cold build took
+> 4m26s for clippy and 8m39s to the end of the tests. After the tests, `target\debug\etl.exe`
+> *still* carried its 2026-09-17 timestamp — the CI bug, seen directly — and the new
+> `cargo build -p etl-cli` step replaced it (12:51), with the samples unchanged.
+>
+> **To resume:**
 >
 > ```powershell
-> git add -A ; git commit    # 9a, 9b, 9c and 9d are all uncommitted
-> git push
-> gh run watch
+> # the user commits and pushes the three fixes, then:
+> gh run watch                     # the second run of gate.yml
+> gh run view <id> --log-failed    # whatever it finds
 > ```
+>
+> Phase 9 is done when that run is green: all four jobs, on both operating systems.
+>
+> **Commits are the user's.** Claude does not `git add`, `commit` or `push` in this repo —
+> changes are left in the working tree with a suggested message. (User instruction,
+> 2026-09-23. This overrides the workflow file's "git on start" rule.)
 >
 > **What the workflow does**, and what was checked locally before writing it:
 >
@@ -49,7 +98,7 @@ first when picking the project back up.
 > hand-verified.
 >
 > ```powershell
-> cd D:\workspace\ETL_Local_Tool
+> cd E:\workspace_09212026\ETL_Local_Tool
 > cargo test --workspace                                            # expect 678 passing
 > npm --prefix frontend run test                                    # expect 114 passing
 > npm --prefix frontend run typecheck                               # expect clean
@@ -68,23 +117,32 @@ first when picking the project back up.
 > docker run --rm --network none -v "${PWD}:/w" -w /w debian:12-slim ./orders_checked-linux_amd64
 > ```
 >
-> **State of the tree:** the last phase commit is **`c6830a4` — Phase 8d**. After it come this
-> file, `ac36f1f` (the CLI's first tests), and **Phases 9a, 9b, 9c and 9d, all uncommitted**.
-> The remote is `github.com/marun224/local_etl_tool` (private) and is behind by all of it.
+> **State of the tree:** `ad7fc51` (Phase 9) is the last commit and is pushed. Uncommitted as
+> of 2026-09-23: the three CI fixes (`.github/workflows/gate.yml`,
+> `scripts/fetch-duckdb-extensions.ps1`), the workflow file's two new rules, `.gitignore`
+> gaining `*.code-workspace`, this tracker, `commands.md`, and the new
+> [learnings.md](learnings.md) and [assignments.md](assignments.md).
+> The remote is `github.com/marun224/local_etl_tool` (private).
 >
 > **`tools/` is git-ignored and reproducible**, now with a Linux side: host DuckDB and 9
 > extensions, a Linux DuckDB, one Linux extension, and a Linux `etl-runner`. `fetch-duckdb.ps1`,
 > `fetch-duckdb-extensions.ps1` and `build-runner.ps1` each take a `-Platform`.
+>
+> **Two stray directories were removed from the repo root** on 2026-09-23, both empty and
+> untracked: `${workspace}\samples\out` (from a pre-Phase-5 run, before `${workspace}` was
+> substituted) and `D\workspace\ETL_Local_Tool\samples\out`, whose name was `D` + U+F03A — the
+> character Windows stores for a `:` written from a Linux container. That one is the
+> Phase 9c `${workspace}` bug's footprint: a container run wrote to a literal `D:/workspace/...`.
 
 
 ## Where things stand
 
-- **Next phase:** Phase 10 — Rust-native connectors — once 9d's workflow has actually run.
-- **In progress:** **9d, written but unproven.** The workflow exists and every command in it was
-  verified locally, including the whole suite on Linux in a container. It has never been run by
-  GitHub, because nothing has been pushed. 9a, 9b and 9c are complete (all 2026-09-17).
-- **Blocked on:** nothing technical. Phase 9 cannot be *called* done until CI has run, and that
-  needs a push, which is the user's call.
+- **Next phase:** Phase 10 — Rust-native connectors — once 9d's CI run is green.
+- **In progress:** **9d.** CI's first run failed on three workflow and script bugs (the Rust
+  passed); all three are fixed in the working tree and checked locally, not yet pushed. 9a,
+  9b and 9c are complete (all 2026-09-17).
+- **Blocked on:** the user committing and pushing the fixes, so CI can run again. The local
+  gate is green on this machine as of 2026-09-23.
 
 Phase 9 was split into 9a–9d on 2026-09-17 before starting, the same way 6 and 8 were:
 **9a** the artifact and the payload format, **9b** the engine and extensions inside it,
@@ -514,11 +572,11 @@ fail the run. That is `ctl.fail`'s shape and it needs 6b's execution-model decis
 | 8b | — the runner: history, `--json`, lineage | **done** | 2026-09-16 |
 | 8c | — scheduler: interval, cron, file-watch | **done** | 2026-09-16 |
 | 8d | — web console: serve, token auth, roles | **done** | 2026-09-16 |
-| 9 | Standalone binary export + air-gapped packaging | **in progress** (9d unrun) | |
+| 9 | Standalone binary export + air-gapped packaging | **in progress** (9d: CI red, fixes unpushed) | |
 | 9a | — the artifact, and the payload format | **done** | 2026-09-17 |
 | 9b | — the engine and its extensions inside the file | **done** | 2026-09-17 |
 | 9c | — cross-building (Linux from Windows) | **done** | 2026-09-17 |
-| 9d | — the CI matrix | **written, never run** | 2026-09-17 |
+| 9d | — the CI matrix | **first run red 2026-09-23; 3 fixes unpushed** | 2026-09-17 |
 | 10 | Rust-native connectors | not started | |
 | 11 | AI assistant + MCP server | not started | |
 | 12 | Benchmarks + parity audit | not started | |
@@ -624,13 +682,18 @@ Settled decisions 5–8.)
 
 ## Environment
 
-- Repo: `d:\workspace\ETL_Local_Tool`, branch `main`, 7 commits, pushed to
-  `github.com/marun224/local_etl_tool` (private). Renamed from `master` on 2026-09-16 while
-  the remote was still empty. Phases 0–5 are one commit; 6a onward commit per phase.
+- Repo: `E:\workspace_09212026\ETL_Local_Tool`, branch `main`, pushed to
+  `github.com/marun224/local_etl_tool` (private). **Moved here 2026-09-23** from
+  `d:\workspace\ETL_Local_Tool` on another machine; paths in older entries below say `D:` and
+  are left as they were. Renamed from `master` on 2026-09-16 while the remote was still empty.
 - Duckle reference checkout: `D:\workspace\duckle-main` (read-only reference; clean-room rules
   apply — architecture and behaviour, never source).
 - Toolchain verified 2026-09-15: **cargo/rustc 1.96.0**, **node v24.18.0**, **npm 11.16.0**.
   `rust-toolchain.toml` pins 1.96.0 with rustfmt and clippy.
+  **On this machine (2026-09-23):** rustup 1.29.1 with the pinned 1.96.0, VS Build Tools 2022
+  (17.14, C++ workload), node 24.19, npm 11.17, git, Docker (daemon off), Python 3.12 (no
+  PyYAML), and `gh` 2.101 logged in as `marun224`. All but node, git, Docker and Python were
+  installed that day.
 - **DuckDB v1.5.5 (Variegata) vendored** at `tools/duckdb/duckdb.exe`, fetched by
   `scripts/fetch-duckdb.ps1` (idempotent, pinned, re-runnable). Git-ignored — it is a 37 MB
   build input, not source. **Not installed system-wide**, deliberately: the workflow requires
@@ -914,6 +977,31 @@ Settled decisions 5–8.)
 - **Windows will not execute a file with no extension**, so the baked artifact is named
   `checked.exe` there and `checked` on Linux. Obvious in hindsight, and exactly the kind of
   thing that fails on the first CI run rather than locally.
+
+### From Phase 9d, once CI actually ran (2026-09-23)
+
+- **Every failure was in the workflow or a script. None was in the Rust.** On Windows, fmt,
+  clippy and all the tests passed on a cold runner with an empty cache, on the first try.
+- **A local rehearsal inherits whatever the machine already has.** `target/debug/etl.exe` existed
+  on every machine the workflow was rehearsed on, so no rehearsal could notice that nothing in
+  the job builds it. `cargo test` writes the CLI only as `deps/etl-<hash>.exe`. The artifact job
+  was right to build explicitly; the gate job simply never needed to until it ran from a clean
+  checkout.
+- **A fix to one script is a question about its siblings.** 9d fixed host detection in
+  `fetch-duckdb.ps1` and left `fetch-duckdb-extensions.ps1` hard-coding `duckdb.exe`. The
+  two are called together, one line apart, in the same step.
+- **`Write-Host` is not output.** In PowerShell 5 and later it writes to the information stream
+  (6), so `$x = script | Out-String` is empty while the console shows the text. That makes
+  the failure look impossible in the log: the expected line is printed right above the throw
+  that says it was not seen. `6>&1` is the fix, and it was reproduced on Windows before it was
+  written.
+- **The first CI run had cold caches**, so it also measured the worst case: 8m48s for the
+  Windows gate. The cache keys will be warm next time.
+- **GitHub is retiring Node 20 for actions**, and `actions/checkout@v4`, `actions/cache@v4` and
+  `actions/setup-node@v4` are being forced onto Node 24. Annotations only for now; worth
+  moving to the next majors when they exist, rather than on the day they stop working.
+  `ubuntu-latest` becomes Ubuntu 26 from 2026-10-19; the Linux artifact's floor is set by the
+  bookworm build image, not by the runner, so that should not move it.
 
 ## Session log
 

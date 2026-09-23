@@ -8,6 +8,7 @@ Project-agnostic: copy this file into a new project as-is.
 | Rule | Detail |
 |---|---|
 | Questions, then plan, then build | Ask clarifying questions first. Nothing is implemented until the plan file is agreed. |
+| Questions as a written list | List every question at once, numbered, each with its options and a recommended answer. Never ask one at a time through interactive prompts. The user replies to all of them in one message. Unanswered ones go in the tracker as open decisions. |
 | One phase at a time | When a phase is done, stop and ask. Start the next phase only after the user confirms. |
 | Commands run on the user's machine | Claude runs them through PowerShell. No GUI or system-level control of the machine. |
 | Ask before consequential actions | Writing outside the project, installing globally, deleting, or publishing needs approval first. Ordinary edits and test runs inside the project do not. |
@@ -32,6 +33,17 @@ It must answer, without reading any code:
 3. Which phase is **next**, plus any blockers or open decisions.
 
 Update it before stopping each session. It is the first file to read on resume.
+
+## Learnings and assignments
+
+Each project keeps two more files in its docs folder. Create them in the first phase.
+
+| File | Holds |
+|---|---|
+| `learnings.md` | What each phase taught: the concepts used, decisions and why, and mistakes worth not repeating. One section per phase, dated. |
+| `assignments.md` | Hands-on exercises for the user, drawn from what the phase built. Each has a goal, a hint, and how to check the answer. Mark them done when completed. |
+
+Add to both at the end of every phase, before asking to start the next.
 
 ## Python projects
 
@@ -70,5 +82,5 @@ cargo test --workspace                                # gate: tests
 1. Read [task_tracker.md](task_tracker.md). Confirm the next phase with the user.
 2. Read that phase in the plan. Test in the sandbox where it helps, then implement.
 3. Run the gate until green.
-4. Update the tracker: done, deferred, and newly found blockers.
+4. Update the tracker: done, deferred, and newly found blockers. Add the phase to `learnings.md` and `assignments.md`.
 5. Check that commands are logged. Report, then ask before starting the next phase.

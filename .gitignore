@@ -21,5 +21,6 @@ dist/
 .claude/settings.local.json
 .vscode/
 .idea/
+*.code-workspace
 .DS_Store
 Thumbs.db
