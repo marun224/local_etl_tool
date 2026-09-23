@@ -35,8 +35,9 @@ env:
   # key moves when it does; they must not disagree.
   DUCKDB_VERSION: v1.5.5
   # The extensions the gate's tests load. Part of the cache key, for the reason
-  # given at the cache step.
-  DUCKDB_TEST_EXTENSIONS: excel,delta,iceberg,httpfs,postgres,mysql
+  # given at the cache step. Hyphen-separated, because actions/cache refuses a
+  # key with a comma in it; no DuckDB extension has a hyphen in its name.
+  DUCKDB_TEST_EXTENSIONS: excel-delta-iceberg-httpfs-postgres-mysql
 
 jobs:
   gate:
@@ -108,7 +109,7 @@ jobs:
         shell: pwsh
         run: |
           ./scripts/fetch-duckdb.ps1 -Version $env:DUCKDB_VERSION
-          ./scripts/fetch-duckdb-extensions.ps1 -Version $env:DUCKDB_VERSION -Extensions $env:DUCKDB_TEST_EXTENSIONS.Split(',')
+          ./scripts/fetch-duckdb-extensions.ps1 -Version $env:DUCKDB_VERSION -Extensions $env:DUCKDB_TEST_EXTENSIONS.Split('-')
 
       - name: Formatting
         run: cargo fmt --all --check
