@@ -1100,10 +1100,7 @@ fn act(
             match answer.values.first().and_then(first_number) {
                 Some(number) => Some(number),
                 None => {
-                    let mut said = answer.stderr.trim().to_string();
-                    if said.is_empty() {
-                        said = session.message().trim().to_string();
-                    }
+                    let said = answer.stderr.trim().to_string();
 
                     // Keep both halves. DuckDB's message is usually the more
                     // specific — it names the missing column and what was
@@ -1251,8 +1248,9 @@ fn attempt_stage(
     // against a relation that was never created fails and returns nothing.
     //
     // With counts turned off there is no verdict to read, so stderr is all
-    // there is. That mode already gives up per-stage attribution; this is the
-    // same trade.
+    // there is. That is sound only because the session frames stderr per
+    // statement; before it did, a late message made this report a failed stage
+    // as a success and blame the next one.
     // Whatever the statement itself said. When a `CREATE VIEW` fails, this is
     // the real cause; the count probe that follows then fails too, complaining
     // that the view does not exist. Reporting the probe's message would name
@@ -1351,11 +1349,9 @@ fn collect_counts(
         match answer.values.first().and_then(count_in) {
             Some(count) => counts.push(count),
             None => {
-                // Now, and only now, is it worth waiting for the explanation.
-                let mut said = answer.stderr.trim().to_string();
-                if said.is_empty() {
-                    said = session.message().trim().to_string();
-                }
+                // The session reads stderr up to this statement's own marker,
+                // so the explanation is already here if DuckDB gave one.
+                let said = answer.stderr.trim().to_string();
 
                 return Err(if said.is_empty() {
                     format!("{} produced no rows to count", stage.label)

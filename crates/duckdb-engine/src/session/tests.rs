@@ -59,6 +59,105 @@ fn nothing_at_all_parses_to_no_values() {
     assert!(parse_values("\n\n").expect("parses").is_empty());
 }
 
+#[test]
+fn an_error_marker_line_yields_its_sequence_number() {
+    // Exactly what DuckDB prints for `SELECT error('__etl_errmark_3__')`.
+    assert_eq!(
+        error_marker_sequence("Invalid Input Error: __etl_errmark_3__"),
+        Some(3)
+    );
+    assert_eq!(
+        error_marker_sequence("Catalog Error: Table with name nope does not exist!"),
+        None
+    );
+}
+
+#[test]
+fn the_two_markers_are_never_mistaken_for_each_other() {
+    assert_eq!(marker_sequence(&error_marker_for(5)), None);
+    assert_eq!(error_marker_sequence(&marker_for(5)), None);
+    assert_eq!(marker_sequence(&marker_for(5)), Some(5));
+    assert_eq!(error_marker_sequence(&error_marker_for(5)), Some(5));
+}
+
+// ---------------------------------------------------------------------------
+// Attribution, with the timing forced
+// ---------------------------------------------------------------------------
+
+/// Two channels standing in for DuckDB's stdout and stderr.
+fn pipes() -> (
+    mpsc::Sender<String>,
+    Receiver<String>,
+    mpsc::Sender<String>,
+    Receiver<String>,
+) {
+    let (out, lines) = mpsc::channel();
+    let (err, errors) = mpsc::channel();
+    (out, lines, err, errors)
+}
+
+#[test]
+fn a_message_that_arrives_after_the_rows_still_belongs_to_its_statement() {
+    // The race CI's first Linux run lost, made deterministic: statement 1's
+    // marker is back on stdout well before its message reaches stderr.
+    let (out, lines, err, errors) = pipes();
+
+    std::thread::spawn(move || {
+        out.send(marker_for(1)).unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+        err.send("Catalog Error: Table with name nope does not exist!".into())
+            .unwrap();
+        err.send(format!("Invalid Input Error: {}", error_marker_for(1)))
+            .unwrap();
+
+        out.send(r#"[{"n":1}]"#.into()).unwrap();
+        out.send(marker_for(2)).unwrap();
+        err.send(format!("Invalid Input Error: {}", error_marker_for(2)))
+            .unwrap();
+    });
+
+    let timeout = Duration::from_secs(5);
+
+    let (_, first) = read_answer(&lines, &errors, 1, timeout).expect("statement 1");
+    assert!(
+        first.contains("nope"),
+        "the late message is statement 1's: {first:?}"
+    );
+
+    let (rows, second) = read_answer(&lines, &errors, 2, timeout).expect("statement 2");
+    assert!(rows.contains(r#""n":1"#));
+    assert!(
+        second.is_empty(),
+        "and none of it reaches statement 2: {second:?}"
+    );
+}
+
+#[test]
+fn an_error_marker_from_another_statement_is_out_of_step() {
+    let (out, lines, err, errors) = pipes();
+
+    out.send(marker_for(1)).unwrap();
+    err.send(format!("Invalid Input Error: {}", error_marker_for(2)))
+        .unwrap();
+
+    assert_eq!(
+        read_answer(&lines, &errors, 1, Duration::from_secs(5)),
+        Err(Wait::OutOfStep(2))
+    );
+}
+
+#[test]
+fn a_missing_error_marker_times_out_rather_than_hanging() {
+    let (out, lines, _err, errors) = pipes();
+
+    out.send(marker_for(1)).unwrap();
+
+    assert_eq!(
+        read_answer(&lines, &errors, 1, Duration::from_millis(50)),
+        Err(Wait::TimedOut)
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Against a real DuckDB
 // ---------------------------------------------------------------------------
@@ -164,6 +263,53 @@ fn an_error_message_does_not_leak_into_the_next_statement() {
         "the previous failure's message was reported once, not twice: {}",
         answer.stderr
     );
+}
+
+#[test]
+fn alternating_failures_never_lend_their_message_to_a_neighbour() {
+    // The CI failure as a stress test against the real process. Before stderr
+    // was framed this passed on a quiet machine and failed on a busy one.
+    let Some(mut session) = session() else {
+        return;
+    };
+
+    for i in 0..200 {
+        let failed = session.execute("SELECT * FROM nope;").expect("answers");
+        assert!(
+            failed.stderr.contains("nope"),
+            "round {i}: a failure carries its own message: {:?}",
+            failed.stderr
+        );
+
+        let fine = session.execute("SELECT 1 AS n;").expect("runs");
+        assert!(
+            !fine.has_message(),
+            "round {i}: a success carries none: {:?}",
+            fine.stderr
+        );
+    }
+}
+
+#[test]
+fn a_prelude_that_fails_says_why() {
+    // The prelude's LOADs are sent raw, ahead of the first statement, so their
+    // message has to be attributed to it rather than dropped.
+    let options = RunOptions::default();
+    let Ok(binary) = locate_duckdb(&options) else {
+        return;
+    };
+    let extensions = locate_extension_dir(&options);
+
+    let outcome = Session::open(&binary, None, extensions.as_deref(), &["no_such_extension"]);
+
+    match outcome {
+        Err(SessionError::BadOutput(message)) => assert!(
+            message.contains("no_such_extension"),
+            "the message names the extension: {message}"
+        ),
+        Err(other) => panic!("expected the prelude to fail, got {other}"),
+        Ok(_) => panic!("expected the prelude to fail"),
+    }
 }
 
 #[test]

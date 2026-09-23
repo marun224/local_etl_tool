@@ -33,9 +33,18 @@
 //!
 //! **Failure is read from stdout, not stderr.** A statement that fails emits no
 //! JSON array, so "the rows I expected did not arrive" is the verdict, and
-//! stderr only supplies the message. The two streams have no ordering guarantee
-//! between them, so deciding *whether* something failed by watching stderr
-//! would be a race; deciding *what to say about it* is not.
+//! stderr only supplies the message.
+//!
+//! **stderr is framed too.** The two pipes have no ordering between them, so a
+//! failed statement's marker can come back on stdout before its message has
+//! arrived on stderr. Collecting "whatever stderr holds by now" therefore
+//! attributed a late message to the *next* statement, which reported a success
+//! as a failure and the failure as nothing. CI's first Linux run caught it in a
+//! test; the engine had the same exposure. So every statement is also followed
+//! by `SELECT error('<error marker>')`, which DuckDB prints to stderr *after* the
+//! statement's own message, and the driver reads stderr up to that marker the
+//! way it reads stdout up to the other. Attribution is exact, and there is no
+//! grace period to wait out: a quarter-second sleep used to stand in for this.
 
 use crate::sql::quote_path;
 use serde_json::Value as JsonValue;
@@ -43,7 +52,6 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use thiserror::Error;
 
@@ -53,16 +61,6 @@ use thiserror::Error;
 /// for the case the one-script path never had: with a pipe held open, a DuckDB
 /// that never answers is a hang in our process rather than a child that exits.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(600);
-
-/// How long to let stderr catch up once a statement is known to have failed.
-///
-/// stdout and stderr are separate pipes with no ordering between them, so the
-/// message explaining a failure can arrive just after the marker that revealed
-/// it. **Waited only when a caller asks for a message**, never on the way
-/// through: a `CREATE VIEW` returns no rows whether it worked or not, so
-/// pausing on "no rows" would put this delay on every ordinary stage. It cost
-/// four seconds a run before it was moved behind [`Session::message`].
-pub const STDERR_GRACE: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Error)]
 pub enum SessionError {
@@ -101,7 +99,9 @@ pub struct Answer {
     /// The JSON arrays the statement printed, one per result-producing
     /// statement inside it.
     pub values: Vec<JsonValue>,
-    /// Anything DuckDB wrote to stderr while running it.
+    /// What DuckDB wrote to stderr for this statement, and only this one — it
+    /// is read up to the statement's error marker, so it is complete when the
+    /// answer is returned and holds nothing that belongs to a neighbour.
     pub stderr: String,
 }
 
@@ -118,7 +118,7 @@ pub struct Session {
     child: Child,
     stdin: Option<ChildStdin>,
     lines: Receiver<String>,
-    stderr: Arc<Mutex<Vec<String>>>,
+    errors: Receiver<String>,
     sequence: u64,
     timeout: Duration,
 }
@@ -169,12 +169,11 @@ impl Session {
             }
         });
 
-        let stderr = Arc::new(Mutex::new(Vec::new()));
-        let collected = Arc::clone(&stderr);
+        let (error_sender, errors) = mpsc::channel();
         std::thread::spawn(move || {
             for line in BufReader::new(stderr_pipe).lines().map_while(Result::ok) {
-                if let Ok(mut held) = collected.lock() {
-                    held.push(line);
+                if error_sender.send(line).is_err() {
+                    break;
                 }
             }
         });
@@ -183,7 +182,7 @@ impl Session {
             child,
             stdin: Some(stdin),
             lines,
-            stderr,
+            errors,
             sequence: 0,
             timeout: DEFAULT_TIMEOUT,
         };
@@ -225,12 +224,15 @@ impl Session {
             self.send_raw(&format!("LOAD {extension};\n"))?;
         }
 
-        // One round trip to prove the prelude landed. A failed LOAD prints to
-        // stderr and produces no rows, exactly like any other failure, so this
-        // is the same check the stages use rather than a special case.
+        // One round trip to prove the prelude landed. A failed LOAD does not
+        // stop the `SELECT 1` behind it, so rows alone prove nothing -- that
+        // was the only check here until the stderr framing existed, and it
+        // never once caught a missing extension. The LOAD's message is on
+        // stderr ahead of this statement's error marker, so it is now
+        // attributed here, and anything said at all means the prelude failed.
         let answer = self.execute("SELECT 1 AS ok;")?;
 
-        if answer.values.is_empty() {
+        if answer.values.is_empty() || answer.has_message() {
             return Err(SessionError::BadOutput(format!(
                 "the session prelude failed. DuckDB said: {}",
                 answer.stderr.trim()
@@ -259,75 +261,38 @@ impl Session {
     pub fn execute(&mut self, sql: &str) -> Result<Answer, SessionError> {
         self.sequence += 1;
         let sequence = self.sequence;
-        let marker = marker_for(sequence);
 
-        self.drain_stderr();
-
-        let statement = format!("{sql}\nSELECT '{marker}' AS __etl_mark;\n");
+        // Anything sent raw since the last statement -- the prelude's LOADs --
+        // is answered inside this one, which is where its messages belong.
+        let statement = format!(
+            "{sql}\nSELECT '{}' AS __etl_mark;\nSELECT error('{}');\n",
+            marker_for(sequence),
+            error_marker_for(sequence)
+        );
         self.send_raw(&statement)?;
 
-        let mut collected = String::new();
-
-        loop {
-            let line = match self.lines.recv_timeout(self.timeout) {
-                Ok(line) => line,
-                Err(RecvTimeoutError::Timeout) => {
-                    // The session cannot be trusted to be at a statement
-                    // boundary any more, so it is killed rather than reused.
-                    let _ = self.child.kill();
-                    return Err(SessionError::Timeout {
-                        timeout: self.timeout,
-                        sql: sql.to_string(),
-                    });
-                }
-                Err(RecvTimeoutError::Disconnected) => {
-                    return Err(SessionError::Closed {
-                        sql: sql.to_string(),
-                    })
-                }
-            };
-
-            if let Some(seen) = marker_sequence(&line) {
-                if seen != sequence {
-                    return Err(SessionError::OutOfStep {
-                        expected: sequence,
-                        seen,
-                    });
-                }
-                break;
+        match read_answer(&self.lines, &self.errors, sequence, self.timeout) {
+            Ok((stdout, stderr)) => Ok(Answer {
+                values: parse_values(&stdout)?,
+                stderr,
+            }),
+            Err(Wait::TimedOut) => {
+                // The session cannot be trusted to be at a statement boundary
+                // any more, so it is killed rather than reused.
+                let _ = self.child.kill();
+                Err(SessionError::Timeout {
+                    timeout: self.timeout,
+                    sql: sql.to_string(),
+                })
             }
-
-            collected.push_str(line.trim_end_matches('\r'));
-            collected.push('\n');
+            Err(Wait::Closed) => Err(SessionError::Closed {
+                sql: sql.to_string(),
+            }),
+            Err(Wait::OutOfStep(seen)) => Err(SessionError::OutOfStep {
+                expected: sequence,
+                seen,
+            }),
         }
-
-        let values = parse_values(&collected)?;
-
-        // Whatever stderr already holds, without waiting for more. A caller
-        // that has decided something failed asks for the rest with
-        // [`Session::message`].
-        let stderr = self.drain_stderr();
-
-        Ok(Answer { values, stderr })
-    }
-
-    /// Take whatever stderr holds right now.
-    fn drain_stderr(&mut self) -> String {
-        match self.stderr.lock() {
-            Ok(mut held) => held.drain(..).collect::<Vec<_>>().join("\n"),
-            Err(_) => String::new(),
-        }
-    }
-
-    /// The explanation for a failure the caller has already detected.
-    ///
-    /// Waits [`STDERR_GRACE`] for the message to arrive, because it may still
-    /// be in flight when the marker that revealed the failure came back. Only
-    /// call this having decided something went wrong — on the happy path it is
-    /// a quarter of a second of nothing.
-    pub fn message(&mut self) -> String {
-        std::thread::sleep(STDERR_GRACE);
-        self.drain_stderr()
     }
 
     /// Close stdin and wait for the process to finish.
@@ -356,21 +321,96 @@ impl Drop for Session {
     }
 }
 
+const MARK: &str = "__etl_mark_";
+const ERROR_MARK: &str = "__etl_errmark_";
+
 /// The marker text for a statement.
 ///
 /// Distinctive on purpose: it is compared against every line DuckDB prints, so
 /// it has to be something no plausible data value contains.
 fn marker_for(sequence: u64) -> String {
-    format!("__etl_mark_{sequence}__")
+    format!("{MARK}{sequence}__")
 }
 
-/// The sequence number in a line, if that line is a marker.
+/// The stderr counterpart: raised with `error()`, which DuckDB reports as
+/// `Invalid Input Error: __etl_errmark_<n>__` after anything the statement
+/// itself said. Neither prefix contains the other, so the two cannot be
+/// mistaken for each other.
+fn error_marker_for(sequence: u64) -> String {
+    format!("{ERROR_MARK}{sequence}__")
+}
+
+/// The sequence number in a stdout line, if that line is a marker.
 fn marker_sequence(line: &str) -> Option<u64> {
-    let start = line.find("__etl_mark_")? + "__etl_mark_".len();
+    sequence_after(line, MARK)
+}
+
+/// The sequence number in a stderr line, if that line is an error marker.
+fn error_marker_sequence(line: &str) -> Option<u64> {
+    sequence_after(line, ERROR_MARK)
+}
+
+fn sequence_after(line: &str, prefix: &str) -> Option<u64> {
+    let start = line.find(prefix)? + prefix.len();
     let rest = &line[start..];
     let end = rest.find("__")?;
 
     rest[..end].parse().ok()
+}
+
+/// Why a statement's answer could not be read.
+#[derive(Debug, PartialEq)]
+enum Wait {
+    TimedOut,
+    Closed,
+    OutOfStep(u64),
+}
+
+/// Read one statement's stdout and stderr, each up to its own marker.
+///
+/// Separate from the process so the attribution can be tested with a message
+/// that arrives *late* -- after the stdout marker, which is exactly what a busy
+/// machine does and what the first Linux CI run caught.
+fn read_answer(
+    lines: &Receiver<String>,
+    errors: &Receiver<String>,
+    sequence: u64,
+    timeout: Duration,
+) -> Result<(String, String), Wait> {
+    let stdout = read_until(lines, marker_sequence, sequence, timeout)?;
+    let stderr = read_until(errors, error_marker_sequence, sequence, timeout)?;
+
+    Ok((stdout.join("\n") + "\n", stderr.join("\n")))
+}
+
+/// Lines from `source` up to the marker for `sequence`, which is dropped.
+///
+/// The timeout is per line, as it always was: a statement is allowed to take
+/// that long before its first output, not to finish within it.
+fn read_until(
+    source: &Receiver<String>,
+    marker: fn(&str) -> Option<u64>,
+    sequence: u64,
+    timeout: Duration,
+) -> Result<Vec<String>, Wait> {
+    let mut collected = Vec::new();
+
+    loop {
+        let line = match source.recv_timeout(timeout) {
+            Ok(line) => line,
+            Err(RecvTimeoutError::Timeout) => return Err(Wait::TimedOut),
+            Err(RecvTimeoutError::Disconnected) => return Err(Wait::Closed),
+        };
+
+        if let Some(seen) = marker(&line) {
+            if seen != sequence {
+                return Err(Wait::OutOfStep(seen));
+            }
+            return Ok(collected);
+        }
+
+        collected.push(line.trim_end_matches('\r').to_string());
+    }
 }
 
 /// Read the concatenated JSON arrays a statement printed.
