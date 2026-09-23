@@ -386,6 +386,12 @@ on "no rows arrived" put 250 ms on *every* stage — a seven-stage sample took 2
 0.18 s. The verdict comes from the count probes; stderr is asked for the message only once
 something is already known to have failed.
 
+**Superseded 2026-09-23:** the grace period is gone. CI's first Linux run showed that "whatever
+stderr holds by now" is a race even with it, since a late message was attributed to the next
+statement. stderr is now framed per statement with an `error()` marker, the way stdout is
+framed, so the message arrives with the answer and nothing waits. See `session.rs`'s module
+docs, and the tracker's *From Phase 9d, once CI actually ran*.
+
 ### Phase 7 — Desktop app: Tauri 2 + React 19 + xyflow canvas
 
 **Goal.** Build, run, and inspect a pipeline entirely in the GUI. **Multi-sitting — split at

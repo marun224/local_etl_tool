@@ -3,7 +3,7 @@
 **State only.** Design lives in [PLAN_duckle_parity.md](PLAN_duckle_parity.md). Read this file
 first when picking the project back up.
 
-> ## ▶ Resumed 2026-09-23 — CI's first run **failed**; three fixes written, **not yet pushed**
+> ## ▶ Resumed 2026-09-23 — every CI job has now run; two fixes are written and **unpushed**
 >
 > **Phase 9 is committed and pushed** as `ad7fc51` (2026-09-23 07:42 +0530), and `gate.yml`
 > ran on it: [run 35809441173](https://github.com/marun224/local_etl_tool/actions/runs/35809441173),
@@ -29,9 +29,49 @@ first when picking the project back up.
 >   copy it out of the repo, run it with `--workspace` pointing back, and `Ran 6 stage(s)`.
 > - The YAML parses: 4 jobs, and the new step sits between *Tests* and *The registry…*.
 >
-> **Expect the second run to find more.** The Ubuntu gate never got past its fetch step, so
-> fmt, clippy, tests and samples have still not run on a Linux runner. Neither `artifact` job
-> has run at all.
+> **The second run** ([35831651720](https://github.com/marun224/local_etl_tool/actions/runs/35831651720),
+> after `91a5f24` + `14be255` were pushed on 2026-09-23 at the user's request) confirmed all three
+> fixes: **`gate (windows)`, `build-runner.ps1` and `frontend` are green.** `gate (ubuntu)` passed fmt
+> and clippy, then failed **one test of 668**:
+> `session::tests::an_error_message_does_not_leak_into_the_next_statement`. The `artifact` jobs
+> still have not run, because they need `gate`.
+>
+> **That failure is a real race, not a Linux quirk.** stdout and stderr are separate pipes. A
+> failed statement's marker can come back on stdout before its message arrives on stderr, and
+> the next `execute` then picks the message up as its own. It passed in the 9d container and
+> 200 times in a row on Windows; a busier runner lost the race. **The engine has the same
+> exposure, not just the test:** `exec.rs:1270` (session transport with `--no-counts`) can
+> report a failed stage as succeeded and blame the next one, and `exec.rs:1322` can turn "no new
+> rows" into an error. The counts-on path is covered only by `STDERR_GRACE`'s 250 ms, which is
+> timing rather than a guarantee.
+>
+> **Fixed in the working tree, not pushed:** stderr is now framed the way stdout is. Every
+> statement is followed by `SELECT error('__etl_errmark_N__')` as well as the stdout marker,
+> and `read_answer` reads each stream up to its own marker. `STDERR_GRACE` and
+> `Session::message()` are gone. Tried in the scratchpad first against the real `duckdb.exe`
+> (0 misattributed messages in 500 alternating statements, under 1 ms per statement), then built.
+> Seven new tests, **685 in all**. `a_message_that_arrives_after_the_rows_still_belongs_to_its_statement`
+> forces the race with channels and a 150 ms delay, and it **fails** when the old
+> "whatever stderr holds now" read is put back (checked by mutation, reverted by edit). The
+> end-to-end suite went from 9.7 s to 2.8 s, since nothing waits out a grace period any more.
+>
+> **The new prelude test found a second, older bug.** A session's prelude checked only that
+> `SELECT 1` returned rows, and a failed `LOAD` does not stop it. **A session never detected a
+> missing extension.** It now also refuses when the prelude said anything. A successful `LOAD`
+> writes 0 bytes to stderr, which was measured before relying on it.
+>
+> **The re-run of the failed job** (same run, attempt 2, at the user's request) passed the Ubuntu
+> gate, by luck as expected, and so ran the `artifact` jobs for the first time:
+> **`artifact (windows)` green**. `artifact (ubuntu)` baked and ran from elsewhere, then failed in
+> the bare `debian:12-slim` container: `GLIBC_2.39 not found`. That job built `etl-runner` on the
+> ubuntu-24.04 host, not in the bookworm image the project ships from. It is the 9c glibc lesson,
+> found by a different road. **Fixed in the working tree, not pushed:** on Linux the job now runs
+> `build-runner.ps1` and bakes with `--runner tools/runners/linux_amd64/etl-runner`. Checked here
+> without Docker: the bookworm runner needs glibc ≤ 2.34 and the Linux DuckDB ≤ 2.25, both under
+> Debian 12's 2.36; the YAML parses.
+>
+> **After those two land, every job has a fix for what it last found.** Nothing is known to be
+> failing. Phase 9 is done when the next run is green.
 >
 > **The project is on a new machine.** It moved from `D:\workspace\ETL_Local_Tool` (user `mr`)
 > to `E:\workspace_09212026\ETL_Local_Tool` (user `admin`). What came across and what did not,
@@ -60,7 +100,7 @@ first when picking the project back up.
 > **To resume:**
 >
 > ```powershell
-> # the user commits and pushes the three fixes, then:
+> # the user commits and pushes the session fix and the artifact-job fix, then:
 > gh run watch                     # the second run of gate.yml
 > gh run view <id> --log-failed    # whatever it finds
 > ```
@@ -138,11 +178,11 @@ first when picking the project back up.
 ## Where things stand
 
 - **Next phase:** Phase 10 — Rust-native connectors — once 9d's CI run is green.
-- **In progress:** **9d.** CI's first run failed on three workflow and script bugs (the Rust
-  passed); all three are fixed in the working tree and checked locally, not yet pushed. 9a,
-  9b and 9c are complete (all 2026-09-17).
-- **Blocked on:** the user committing and pushing the fixes, so CI can run again. The local
-  gate is green on this machine as of 2026-09-23.
+- **In progress:** **9d.** Every CI job has run at least once. The first run's three bugs are
+  fixed and pushed. The second found a real race in the session and a glibc floor in the
+  Linux artifact job; both are fixed in the working tree, not pushed. 9a–9c complete.
+- **Blocked on:** the user committing and pushing, so CI can run again. The local gate is
+  green on this machine (685 tests, 2026-09-23).
 
 Phase 9 was split into 9a–9d on 2026-09-17 before starting, the same way 6 and 8 were:
 **9a** the artifact and the payload format, **9b** the engine and extensions inside it,
@@ -572,11 +612,11 @@ fail the run. That is `ctl.fail`'s shape and it needs 6b's execution-model decis
 | 8b | — the runner: history, `--json`, lineage | **done** | 2026-09-16 |
 | 8c | — scheduler: interval, cron, file-watch | **done** | 2026-09-16 |
 | 8d | — web console: serve, token auth, roles | **done** | 2026-09-16 |
-| 9 | Standalone binary export + air-gapped packaging | **in progress** (9d: CI red, fixes unpushed) | |
+| 9 | Standalone binary export + air-gapped packaging | **in progress** (9d: every job run; 2 fixes unpushed) | |
 | 9a | — the artifact, and the payload format | **done** | 2026-09-17 |
 | 9b | — the engine and its extensions inside the file | **done** | 2026-09-17 |
 | 9c | — cross-building (Linux from Windows) | **done** | 2026-09-17 |
-| 9d | — the CI matrix | **first run red 2026-09-23; 3 fixes unpushed** | 2026-09-17 |
+| 9d | — the CI matrix | **2 runs 2026-09-23; last fixes unpushed** | 2026-09-17 |
 | 10 | Rust-native connectors | not started | |
 | 11 | AI assistant + MCP server | not started | |
 | 12 | Benchmarks + parity audit | not started | |
@@ -635,8 +675,11 @@ fail the run. That is `ctl.fail`'s shape and it needs 6b's execution-model decis
 
 ## Open decisions
 
-None. (Resolved 2026-09-16: the Phase 8 dependency posture and the runner's shape — see
-Settled decisions 5–8.)
+None open. Resolved 2026-09-23, all as recommended: (1) the session's stderr race is fixed by
+framing stderr with an `error()` marker, not by softening the test; (2) the failed Ubuntu job
+was re-run before the fix, which got the `artifact` jobs their first run; (3) DuckDB's
+`Infinity` in `-json` output is a known gap, recorded under *From Phase 9d, once CI actually
+ran*. Earlier ones were resolved 2026-09-16 (Settled decisions 5–8).
 
 <details>
 <summary>Resolved: which cryptography dependency?</summary>
@@ -1002,6 +1045,25 @@ Settled decisions 5–8.)
   moving to the next majors when they exist, rather than on the day they stop working.
   `ubuntu-latest` becomes Ubuntu 26 from 2026-10-19; the Linux artifact's floor is set by the
   bookworm build image, not by the runner, so that should not move it.
+- **The second run found a race that three machines had passed.** stdout and stderr are
+  separate pipes, and "whatever stderr holds by now" attributed a late message to the next
+  statement. Fixed by framing stderr with its own marker, raised with `error()` (see
+  `session.rs`'s module docs). A timing assumption that holds on a quiet machine needs a test
+  that forces the bad timing, which is what the channel-based test does.
+- **A test for the fix found an older bug next to it.** The session prelude checked only that
+  `SELECT 1` returned rows, and a failed `LOAD` does not stop it. So a session-transport
+  pipeline with a missing extension failed later, at the first stage that used it, instead of
+  at the prelude. The one-script path never had this: its prelude probe is separate.
+- **CI built the Linux runner on the host and so tested an artifact nobody ships.** The
+  project's Linux runner comes from `build-runner.ps1` in the bookworm image (glibc 2.36). The
+  host-built one needed 2.39 and would not start on Debian 12. The artifact job now bakes with
+  the shipping runner. Measured from the binaries: the bookworm runner needs glibc ≤ 2.34, and
+  DuckDB's Linux CLI ≤ 2.25.
+- **Known gap, deliberately deferred (2026-09-23):** DuckDB prints non-finite doubles as bare
+  `Infinity`/`NaN` in `-json` output (`SELECT 1/0` gives `{"boom":Infinity}`), and that is not
+  JSON. `parse_values` would report `BadOutput` for any row containing one, on the session path
+  and in previews. No sample produces one. The fix is to rewrite those tokens outside string
+  literals before parsing, or to cast doubles in probes.
 
 ## Session log
 

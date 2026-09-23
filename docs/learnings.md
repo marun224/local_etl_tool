@@ -243,3 +243,28 @@ the fuller record. From Phase 10 on, a section is added at the end of each phase
   containing backslashes with the Write tool.
 - A replacement in a patch script silently matched nothing. *Assert every anchored replace.*
 - Checking an exit code through a pipe measured `tail`, not the binary.
+
+### Phase 9d, once CI ran (2026-09-23)
+
+**Concepts**
+- **Framing both streams.** A child's stdout and stderr are two pipes with no ordering between
+  them. A marker on each, read up to its own marker, gives exact attribution; a sleep only
+  makes the race less likely.
+- **Where a binary is built decides where it runs.** The glibc floor comes from the build
+  image, so CI has to build the way the project ships, not the way that is most convenient.
+
+**Decisions and why**
+- Fix the race in the protocol, not in the test. The test was right; so was the engine code it
+  resembled, until a busier machine lost the race.
+- Re-run the failed job *before* the fix, knowing it might pass by luck. It did, and that luck
+  bought the artifact jobs their first run, which found the glibc problem a full cycle sooner.
+
+**Mistakes worth not repeating**
+- A local rehearsal inherits whatever the machine already has, like an old `etl.exe` in
+  `target/`. CI starts clean.
+- Fixing one script and not its sibling, called one line later in the same step.
+- Trusting `| Out-String` to capture `Write-Host`. It goes to stream 6.
+- Passing a race test 200 times on one machine is not evidence about another. Force the
+  timing instead.
+- A check that cannot fail: the session prelude's "did `SELECT 1` return rows" was always true.
+  Writing the test for the new behaviour is what exposed it.

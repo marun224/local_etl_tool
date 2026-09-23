@@ -1561,3 +1561,68 @@ cargo build -p etl-cli           # etl.exe 2026-09-17 09:50 -> 2026-09-23 12:51
 
 Not committed, not pushed. Written outside the project: the Build Tools install and
 `~/.cargo` registry downloads.
+
+## 2026-09-23 — The second CI run: a session race and a glibc floor
+
+The user asked for `91a5f24` and `14be255` to be pushed (done with a per-command identity,
+since this machine has no git config), then for the recommended option on each question.
+
+```powershell
+git -c user.name="Arun M" -c user.email=marun.mahadevu@gmail.com commit ...   # 91a5f24, 14be255
+git push origin main                                                           # ad7fc51..14be255
+gh run watch 35831651720 --exit-status
+#   gate (windows) ok, build-runner.ps1 ok, frontend ok
+#   gate (ubuntu) FAILED: 1 of 668 --
+#     session::tests::an_error_message_does_not_leak_into_the_next_statement
+gh run view 35831651720 --log-failed
+
+# Does it reproduce here? No: a race, not a platform difference
+& <engine test binary> session::tests::an_error_message_does_not_leak_into_the_next_statement --exact  # x200: 0 failures
+
+# The candidate fix, in the scratchpad first, against the real duckdb.exe
+python <scratchpad>\stderr_marker.py
+#   error() marker arrives on stderr in order; session survives it; <1 ms;
+#   500 alternating statements, 0 misattributed. Also: SELECT 1/0 prints `Infinity`.
+
+gh run rerun 35831651720 --failed     # user's choice: re-run before the fix lands
+```
+
+```powershell
+# The fix: crates/duckdb-engine/src/session.rs, session/tests.rs, exec.rs
+cargo fmt --all
+cargo clippy -p etl-duckdb-engine --all-targets -- -D warnings      # clean
+cargo test -p etl-duckdb-engine --lib session::
+#   FAILED: a_prelude_that_fails_says_why -- the prelude never detected a missing extension
+"LOAD no_such_extension; SELECT 1 AS ok;" | .\tools\duckdb\duckdb.exe -json
+#   IO Error on stderr, and [{"ok":1}] anyway: rows prove nothing
+#   -> the prelude also refuses when it said anything
+"SET extension_directory=...; LOAD excel; LOAD httpfs; SELECT 1;" | duckdb.exe -json 2>err
+#   0 bytes on stderr: a successful LOAD says nothing, so that check is safe
+cargo fmt --all --check                                  # clean
+cargo clippy --workspace --all-targets -- -D warnings    # clean
+cargo test --workspace                                   # 685 passing (678 + 7)
+
+# Mutation check: put back "whatever stderr holds now", by Edit, not git checkout
+cargo test -p etl-duckdb-engine --lib session::
+#   FAILED as intended: a_message_that_arrives_after_the_rows_still_belongs_to_its_statement
+#   (and 6 more, since the mutant still sends markers it no longer reads). Reverted by Edit.
+cargo test -p etl-duckdb-engine                          # 289 + 51 passing again
+cargo build -p etl-cli; etl run samples\pipelines\orders_{enriched,checked,guarded}.json  # all exit 0
+```
+
+```powershell
+# The re-run's result
+gh run view 35831651720
+#   gate (ubuntu) ok (the race went the other way), artifact (windows) ok,
+#   artifact (ubuntu) FAILED in the bare container:
+gh run view --job 107090511400 --log-failed
+#   ./checked: /lib/x86_64-linux-gnu/libc.so.6: version `GLIBC_2.39' not found
+
+# The fix: .github/workflows/gate.yml -- build-runner.ps1 on Linux, bake with --runner
+node -e "require('yaml')..."      # parses; new step in place
+python -c "...GLIBC_ versions in tools\runners\linux_amd64\etl-runner..."   # max 2.34
+python -c "...GLIBC_ versions in tools\duckdb\targets\linux_amd64\duckdb..." # max 2.25
+```
+
+Not committed, not pushed. Docker's daemon is not running, so the container step itself was not
+rehearsed here; the glibc numbers were read from the binaries instead.
