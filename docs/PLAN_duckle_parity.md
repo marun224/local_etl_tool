@@ -1095,9 +1095,120 @@ an Iceberg `version`. Delta and Postgres worked as written. The tracker's *From 
 the detail. The servers run in Docker from `scripts/test-services.ps1`, locally and in CI's
 Ubuntu gate; the lake tables are committed fixtures.
 
-**Later families**, planned one at a time when reached, in the plan's order: GraphQL (the
-nearest, since it reuses 10b's HTTP layer), streaming as bounded micro-batches, NoSQL,
-warehouses over their own protocols, vector DBs.
+##### Phase 10d — SaaS GraphQL
+
+**Questions answered 2026-09-23, all as recommended** (Settled decisions 18–24 in the tracker).
+
+**Goal.** Read from and write to a GraphQL API, with the same patience and the same refusal to
+load partially that 10b gave REST, plus the one thing GraphQL adds: **an HTTP 200 can be a
+failure.**
+
+**Files.** `crates/connectors/src/{http.rs (new), rest.rs, graphql.rs (new), graphql/tests.rs
+(new), lib.rs}`, `crates/metadata/src/component.rs` (a `code` property kind),
+`frontend/src/{Inspector.tsx, properties.ts}` and their tests, `crates/duckdb-engine/tests/native.rs`,
+`samples/pipelines/graphql_orders.json`, `docs/connectors.md`, `docs/adding_a_component.md`
+(only if the move to `http.rs` changes what it says).
+
+**Do.**
+
+1. **Move the HTTP layer out of `rest.rs` into `http.rs`** (decision 18): `Client`, `Settings`,
+   `Auth`, `Reply`, retries, pacing, `connection_properties` and the small property helpers.
+   REST keeps pagination, batching and its own specs. **This step changes no behaviour**, and
+   its proof is that REST's 28 fixture tests (`rest/tests.rs`) pass unedited before any GraphQL code exists.
+   Two additions the move makes room for:
+   - `Settings` takes the allowed methods from its caller, so GraphQL can pin POST without a
+     `method` property.
+   - `Client::send` takes a **verdict** on a 2xx reply: accept, retry with a reason, or fail.
+     REST passes "accept". This is how a throttling error inside a 200 gets the same backoff
+     as a 429, through the one retry loop rather than a second one.
+2. **`src.saas.graphql`.** Always POSTs `{"query", "variables"}` as JSON.
+   - Properties: the connection set without `method`; `query` (required, `code`); `variables`
+     (`code`, a JSON object, `${...}` resolved like any property); `records` (required, a JSON
+     pointer such as `/data/orders/nodes`); `pagination` (`none`, `relay`, `offset`, decision
+     19); `max_pages` (default 1000, an error when reached, as in REST); `retry_codes`;
+     `columns`.
+   - **relay:** sends `cursor_variable` (default `after`) from `pageInfo.endCursor` and stops
+     when `hasNextPage` is false. `page_info` is a pointer that **defaults to the parent of
+     `records` plus `/pageInfo`**, which is right for both `.../nodes` and `.../edges`, and can
+     be set when an API puts it elsewhere. The same cursor twice in a row is an error, as in
+     REST. The first page sends the variable as null, which is what Relay servers expect.
+   - **offset:** sends `offset_variable` (default `offset`) and `limit_variable` (default
+     `limit`) with `page_size` (default 100), and stops at a short page.
+   - **Records must be objects.** Pointing at `edges` gives rows with a `node` column (a
+     struct in DuckDB); the help says to prefer `nodes` where the API has it.
+3. **Errors (decisions 20 and 21).** After a 2xx:
+   - An `errors` array that is not empty **fails the read**, even when `data` came back. The
+     message quotes up to three errors, each with its `path`, masked like every connector
+     error.
+   - **Unless every error is throttling:** an error's `extensions.code` or `type` (Shopify uses
+     the first, GitHub the second) is in `retry_codes` (default `THROTTLED`, `RATE_LIMITED`).
+     Then it is retried with the ordinary backoff, `Retry-After` honoured if the header is
+     sent, and it counts against `retries`.
+   - `data` null or missing with no `errors` fails too, naming the page.
+4. **`check` (decision 22)**, no parser dependency: `query` is not blank; `variables` is a JSON
+   object; `records` starts with `/`; relay's query declares `$<cursor_variable>`; offset's
+   declares `$<offset_variable>` and `$<limit_variable>`. "Declares" means the text holds `$`
+   and the name followed by something that is not a name character, which is enough to catch
+   the mistake and cannot reject a valid query.
+5. **`snk.saas.graphql` (decision 23).** Properties: the connection set without `method`;
+   `mutation` (required, `code`); `rows_variable` (default `rows`); `variables` (extra,
+   merged in, a JSON object); `batch_size` (default 100); `retry_codes`. Each batch is sent as
+   **a list**, always, even a last batch of one, because a GraphQL input type is typed as a
+   list and the shape must not depend on the row count. `check` requires the mutation to
+   declare `$<rows_variable>` and forbids `variables` from also setting it. A batch whose
+   reply has `errors` fails the write, saying how many batches landed before it:
+   **at-least-once per batch**, as REST. Mutations that report failure inside `data` (such as
+   Shopify's `userErrors`) are not inspected, and `docs/connectors.md` says so.
+6. **A `code` property kind.** A multi-line monospace text box that is not SQL. `query`,
+   `mutation` and `variables` use it. The canvas renders it like `sql` does today. REST's
+   `body` moves to it too, since it is the same kind of value. Validation treats it as text.
+7. **A sample**, `samples/pipelines/graphql_orders.json`, relay-paged, typed with `columns`, run
+   against a fixture server by an engine test, as `rest_orders.json` is.
+
+**Verify.**
+- REST's tests pass unchanged after step 1, before anything else is written.
+- Fixture tests (`tiny_http`, 127.0.0.1 only) for the source: one page; variables and auth
+  sent; relay over three pages with the cursor sent and `hasNextPage` obeyed; `page_info`
+  default and override; the repeated-cursor loop refused; offset stops at a short page;
+  `max_pages` errors; `errors` fails with `path` in the message; partial `data` with `errors`
+  fails; `data` null fails; `THROTTLED` by `extensions.code` retried then success;
+  `RATE_LIMITED` by `type` retried; throttling past `retries` fails; a non-throttling error is
+  not retried; 429 with `Retry-After` still honoured; a secret masked in an error.
+- For the sink: batches of N sent as a list under `rows_variable` with the extra variables
+  merged; a last batch of one is still a list; `errors` on batch 3 reports 2 delivered.
+- `check` refusals, each by name: blank query, relay without `$after`, offset without
+  `$offset`/`$limit`, `variables` not an object, a mutation without `$rows`, `variables`
+  setting `rows`.
+- End to end, in `tests/native.rs`: the sample through both transports and `preview`; CSV
+  to the sink against the fixture; a failing upstream means the sink sends nothing.
+- `code`: a metadata test that it accepts text, and a frontend test that it renders a textarea.
+- **By hand, once (decision 24):** a public, token-free endpoint (`countries.trevorblades.com`)
+  over real TLS. Written up in the tracker, not in the suite.
+- The gate: fmt, clippy, all tests, frontend tests, typecheck and build, samples; **60
+  components**.
+
+**Done.** Both GraphQL components registered and tested, their delivery semantics in
+`docs/connectors.md`, REST unchanged, and the tracker, `learnings.md` and `assignments.md`
+updated.
+
+**Amended 2026-09-23, on completion.** Built as designed, with these small additions:
+
+- **REST's test server moved to a shared `crates/connectors/src/fixture.rs`**, after step 1's
+  proof had run against the untouched `rest/tests.rs`. `rows_at` moved to `http.rs` too, since
+  both connectors use it.
+- **`variables` may not set a variable the pagination sends** (`after`, `offset`, `limit`),
+  the source-side twin of the sink's rule about `rows`.
+- **A `$` typed in front of a variable-name property is forgiven** (`rows_variable: "$rows"`),
+  and a name that is not a GraphQL name is refused by `check`.
+- **`page_info` is checked as a pointer**, and a relay response missing `pageInfo`,
+  `hasNextPage` or (when there is a next page) `endCursor` fails naming what to ask for.
+- **No golden-SQL tests were added.** Native builders are shared by every connector and
+  already covered by 10a's; the end-to-end tests exercise the GraphQL stages through them.
+- 29 connector tests and 5 end-to-end. Beyond the *Verify* list: the checks above, and the
+  shared `max_pages` message pinned whole.
+
+**Later families**, planned one at a time when reached, in the plan's order: streaming as
+bounded micro-batches, NoSQL, warehouses over their own protocols, vector DBs.
 
 ### Phase 11 — AI assistant + MCP server
 

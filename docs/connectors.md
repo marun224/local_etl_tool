@@ -169,3 +169,79 @@ many: `batch 3 failed after 2 batch(es) (200 record(s)) were delivered`. A retri
 arrive twice if the API processed it and then failed to answer, so an API with idempotency
 keys or upsert semantics is the safe target. A sink never uses GET: a GET has no body, and
 one would deliver nothing while reporting success.
+
+## `src.saas.graphql` and `snk.saas.graphql`
+
+Added in Phase 10d (2026-09-23). They share REST's HTTP layer (`crates/connectors/src/http.rs`),
+so **authentication, retries, pacing, timeouts and proxies are exactly as described for
+REST above**, and so is the masking of credentials. Every request is a `POST` of
+`{"query": ..., "variables": ...}` as JSON; there is no `method` property.
+
+### The rule GraphQL adds: a 200 can be a failure
+
+A GraphQL server answers a bad field, a permission problem or a throttle with **HTTP 200 and
+an `errors` array**, sometimes beside partial `data`. So after every 2xx:
+
+- **Any error fails the read or the batch, even when `data` came back.** Loading the rows
+  around a hole as if they were whole is the partial load `max_pages` exists to prevent
+  (Settled decision 20). The message quotes up to three errors with their code and `path`:
+  `page 1: the API answered with 1 error(s): "Cannot query field "nosuch" on type
+  "Country"." [GRAPHQL_VALIDATION_FAILED]`.
+- **Except throttling** (Settled decision 21). When *every* error's `extensions.code` or `type`
+  is in `retry_codes` (default `THROTTLED`, Shopify's, and `RATE_LIMITED`, GitHub's), the
+  request is retried as a 429 would be: the same backoff, the same `retries` budget, and a
+  `Retry-After` header honoured if the server sends one. Throttling mixed with a real error is
+  a failure. `retry_codes: []` turns this off.
+- `data` null or missing with no `errors` is a failure too.
+
+A non-2xx status is handled by the shared layer exactly as for REST: 429 and 5xx retried,
+other 4xx not.
+
+### Reading
+
+`query` is the query and `variables` a JSON object sent with it (`${...}` parameters work
+inside it). `records` is a JSON pointer to the rows, e.g. `/data/orders/nodes`; it is
+required, because a GraphQL response is never itself the array. Rows must be objects: point
+at `nodes` rather than `edges` where the API has both, or each row arrives as one `node`
+struct column.
+
+| `pagination` | Sends | Stops when |
+|---|---|---|
+| `none` | the query once | after it |
+| `relay` | `$after` (`cursor_variable`) = the last `pageInfo.endCursor`, null on the first page | `hasNextPage` is false |
+| `offset` | `$offset` (`offset_variable`) = rows so far, `$limit` (`limit_variable`) = `page_size` (default 100) | a page is shorter than `page_size` |
+
+For `relay`, `pageInfo` is looked for **beside the records** (`/data/orders/pageInfo` for
+records at `/data/orders/nodes` or `/edges`); set `page_info` if the API keeps it elsewhere.
+A missing `pageInfo`, a missing `hasNextPage`, or `hasNextPage` true with no `endCursor` is an
+error naming what to ask for. A cursor that comes back unchanged is refused at once.
+**`max_pages` (default 1000) is an error when reached**, as for REST.
+
+**Checked before anything runs** (`etl validate`, the canvas): the query is not blank,
+`variables` is a JSON object, `records` is a pointer, and the query mentions the variables its
+pagination sends (`$after`, or `$offset` and `$limit`). `variables` may not set those
+itself. The check is textual and deliberately loose: it catches a query that never mentions
+the variable and cannot reject a valid one. The server is the authority on the rest.
+
+### Delivery semantics
+
+**The source is a snapshot per run, and not transactional**, as REST's: pages are read one
+after another and the data can change between them. Relay cursors, which the server holds,
+suffer from this least; offsets most. Like every native source, it reads everything on
+every run.
+
+**The sink is at-least-once per batch.** `mutation` runs once per `batch_size` rows (default
+100), with the rows in `$rows` (`rows_variable`) **always as a list**, even a last batch of one,
+because the variable is typed as a list in the mutation. `variables` are merged in beside it,
+and may not set it. The mutation must mention `$rows`. **A batch whose reply has `errors`
+fails the write**, and the error says how many batches had already landed:
+`batch 3 failed after 2 batch(es) (200 record(s)) were delivered`. A retried batch can arrive
+twice if the server applied it and then failed to answer.
+
+**Not inspected:** mutations that report failure *inside* `data` rather than in `errors`, such
+as Shopify's `userErrors`. A reply like that is a success as far as this sink can tell. Check
+the target API's convention before relying on it.
+
+Real TLS was checked by hand once, against the public countries API
+(`countries.trevorblades.com`): 27 Oceania countries through a `$continent` variable, and an
+unknown field reported as above. The suite itself never leaves 127.0.0.1.

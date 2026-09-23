@@ -745,3 +745,280 @@ fn a_rest_sink_that_fails_fails_the_run_after_duckdb_succeeded() {
     }
     assert!(leftovers(&workspace).is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// GraphQL, through a whole pipeline
+// ---------------------------------------------------------------------------
+
+/// A local stand-in for an orders GraphQL API at `POST /graphql`: a query is
+/// answered in two relay pages of the twelve sample orders, and a mutation is
+/// accepted. `answer` may override a response by returning `Some(body)`, which
+/// is sent with a 200, the way GraphQL servers send their errors.
+fn graphql_api<F>(answer: F) -> Api
+where
+    F: Fn(&Seen) -> Option<serde_json::Value> + Send + 'static,
+{
+    let server = Arc::new(tiny_http::Server::http("127.0.0.1:0").unwrap());
+    let port = server.server_addr().to_ip().unwrap().port();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let orders = sample_orders();
+
+    let (listening, log) = (Arc::clone(&server), Arc::clone(&seen));
+    std::thread::spawn(move || {
+        for mut request in listening.incoming_requests() {
+            let mut body = String::new();
+            let _ = request.as_reader().read_to_string(&mut body);
+            let authorization = request
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("Authorization"))
+                .map(|h| h.value.to_string());
+            let received: Seen = (
+                request.method().to_string(),
+                request.url().to_string(),
+                authorization,
+                body,
+            );
+            log.lock().unwrap().push(received.clone());
+
+            let reply = answer(&received).unwrap_or_else(|| {
+                let sent: serde_json::Value = serde_json::from_str(&received.3).unwrap();
+                let query = sent["query"].as_str().unwrap_or("");
+                if query.trim_start().starts_with("mutation") {
+                    let count = sent["variables"]["rows"].as_array().map_or(0, Vec::len);
+                    return serde_json::json!({ "data": { "addLargeOrders": { "count": count } } });
+                }
+                let (nodes, next) = match sent["variables"]["after"].as_str() {
+                    None => (&orders[..7], Some("c7")),
+                    Some(_) => (&orders[7..], None),
+                };
+                serde_json::json!({ "data": { "orders": {
+                    "nodes": nodes,
+                    "pageInfo": { "hasNextPage": next.is_some(), "endCursor": next },
+                }}})
+            });
+
+            let _ = request.respond(tiny_http::Response::from_string(reply.to_string()));
+        }
+    });
+
+    Api {
+        base: format!("http://127.0.0.1:{port}"),
+        seen,
+        server,
+    }
+}
+
+/// The committed `graphql_orders` sample, resolved against `api` with the
+/// token in an encrypted secret store in `workspace`. `policy` goes on the
+/// filter, to put the plan on the session path.
+fn graphql_orders(
+    api: &Api,
+    workspace: &Path,
+    policy: Option<serde_json::Value>,
+) -> (etl_duckdb_engine::Plan, RunOptions) {
+    let mut store = etl_secrets::SecretStore::open(workspace).unwrap();
+    store.set("api_token", TOKEN, None).unwrap();
+
+    let text = std::fs::read_to_string(repo_root().join("samples/pipelines/graphql_orders.json"))
+        .expect("the sample is committed");
+    let mut json: serde_json::Value = serde_json::from_str(&text).unwrap();
+    if let Some(policy) = policy {
+        json["nodes"][1]["data"]["policy"] = policy;
+    }
+
+    let resolver = etl_duckdb_engine::Resolver::new(workspace)
+        .bind("api_base", &api.base)
+        .secrets(store);
+    let resolved =
+        etl_duckdb_engine::resolve(&document(&json.to_string()), &resolver).expect("resolves");
+
+    let options = RunOptions {
+        redact: resolved.secret_values(),
+        ..options(workspace)
+    };
+    (compile(&resolved.document).expect("compiles"), options)
+}
+
+/// The sample's run, checked the same way on either transport.
+fn assert_the_graphql_sample_ran(
+    api: &Api,
+    workspace: &Path,
+    report: &etl_duckdb_engine::RunReport,
+) {
+    let rows: Vec<Option<u64>> = report.stages.iter().map(|s| s.rows).collect();
+    assert_eq!(
+        rows,
+        [Some(12), Some(6), Some(6)],
+        "six orders are over 100"
+    );
+
+    let seen = api.seen.lock().unwrap().clone();
+    let bodies: Vec<serde_json::Value> = seen
+        .iter()
+        .map(|s| serde_json::from_str(&s.3).unwrap())
+        .collect();
+    assert!(seen.iter().all(|s| s.0 == "POST" && s.1 == "/graphql"));
+    assert_eq!(seen.len(), 4, "two pages read, two batches sent");
+
+    // Two relay pages: from the start, then from the first page's cursor.
+    assert_eq!(bodies[0]["variables"]["after"], serde_json::Value::Null);
+    assert_eq!(bodies[1]["variables"]["after"], "c7");
+
+    // Six typed rows, as lists of four and two.
+    let batches: Vec<usize> = bodies[2..]
+        .iter()
+        .map(|b| b["variables"]["rows"].as_array().unwrap().len())
+        .collect();
+    assert_eq!(batches, [4, 2]);
+    assert_eq!(bodies[2]["variables"]["rows"][0]["order_id"], 1001);
+
+    let bearer = format!("Bearer {TOKEN}");
+    assert!(seen.iter().all(|s| s.2.as_deref() == Some(bearer.as_str())));
+    let seen_by_people = format!("{:?} {}", report.notes, report.script);
+    assert!(!seen_by_people.contains(TOKEN), "{seen_by_people}");
+
+    let read = format!(
+        "Orders GraphQL: 12 record(s) from 2 page(s) of {}/graphql",
+        api.base
+    );
+    assert!(report.notes.contains(&read), "{:?}", report.notes);
+    let sent = format!(
+        "Large orders mutation: 6 record(s) in 2 request(s) to {}/graphql",
+        api.base
+    );
+    assert!(report.notes.contains(&sent), "{:?}", report.notes);
+    assert!(leftovers(workspace).is_empty());
+}
+
+#[test]
+fn the_graphql_sample_reads_two_relay_pages_filters_and_mutates_in_batches() {
+    let Some((workspace, _)) = workspace("graphql_sample") else {
+        return;
+    };
+    let api = graphql_api(|_| None);
+    let (plan, options) = graphql_orders(&api, &workspace, None);
+    assert!(!plan.needs_session());
+
+    let report = run(&plan, &options).expect("runs");
+
+    assert_the_graphql_sample_ran(&api, &workspace, &report);
+    let endpoint = format!("{}/graphql", api.base);
+    assert_eq!(
+        plan.stage("read_orders").unwrap().external.as_deref(),
+        Some(endpoint.as_str())
+    );
+}
+
+#[test]
+fn the_graphql_sample_gives_the_same_answer_on_the_session_path() {
+    let Some((workspace, _)) = workspace("graphql_in_session") else {
+        return;
+    };
+    let api = graphql_api(|_| None);
+    let (plan, options) = graphql_orders(
+        &api,
+        &workspace,
+        Some(serde_json::json!({ "retryAttempts": 1 })),
+    );
+    assert!(
+        plan.needs_session(),
+        "the policy should have earned a session"
+    );
+
+    let report = run(&plan, &options).expect("runs");
+
+    assert_the_graphql_sample_ran(&api, &workspace, &report);
+}
+
+#[test]
+fn previewing_a_graphql_source_reads_it_and_sends_no_mutation() {
+    let Some((workspace, _)) = workspace("graphql_preview") else {
+        return;
+    };
+    let api = graphql_api(|_| None);
+    let (plan, options) = graphql_orders(&api, &workspace, None);
+
+    let rows = preview(&plan, "read_orders", 5, &options).expect("previews");
+
+    assert_eq!(rows.rows.len(), 5);
+    assert!(rows.truncated);
+    let seen = api.seen.lock().unwrap().clone();
+    assert!(
+        seen.iter().all(|s| !s.3.contains("mutation")),
+        "a preview never runs a sink"
+    );
+    assert!(leftovers(&workspace).is_empty());
+}
+
+#[test]
+fn graphql_errors_in_a_200_fail_the_run_by_stage_and_are_masked() {
+    let Some((workspace, _)) = workspace("graphql_errors") else {
+        return;
+    };
+    let api = graphql_api(|_| {
+        Some(serde_json::json!({ "errors": [
+            { "message": format!("token {TOKEN} may not read orders"), "path": ["orders"] }
+        ]}))
+    });
+    let (plan, options) = graphql_orders(&api, &workspace, None);
+
+    let error = run(&plan, &options).unwrap_err();
+
+    match &error {
+        ExecError::StageFailed {
+            node_id, message, ..
+        } => {
+            assert_eq!(node_id, "read_orders");
+            assert!(
+                message.contains("page 1: the API answered with 1 error(s)"),
+                "{message}"
+            );
+            assert!(
+                message.contains("token ******** may not read orders"),
+                "{message}"
+            );
+            assert!(!message.contains(TOKEN), "{message}");
+        }
+        other => panic!("expected the source to fail, got {other}"),
+    }
+    assert_eq!(
+        api.seen.lock().unwrap().len(),
+        1,
+        "not retried, and nothing sent"
+    );
+    assert!(leftovers(&workspace).is_empty());
+}
+
+#[test]
+fn a_graphql_sink_behind_a_failed_stage_sends_nothing() {
+    let Some((workspace, _)) = workspace("graphql_upstream_fails") else {
+        return;
+    };
+    let api = graphql_api(|_| None);
+
+    let pipeline = document(&format!(
+        r#"{{ "formatVersion": 1,
+          "nodes": [
+            {{ "id": "read", "position": {{"x":0,"y":0}}, "data": {{ "label": "CSV",
+               "componentId": "src.file.csv", "properties": {{ "path": "{csv}" }} }} }},
+            {{ "id": "broken", "position": {{"x":0,"y":0}}, "data": {{ "label": "Broken",
+               "componentId": "xf.filter",
+               "properties": {{ "predicate": "no_such_column > 1" }} }} }},
+            {{ "id": "send", "position": {{"x":0,"y":0}}, "data": {{ "label": "Send",
+               "componentId": "snk.saas.graphql",
+               "properties": {{ "url": "{base}/graphql", "mutation": "{mutation}" }} }} }}
+          ],
+          "edges": [ {{ "id": "e1", "source": "read", "target": "broken" }},
+                     {{ "id": "e2", "source": "broken", "target": "send" }} ] }}"#,
+        csv = sample_csv(),
+        base = api.base,
+        mutation = "mutation ($rows: [OrderInput!]!) { addLargeOrders(input: $rows) { count } }",
+    ));
+
+    let error = run(&compile(&pipeline).unwrap(), &options(&workspace)).unwrap_err();
+
+    assert!(error.to_string().contains("no_such_column"), "{error}");
+    assert!(api.seen.lock().unwrap().is_empty(), "nothing was sent");
+    assert!(leftovers(&workspace).is_empty());
+}

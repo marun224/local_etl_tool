@@ -249,3 +249,34 @@ Copy-Item samples\pipelines\orders_enriched.json samples\out\scratch\
   from the view. Then `SET mysql_aggregate_pushdown_enabled=false` and try again.
   *Check:* the first fails with an internal error and the second answers. Explain what the
   setting trades away.
+
+## Phase 10d — SaaS GraphQL
+
+- [ ] **A32. A 200 that is a failure.**
+  *Do:* run `samples/pipelines/graphql_orders.json`'s end-to-end test, then change the
+  fixture in `crates/duckdb-engine/tests/native.rs` to answer the *second* page with
+  `{"data": {...}, "errors": [...]}`.
+  *Check:* the run fails naming `page 2`, and nothing reaches the mutation. Explain why the
+  first page's rows are not loaded either.
+
+- [ ] **A33. Read a real API.**
+  *Do:* write a pipeline with `src.saas.graphql` against `https://countries.trevorblades.com/graphql`
+  reading `continents { code name countries { code } }` into Parquet.
+  *Check:* 7 rows. Then look at the type of `countries` in the Parquet file and explain how a
+  nested list of objects arrived as a DuckDB `LIST` of `STRUCT`.
+
+- [ ] **A34. Throttling, by hand.**
+  *Do:* in `graphql/tests.rs`, write a test where the first answer is
+  `{"errors": [{"message": "slow", "extensions": {"code": "THROTTLED"}}]}` with
+  `Retry-After: 1`, and the second is a page.
+  *Hint:* `rate_limited_by_type_is_retried_and_retry_after_is_honoured` is nearly this.
+  *Check:* it passes and takes about a second. Set `retry_codes` to `[]` and explain the
+  failure you get instead.
+
+- [ ] **A35. 🦀 `userErrors`.**
+  *Do:* Shopify-style mutations report row failures in `data.<mutation>.userErrors` rather
+  than in `errors`. Add an optional `user_errors` property to `snk.saas.graphql`: a JSON
+  pointer, and a non-empty array there fails the batch.
+  *Hint:* the sink's `judge` call is where a reply is accepted; it would need the pointer.
+  *Check:* a fixture test for each of: empty array (success), non-empty (fails with the
+  messages), pointer unset (unchanged). Update [connectors.md](connectors.md)'s *Not inspected*.

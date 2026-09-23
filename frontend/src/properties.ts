@@ -260,9 +260,11 @@ export function fromText(type: PropertyType, text: string): unknown {
     case "bool":
       return trimmed === "true";
 
-    // Text, path, sql and enum are all kept as written. Notably `sql` is not
-    // trimmed or escaped here: it is user-written SQL by definition, and the
-    // engine's own quoting rules are what protect the generated statement.
+    // Text, path, sql, code and enum are all kept as written. Notably `sql` is
+    // not trimmed or escaped here: it is user-written SQL by definition, and
+    // the engine's own quoting rules are what protect the generated statement.
+    // `code` (a GraphQL query, a JSON body) keeps its layout for the same
+    // reason: it is read by whatever it is sent to, not by this panel.
     default:
       return text;
   }

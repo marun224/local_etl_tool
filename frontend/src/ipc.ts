@@ -104,6 +104,7 @@ export type PropertyType =
   | "text"
   | "path"
   | "sql"
+  | "code"
   | "bool"
   | "integer"
   | "number"

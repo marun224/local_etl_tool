@@ -259,7 +259,16 @@ example, in [`crates/connectors/src/xml.rs`](../crates/connectors/src/xml.rs).
    console and a built artifact all have it.
 3. **Test the connector** in its own crate, against strings and temporary files, with no
    DuckDB. The engine's side of the bridge is already tested once for everybody, in
-   `crates/duckdb-engine/tests/native.rs`.
+   `crates/duckdb-engine/tests/native.rs`. A web connector tests against the local HTTP
+   server in `crates/connectors/src/fixture.rs`, which REST and GraphQL share.
+
+**A web connector** (anything over HTTP) builds on
+[`crates/connectors/src/http.rs`](../crates/connectors/src/http.rs) rather than on `ureq`
+directly: `connection_properties` for the spec, `Settings` and `Client` for the requests. That
+gives it auth, retries on 429 and 5xx with `Retry-After`, pacing, timeouts and the shared
+page-cap error for free. If the protocol can report failure or throttling inside a 2xx, as
+GraphQL does, pass a judgement to `Client::send_judged` instead of inventing a second retry
+loop. `rest.rs` and `graphql.rs` are the worked examples.
 4. **Add it to the inventory** in `specs/tests.rs`, as for any component.
 5. **Write its delivery semantics** in [connectors.md](connectors.md): what it promises, what
    it does not, and what a failure partway leaves behind. That is half of "done" for a

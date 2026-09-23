@@ -1833,3 +1833,83 @@ git status -sb                        # main...origin/main, ~50 paths uncommitte
 
 Docs only: the tracker's pause note and session log; the WebApp repo's RESUME_HERE.md and
 TASK_TRACKER.md now point at its 8 site-sync questions. Not committed.
+
+## 2026-09-23 — Phase 10d (GraphQL): orientation and questions
+
+```text
+# POSIX shell (Git Bash), read-only
+ls -la; git log --oneline; find . -type f     # repo survey
+cat Cargo.toml; sed/grep over docs/*.md       # plan, tracker, decision, workflow
+cat crates/connectors/src/{lib,rest}.rs crates/plugin-sdk/src/lib.rs
+grep crates/metadata/src/component.rs         # property kinds
+git -C ../ETL_Local_WebApp log --oneline; sed docs/RESUME_HERE.md
+```
+
+```powershell
+cargo test --workspace     # baseline before 10d: 788 passing, 0 failing (servers down; 5 skip)
+```
+
+```text
+# POSIX shell, read-only: sed/grep over task_tracker.md, Inspector.tsx, component.rs,
+#   samples/pipelines/rest_orders.json, crates/duckdb-engine/tests/native.rs
+# Edits: PLAN_duckle_parity.md (Phase 10d section), task_tracker.md (banner rewritten by
+#   head/tail splice via the scratchpad; Settled decisions 18-24; status rows; 788 breakdown)
+```
+
+Docs only. No git commands beyond `log`.
+
+## 2026-09-23 — Phase 10d (GraphQL): the build
+
+```powershell
+cargo test -p etl-connectors              # after the HTTP move: 56 passing, rest/tests.rs untouched
+npm --prefix frontend run test            # FAILED: string literals broken by escapes (see learnings)
+npm --prefix frontend run test            # 122 passing
+npm --prefix frontend run typecheck       # clean
+cargo test -p etl-connectors              # with GraphQL: 85 passing
+cargo test -p etl-duckdb-engine --test native   # 17 passing
+cargo fmt --all
+cargo clippy --workspace --all-targets -- -D warnings   # clean
+cargo test --workspace                    # FAILED: the registry inventory lacked the two new ids
+cargo test --workspace --no-fail-fast     # 822 passing
+# mutation checks on graphql.rs, each restored after:
+cargo test -p etl-connectors graphql      # partial data accepted -> 1 failure
+cargo test -p etl-connectors graphql      # throttling not retried -> 4 failures
+cargo build -p etl-cli
+.\target\debug\etl.exe components         # 60 component(s)
+.\target\debug\etl.exe validate <scratchpad>\live\countries.json --workspace <scratchpad>\live
+.\target\debug\etl.exe run <scratchpad>\live\countries.json --workspace <scratchpad>\live
+#   FAILED: no DuckDB binary outside the repo; then with $env:ETL_DUCKDB_BIN set:
+#   27 rows from https://countries.trevorblades.com/graphql (live, public, no token)
+.\target\debug\etl.exe run <scratchpad>\live\bad.json --workspace <scratchpad>\live
+#   FAILED: file written by Set-Content had a BOM; rewritten without one:
+#   exit 3, "Cannot query field "nosuch" on type "Country"." [GRAPHQL_VALIDATION_FAILED]
+```
+
+```text
+# POSIX shell: python splits of rest.rs into rest.rs + http.rs, and of rest/tests.rs'
+#   fixture into fixture.rs; sed count updates in task_tracker.md; heredoc appends to
+#   connectors.md, learnings.md, assignments.md, task_tracker.md
+# One bash heredoc (the native.rs tests) failed to parse and appended nothing; the block
+#   went through a scratchpad file instead
+```
+
+The only network access was the hand check above. Not committed.
+
+```powershell
+# the final gate, after the docs
+cargo fmt --all --check                                  # clean
+cargo clippy --workspace --all-targets -- -D warnings    # clean
+cargo test --workspace                                   # 822 passing
+npm --prefix frontend run test                           # 125: document.test.ts adds 3 per sample
+npm --prefix frontend run typecheck                      # clean
+npm --prefix frontend run build                          # clean
+```
+
+## 2026-09-23 — Phase 10d committed, at the user's request
+
+```powershell
+git add <the 24 paths of 10d>
+git -c user.name="Arun M" -c user.email=marun.mahadevu@gmail.com commit -F <message file>
+```
+
+Not pushed.

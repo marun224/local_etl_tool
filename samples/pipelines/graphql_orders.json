@@ -1,0 +1,92 @@
+{
+  "formatVersion": 1,
+  "name": "graphql_orders",
+  "nodes": [
+    {
+      "id": "read_orders",
+      "type": "source",
+      "position": {
+        "x": 0.0,
+        "y": 0.0
+      },
+      "data": {
+        "label": "Orders GraphQL",
+        "componentId": "src.saas.graphql",
+        "properties": {
+          "url": "${api_base}/graphql",
+          "auth": "bearer",
+          "token": "${SECRET:api_token}",
+          "query": "query ($after: String) {\n  orders(first: 7, after: $after) {\n    nodes { order_id customer_id order_ts amount status }\n    pageInfo { hasNextPage endCursor }\n  }\n}",
+          "records": "/data/orders/nodes",
+          "pagination": "relay",
+          "columns": {
+            "order_id": "INTEGER",
+            "customer_id": "VARCHAR",
+            "order_ts": "TIMESTAMP",
+            "amount": "DECIMAL(10,2)",
+            "status": "VARCHAR"
+          }
+        },
+        "alias": "orders"
+      }
+    },
+    {
+      "id": "large_only",
+      "type": "transform",
+      "position": {
+        "x": 280.0,
+        "y": 0.0
+      },
+      "data": {
+        "label": "Over 100",
+        "componentId": "xf.filter",
+        "properties": {
+          "predicate": "amount > 100"
+        }
+      }
+    },
+    {
+      "id": "add_large",
+      "type": "sink",
+      "position": {
+        "x": 560.0,
+        "y": 0.0
+      },
+      "data": {
+        "label": "Large orders mutation",
+        "componentId": "snk.saas.graphql",
+        "properties": {
+          "url": "${api_base}/graphql",
+          "auth": "bearer",
+          "token": "${SECRET:api_token}",
+          "mutation": "mutation ($rows: [OrderInput!]!) {\n  addLargeOrders(input: $rows) { count }\n}",
+          "batch_size": 4
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "source": "read_orders",
+      "target": "large_only",
+      "sourceHandle": "main",
+      "targetHandle": "in"
+    },
+    {
+      "id": "e2",
+      "source": "large_only",
+      "target": "add_large",
+      "sourceHandle": "main",
+      "targetHandle": "in"
+    }
+  ],
+  "parameters": {
+    "api_base": {
+      "type": "string",
+      "required": true,
+      "default": "http://127.0.0.1:8099",
+      "description": "The API's base URL. The committed default is a local fixture; point it at a real API with --param api_base=https://..."
+    }
+  }
+}

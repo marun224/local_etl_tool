@@ -139,6 +139,12 @@ describe("text", () => {
     expect(fromText("sql", written)).toBe(written);
   });
 
+  it("keeps code exactly as written too", () => {
+    const written = "query ($after: String) {\n  orders(after: $after) { id }\n}\n";
+
+    expect(fromText("code", written)).toBe(written);
+  });
+
   it("shows a missing value as an empty field rather than 'undefined'", () => {
     expect(toText(undefined)).toBe("");
     expect(toText(null)).toBe("");

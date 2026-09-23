@@ -3,142 +3,81 @@
 **State only.** Design lives in [PLAN_duckle_parity.md](PLAN_duckle_parity.md). Read this file
 first when picking the project back up.
 
-> ## ⏸ Paused 2026-09-23 — **Phases 10a, 10b and 10c are done, pushed, and green in CI**
+> ## ✅ Phase 10d (SaaS GraphQL) — built 2026-09-23, green locally, **committed, not pushed**
 >
-> **Phase 10's CI, 2026-09-23.** Committed as `3237f6c` and pushed. The first run failed both
-> gates at the cache step, before any test ran: `actions/cache` refuses a key with a comma in
-> it, and the engine's key carried `DUCKDB_TEST_EXTENSIONS`. Fixed in `9694099` (the list is
-> hyphen-separated). [Run 35862990581](https://github.com/marun224/local_etl_tool/actions/runs/35862990581)
-> is **green on all six jobs**: Ubuntu 778 tests with PostgreSQL, MySQL and MinIO started and
-> the `ETL_TEST_*` variables set, Windows 788, both artifact jobs, `build-runner.ps1`, and
-> frontend. Resume step 1 below is done. The website's 8 questions were answered (all as
-> recommended) and its `PLAN_site_product_sync.md` waits for approval in the WebApp repo.
+> **What 10d built:** `src.saas.graphql` and `snk.saas.graphql` (relay and offset paging,
+> `errors` in a 200 treated as failure, throttling codes retried), the HTTP layer moved out
+> of `rest.rs` into a shared `http.rs`, and a `code` property kind for multi-line text.
+> **60 components, 822 Rust tests** (812 on Linux), **125 frontend**. Fmt, clippy with `-D
+> warnings`, typecheck and the gate are green on this machine; checked by hand once against a
+> real public GraphQL API. What it found is under *From Phase 10d*.
 >
-> **Where it stopped.** After 10c the user chose the website's site-to-product sync next, which
-> lives in the other repo (`E:\workspace_09212026\ETL_Local_WebApp`). There, the site was
-> re-audited against this engine and **8 questions** were written in its
-> `docs/QUESTIONS_site_product_sync.md`, awaiting answers. Then the user paused. **Nothing in
-> this repo is mid-edit**: the gate was green at the last change, and the Docker test services
-> were stopped and removed.
+> **State of the tree:** everything through `e07dc6f` is committed and pushed, and CI
+> [run 35862990581](https://github.com/marun224/local_etl_tool/actions/runs/35862990581) was
+> green on it. **10d is committed on top, as "Phase 10d: SaaS GraphQL", at the user's request
+> on 2026-09-23, and not pushed**, so CI has not run on it. The one CI change is the registry
+> count in `gate.yml` (58 to 60).
 >
-> **To resume, in this order:**
+> **Next:** push 10d (the user's call) and watch its first CI run. Then Phase 10's next family
+> (streaming as bounded micro-batches), or the website: GraphQL can now be marked working
+> there, naming `the_graphql_sample_reads_two_relay_pages_filters_and_mutates_in_batches` in
+> its `CLAIMS.md`. The user chooses.
 >
-> 1. **Commit and push this repo's Phase 10 work** (about 50 paths: 10a partly staged by the
->    user, 10b and 10c unstaged). The user commits. CI has never run on any of Phase 10, and its
->    first run exercises a lot for the first time: the XML artifact steps, the Linux server
->    tests via `scripts/test-services.ps1`, and a much larger extension fetch under a new cache
->    key. Expect it to find something.
-> 2. **Answer the website's 8 questions** in the WebApp repo, then its plan, then its build.
-> 3. Or, instead of 2, **Phase 10's next family** (GraphQL first). The user chooses.
->
-> ```powershell
-> gh run list --limit 3                         # after pushing: watch the first Phase 10 run
-> ./scripts/test-services.ps1                   # Docker running: Postgres, MySQL, MinIO
-> cargo test --workspace                        # expect 788 with those variables set
-> ./scripts/test-services.ps1 -Stop             # tidy up afterwards
-> ```
->
-> **Phase 9 closed on 2026-09-23.** [Run 35833839177](https://github.com/marun224/local_etl_tool/actions/runs/35833839177)
-> of `gate.yml` is **green on all six jobs**: the Windows gate (685 tests), the Ubuntu gate
-> (675), both `artifact` jobs including the bare, offline `debian:12-slim` container, and
-> `build-runner.ps1` and `frontend`. It took three runs; what each found is in the session log
-> under *2026-09-23 — Phase 9 closed*.
->
-> **Phase 10a was built on 2026-09-23**, the same day the plan was signed off: the plugin SDK,
-> the staging bridge, and `src.file.xml` / `snk.file.xml`. **56 components, 739 Rust tests**
-> (729 on Linux), 117 frontend. Fmt, clippy and the gate are green on this machine, and the XML
-> pipeline runs from a built artifact outside the repo. **CI has not run on it yet**: nothing
-> is committed. What it built and found is under *From Phase 10a* and in the session log.
->
-> **Phase 10b was built on 2026-09-23** too: `src.saas.rest` and `snk.saas.rest`, with five
-> pagination styles, bearer/basic/header auth, retries that honour `Retry-After`, and a
-> `max_pages` cap that errors rather than stops. **58 components, 773 Rust tests** (763 on
-> Linux), 120 frontend. Real HTTPS was checked once by hand against GitHub's public API; the
-> suite itself never leaves 127.0.0.1. What it built and found is under *From Phase 10b*.
->
-> **Phase 10c was done on 2026-09-23** too: Phase 4's Postgres, MySQL, Delta, Iceberg and S3
-> connectors run against real systems for the first time, and **three of the five were
-> broken**. `snk.cloud.s3` had never worked on Windows; `src.db.mysql` could not be counted or
-> aggregated; `src.lake.iceberg` could not read a moved table the way its help said to. All
-> three are fixed and pinned by tests that failed first. **788 Rust tests** (778 on Linux)
-> with the servers up. See *From Phase 10c* for the table.
->
-> **The declared Rust version is now 1.88** (Settled decision 17), which is what the lockfile
-> already needed.
->
-> **Next:** the website's site-to-product sync is unblocked (its questions wait in the WebApp
-> repo), and Phase 10's later families remain, GraphQL first. The user chooses.
->
-> **`ring` is accepted** as rustls's cryptography provider (Settled decision 16, 2026-09-23).
+> **The website** (`E:\workspace_09212026\ETL_Local_WebApp`) finished its site-to-product
+> sync on 2026-09-23 (`ff46c49`, pushed); its own `docs/RESUME_HERE.md` says what is next
+> there (a redeploy).
 >
 > **Commits.** The user commits. Claude commits or pushes only when explicitly asked in the
 > moment. This machine has **no global git identity**; when asked, Claude uses
 > `-c user.name="Arun M" -c user.email=marun.mahadevu@gmail.com` per command, the identity on
 > every commit here, and writes no git config. (User instructions, 2026-09-23.)
 >
-> **The project is on a new machine.** It moved from `D:\workspace\ETL_Local_Tool` (user `mr`)
-> to `E:\workspace_09212026\ETL_Local_Tool` (user `admin`). What came across and what did not,
-> checked 2026-09-23:
+> **This machine** (the project moved here from `D:\workspace\ETL_Local_Tool`, user `mr`, to
+> `E:\workspace_09212026\ETL_Local_Tool`, user `admin`; checked 2026-09-23):
 >
 > | Thing | State here |
 > |---|---|
 > | `tools/` (DuckDB 1.5.5, extensions, Linux engine and runner) | present — copied with the folder |
-> | `target\debug\etl.exe` | present, built 2026-09-17 on the old machine; runs |
 > | Rust toolchain | `rustup` 1.29.1 and the pinned **1.96.0** with rustfmt and clippy, installed 2026-09-23 via winget (approved). `~/.cargo/bin` is not on PATH in terminals opened before the install |
-> | MSVC Build Tools (the linker Rust needs on Windows) | **VS Build Tools 2022 17.14**, C++ workload, Windows SDK 10.0.26100, installed 2026-09-23 via winget (approved). The installer asks for a restart; builds work without one |
+> | MSVC Build Tools (the linker Rust needs on Windows) | **VS Build Tools 2022 17.14**, C++ workload, Windows SDK 10.0.26100, installed 2026-09-23 via winget (approved) |
 > | node 24, npm, git, Docker (daemon not running), Python 3.12 (no PyYAML) | present |
 > | `gh` | 2.101.0, installed 2026-09-23, logged in as `marun224`. Not on PATH in terminals opened before the install: use `"C:\Program Files\GitHub CLI\gh.exe"` or restart VS Code |
 >
-> **To resume:**
->
-> ```powershell
-> # read PLAN_duckle_parity.md, "Phase 10: split and design", then:
-> cargo test --workspace            # expect 788; without the test servers 5 of those only skip
-> .\target\debug\etl.exe components  # expect 58
-> gh run list --limit 3             # the last run should be green
-> ```
->
-> **What the workflow does**, and what was checked locally before writing it:
+> **What CI's `gate.yml` does:**
 >
 > | Job | Checked locally by |
 > |---|---|
-> | `gate (windows)` — fmt, clippy, 788 tests (servers skip), samples | running it, repeatedly |
-> | `gate (ubuntu)` — fmt, clippy, **778 tests** with Postgres, MySQL and MinIO, samples | `cargo test` in `rust:1.96-slim-bookworm` |
+> | `gate (windows)` — fmt, clippy, 822 tests (servers skip), samples | running it, repeatedly |
+> | `gate (ubuntu)` — fmt, clippy, **812 tests** with Postgres, MySQL and MinIO, samples | `cargo test` in `rust:1.96-slim-bookworm` |
 > | `artifact (both)` — bake, run from elsewhere, run in a bare container | Phase 9b and 9c |
 > | `cross-build-script` — `build-runner.ps1`, ELF check, unbaked contract, no-op rerun | each assertion run by hand |
-> | `frontend` — 120 tests, typecheck, build | running it |
+> | `frontend` — 125 tests, typecheck, build | running it |
 >
-> **The Linux job excludes `apps/desktop`.** Tauri needs WebKitGTK, GTK, glib and `pkg-config`
-> to compile, and `cargo test --workspace` on Linux fails on exactly that. Installing system
-> libraries on every run to build a window no server opens is the wrong trade, so Linux tests
-> the headless product — 778 of the 788 — and Windows tests everything but the servers. **778 + 10 desktop = 788**,
-> which is the arithmetic to check if either number moves.
+> **The Linux job excludes `apps/desktop`** (Tauri needs WebKitGTK and GTK to compile), so
+> **812 + 10 desktop = 822** is the arithmetic to check if either number moves. **CI fetches
+> only the extensions the tests load** (`DUCKDB_TEST_EXTENSIONS`, hyphen-separated because
+> `actions/cache` refuses a comma in a key). **CI cannot do the Windows-to-Linux cross-build**
+> (GitHub's Windows runners run no Linux containers), so it proves the output instead: a Linux
+> artifact built on Linux and run in a bare container.
 >
-> **CI fetches only the `excel` extension, not all nine.** Exactly one test loads one
-> (`an_excel_round_trip_loads_the_extension_and_moves_the_rows`); the rest would be ~250 MB per
-> run to prove nothing. Verified by parking `tools/duckdb/extensions` and re-running: 1 failure,
-> that test, naming that extension.
->
-> **CI cannot do the Windows-to-Linux cross-build.** GitHub's Windows runners do not run Linux
-> containers, so 9c's developer workflow has no runner. CI proves the *output* instead — a Linux
-> artifact built on Linux and run in a bare container. The container hop itself stays
-> hand-verified.
+> **To check everything, from the repo root:**
 >
 > ```powershell
-> cd E:\workspace_09212026\ETL_Local_Tool
 > ./scripts/test-services.ps1                                       # Postgres, MySQL, MinIO in Docker
-> cargo test --workspace                                            # expect 788 passing
-> npm --prefix frontend run test                                    # expect 120 passing
+> cargo test --workspace                                            # expect 822 passing
+> ./scripts/test-services.ps1 -Stop                                 # tidy up afterwards
+> npm --prefix frontend run test                                    # expect 125 passing
 > npm --prefix frontend run typecheck                               # expect clean
 > npm --prefix frontend run build                                   # expect clean
-> .\target\debug\etl.exe components                                 # expect 58
+> .\target\debug\etl.exe components                                 # expect 60
 > .\target\debug\etl.exe run samples\pipelines\orders_enriched.json # expect 12/5/7/6/6
 > .\target\debug\etl.exe run samples\pipelines\orders_checked.json  # expect 12/10+2/9+1/9/2/1
 > .\target\debug\etl.exe run samples\pipelines\orders_guarded.json  # expect 12 through, branch taken
 > .\target\debug\etl.exe run samples\pipelines\orders_xml.json      # expect 12/7/7, XML written
+> gh run list --limit 3                                             # the last run should be green
 > ```
 >
-> Phase 9's own acceptance, still reproducible and still the thing worth re-running:
+> Phase 9's own acceptance, still reproducible:
 >
 > ```powershell
 > .\scripts\build-runner.ps1 -Platform linux_amd64
@@ -146,26 +85,17 @@ first when picking the project back up.
 > docker run --rm --network none -v "${PWD}:/w" -w /w debian:12-slim ./orders_checked-linux_amd64
 > ```
 >
-> **State of the tree:** everything through `e7f629b` is committed and pushed. **All of Phases
-> 10a and 10b is uncommitted**: `crates/plugin-sdk/`, `crates/connectors/` (`xml.rs`,
-> `rest.rs`), the engine changes (`native.rs`, `plan/`, `exec.rs`, `tests/native.rs`), the
-> samples `orders.xml`, `orders_xml.json` and `rest_orders.json`, `gate.yml`,
-> `Cargo.toml`/`Cargo.lock`, and the docs. The remote is `github.com/marun224/local_etl_tool`
-> (private). Phase 10c's work is uncommitted too: the S3, MySQL and Iceberg fixes, the
-> `tests/verified.rs` suite and its lake fixtures, `scripts/test-services.ps1`, and `gate.yml`.
->
-> **`tools/` is git-ignored and reproducible**, now with a Linux side: host DuckDB and 9
-> extensions, a Linux DuckDB, one Linux extension, and a Linux `etl-runner`. `fetch-duckdb.ps1`,
+> **`tools/` is git-ignored and reproducible**: host DuckDB and 9 extensions, a Linux DuckDB,
+> one Linux extension, and a Linux `etl-runner`. `fetch-duckdb.ps1`,
 > `fetch-duckdb-extensions.ps1` and `build-runner.ps1` each take a `-Platform`.
 
 
 ## Where things stand
 
-- **Next phase:** **paused by the user on 2026-09-23.** The website's site-to-product sync
-  was chosen; its questions are answered and its plan awaits approval in the WebApp repo.
-  Phase 10's later families (GraphQL first) remain the alternative.
-- **In progress:** nothing. **Phases 0–9 and 10a–10c are done** (all of 10 on 2026-09-23;
-  CI green on run 35862990581).
+- **Next phase:** the user chooses: Phase 10's next family (streaming), or marking GraphQL
+  working on the website.
+- **In progress:** nothing. **Phases 0–9 and 10a–10d are done** (10a–10d on 2026-09-23;
+  CI green through 10c on run 35862990581; 10d committed, not pushed, not yet through CI).
 - **Blocked on:** nothing.
 
 Phase 9 was split into 9a–9d on 2026-09-17 before starting, the same way 6 and 8 were:
@@ -188,7 +118,7 @@ pass), `ctl.throttle` (nothing to throttle until Phase 10 has a row cursor).
 **a scheduler that runs them**, and **a console to watch it from**. From the repo root:
 
 ```powershell
-cargo test --workspace        # 773 tests: 304 engine, 113 scheduler, 65 console, 56 connectors, 51 e2e, 48 cli, 45 state, 26 runner, 23 secrets, 15 metadata, 12 native e2e, 10 desktop, 5 plugin-sdk
+cargo test --workspace        # 822 tests: 310 engine, 113 scheduler, 85 connectors, 65 console, 51 e2e, 48 cli, 45 state, 26 runner, 23 secrets, 17 native e2e, 15 metadata, 10 desktop, 9 verified, 5 plugin-sdk
 .\target\debug\etl.exe run samples\pipelines\orders_enriched.json
 .\target\debug\etl.exe validate samples\pipelines\orders_enriched.json
 .\target\debug\etl.exe plan samples\pipelines\orders_enriched.json --script
@@ -240,24 +170,25 @@ exists — writing the report only if one does. `plan.needs_session()` decides t
 because they read something that never got created, and the failures. The exit code is 3 either
 way. Getting the report back is the entire point of asking a run to continue.
 
-**Fifty-eight components exist.** Sources: `src.cloud.http`, `src.cloud.s3`, `src.db.mysql`,
+**Sixty components exist.** Sources: `src.cloud.http`, `src.cloud.s3`, `src.db.mysql`,
 `src.db.postgres`, `src.db.sqlite`, `src.file.csv`, `src.file.excel`, `src.file.json`,
 `src.file.jsonl`, `src.file.parquet`, `src.file.xml`, `src.lake.delta`, `src.lake.iceberg`,
-`src.saas.rest`. Transforms:
+`src.saas.graphql`, `src.saas.rest`. Transforms:
 `xf.aggregate`, `xf.cast`, `xf.dedup`, `xf.derive`, `xf.distinct`, `xf.except`,
 `xf.filter`, `xf.intersect`, `xf.join`, `xf.limit`,
 `xf.pivot`, `xf.rename`, `xf.sample`, `xf.select`, `xf.sort`, `xf.sql`, `xf.union`,
 `xf.unpivot`, `xf.window`. Sinks: `snk.cloud.s3`, `snk.db.mysql`, `snk.db.postgres`,
 `snk.db.sqlite`, `snk.file.csv`, `snk.file.excel`, `snk.file.json`, `snk.file.jsonl`,
-`snk.file.parquet`, `snk.file.xml`, `snk.saas.rest`. Quality: `qa.accepted_values`, `qa.expression`, `qa.not_null`, `qa.range`,
+`snk.file.parquet`, `snk.file.xml`, `snk.saas.graphql`, `snk.saas.rest`. Quality: `qa.accepted_values`, `qa.expression`, `qa.not_null`, `qa.range`,
 `qa.referential`, `qa.regex`, `qa.unique`. Quality assertions, which fail the run rather than
 partitioning rows and so have no reject port: `qa.row_count`, `qa.schema_match`. Control:
 `ctl.branch`, `ctl.fail`, `ctl.log`, `ctl.sequence`, `ctl.wait`. Everything else in the six
 namespaces compiles to `UnsupportedComponent`, by design.
 
-**Four of them are written in Rust, not lowered to DuckDB alone.** `src.file.xml` and
-`snk.file.xml` (Phase 10a) and `src.saas.rest` and `snk.saas.rest` (Phase 10b) are the
-*native* components, for data DuckDB cannot reach.
+**Six of them are written in Rust, not lowered to DuckDB alone.** `src.file.xml` and
+`snk.file.xml` (Phase 10a), `src.saas.rest` and `snk.saas.rest` (Phase 10b), and
+`src.saas.graphql` and `snk.saas.graphql` (Phase 10d) are the *native* components, for data
+DuckDB cannot reach.
 They are registered like any other, so the canvas, validation, lineage, the scheduler, the
 console and a built artifact all have them, but their rows cross to and from DuckDB through a
 JSON Lines staging file under `.etl/tmp/native/`. A native source reads **before** DuckDB
@@ -623,10 +554,11 @@ fail the run. That is `ctl.fail`'s shape and it needs 6b's execution-model decis
 | 9b | — the engine and its extensions inside the file | **done** | 2026-09-17 |
 | 9c | — cross-building (Linux from Windows) | **done** | 2026-09-17 |
 | 9d | — the CI matrix | **done** (green on the third run) | 2026-09-23 |
-| 10 | Rust-native connectors | **in progress** (10a–10c done; later families open) | |
+| 10 | Rust-native connectors | **in progress** (10a–10d done; later families open) | |
 | 10a | — plugin SDK, staging bridge, XML | **done** | 2026-09-23 |
 | 10b | — SaaS REST, source and sink | **done** | 2026-09-23 |
 | 10c | — verify Phase 4's database and lake connectors | **done** | 2026-09-23 |
+| 10d | — SaaS GraphQL, source and sink | **done** (committed, not pushed; CI not yet run) | 2026-09-23 |
 | 11 | AI assistant + MCP server | not started | |
 | 12 | Benchmarks + parity audit | not started | |
 
@@ -716,6 +648,28 @@ fail the run. That is `ctl.fail`'s shape and it needs 6b's execution-model decis
     old 1.80 had forced into `% 2 != 0` back in Phase 5, and is now restored. `quick-xml` 0.41 and
     `ureq` `~3.2.1` stay pinned where 10a and 10b put them, because they are tested there. Moving
     them up is a separate, deliberate step, as is `aes-gcm` 0.11.
+
+Decisions 18–24 are Phase 10d's (SaaS GraphQL), all agreed 2026-09-23 as recommended:
+
+18. **The HTTP layer moves to `crates/connectors/src/http.rs`**, shared by REST and GraphQL,
+    rather than GraphQL importing it from `rest.rs`. REST's behaviour and tests do not change.
+19. **GraphQL pagination is `none`, `relay` and `offset`.** Relay sends `$after` from
+    `pageInfo.endCursor` until `hasNextPage` is false; offset sends `$offset`/`$limit` as
+    variables. Offset is there for APIs such as Hasura.
+20. **Any GraphQL `errors` fails the read**, even with partial `data`. A partial page that looks
+    like a complete load is what `max_pages` exists to prevent. No `allow_partial` switch.
+21. **Throttling reported inside a 200 is retried**: when an error's `extensions.code` or
+    `type` is in `retry_codes` (default `THROTTLED`, `RATE_LIMITED`), with 10b's backoff.
+22. **`check` validates the query lightly, with no parser dependency**: not blank, `variables` a
+    JSON object, and the pagination variables declared. The server stays the authority on the
+    rest. `graphql-parser` was the alternative.
+23. **Sources and sinks both** (Settled decision 13 applied): `snk.saas.graphql` sends each
+    batch as a list in a `rows_variable`, checks `errors` per batch, and is at-least-once per
+    batch like REST.
+24. **One hand check against a real, token-free public endpoint**
+    (`countries.trevorblades.com`), as 10b did with GitHub. The suite stays on 127.0.0.1.
+
+The tracker's stale pause notes were brought up to date in the same edit (question 8).
 
 ## Open decisions
 
@@ -1233,6 +1187,36 @@ ran*. Earlier ones were resolved 2026-09-16 (Settled decisions 5–8).
 - **How the lake fixtures were made** is in `crates/duckdb-engine/tests/fixtures/lake/README.md`,
   with the script. pyiceberg on Windows needs a plain warehouse path, not a `file://` URI, which
   it turns into `/C:/...`.
+
+### From Phase 10d
+
+- **Moving the HTTP layer changed no behaviour, and that was proved before GraphQL existed.**
+  REST's 28 fixture tests passed against the moved code with `rest/tests.rs` untouched. Only
+  after that was the test server moved into the shared `crates/connectors/src/fixture.rs`,
+  which took 140 lines out of REST's tests and nothing else.
+- **A 200 that is really a retry needed one change to the client, not a second loop.**
+  `Client::send_judged` lets a connector judge a 2xx as accept, retry or fail, and a retry goes
+  through the existing backoff, `Retry-After` and `retries` budget. REST passes "accept".
+- **Both rules that matter were mutation-checked.** Accepting partial `data` beside `errors`
+  fails one test; turning off throttling retries fails four.
+- **The real server behaves as designed:** `countries.trevorblades.com` answers an unknown
+  field with HTTP 200 and `errors` (`GRAPHQL_VALIDATION_FAILED`), which the run reports as a
+  stage failure, exit 3. Some servers (Apollo Server 4) send validation errors as HTTP 400
+  instead; that goes through the shared layer as a non-retried 4xx, quoting the body, so the
+  message is still there, just less tidy. Not worth code until someone meets it.
+- **A pipeline file with a UTF-8 BOM is refused** ("expected value at line 1 column 1"). Windows
+  PowerShell 5.1's `Set-Content -Encoding utf8` writes one, which is how it was found while
+  editing a scratch pipeline for the hand check. Existing behaviour, not 10d's; a one-line fix
+  in `PipelineDoc::from_json` if it bites someone. Recorded rather than fixed, because it is
+  outside 10d's scope.
+- **The `code` property kind renders like `sql`** (a monospace textarea) and validates as
+  text. REST's `body` moved to it too. The frontend switch passes `spec.type` to `fromText`
+  rather than a literal, so the next multi-line kind needs one `case`, not two edits.
+- **A process lesson:** text containing `\n` or a trailing `\` must not go through a Python
+  heredoc in the Bash tool here. The escapes arrived as real newlines, which broke three string
+  literals and silently put ten spaces into the shared `max_pages` message. No test pinned
+  that message exactly, so it would have shipped; GraphQL's `max_pages` test now pins the
+  whole sentence. Edits with backslashes go through the editor tool.
 
 ## Session log
 
@@ -2105,3 +2089,28 @@ not built, and XML is built but not listed. Eight questions were written there, 
 paused before answering them. This repo was left with the gate green at the last change, the
 Docker test services stopped and removed, and all of Phase 10 uncommitted.
 
+
+### 2026-09-23 — Phase 10d: SaaS GraphQL
+
+Started by the user ("start phase 10"); eight questions answered all as recommended (Settled
+decisions 18–24), the plan approved, then built in the same sitting.
+
+- `crates/connectors/src/http.rs` — new: the HTTP layer moved out of `rest.rs`, plus
+  `Settings::posting`, `Client::send_judged`/`Judged`, `Reply::retry_after`,
+  `page_cap_reached` and `rows_at`. Proved behaviour-neutral by REST's 28 tests, unedited.
+- `crates/connectors/src/fixture.rs` — new: REST's test server, now shared.
+- `crates/connectors/src/graphql.rs` and `graphql/tests.rs` — new: both components, 29 tests.
+- `crates/connectors/src/{lib.rs, rest.rs, rest/tests.rs}` — registration; REST uses the
+  shared layer; `body` is a `code` property.
+- `crates/metadata/src/component.rs`, `frontend/src/{ipc.ts, Inspector.tsx, properties.ts}`
+  and their tests — the `code` property kind.
+- `crates/duckdb-engine/tests/native.rs` — 5 end-to-end tests: the sample on both
+  transports, preview, `errors` in a 200 masked by stage, and a failed upstream sending
+  nothing. `plan/specs/tests.rs` — the inventory.
+- `samples/pipelines/graphql_orders.json` — new. `.github/workflows/gate.yml` — 60 components.
+- Docs: `connectors.md` (GraphQL's semantics), `adding_a_component.md` (web connectors),
+  `learnings.md`, `assignments.md` (A32–A35).
+
+**822 Rust tests** (servers down, so 5 of them skip), **125 frontend**. Fmt, clippy with `-D
+warnings`, typecheck clean. Two mutation checks caught. Hand-checked once against
+`countries.trevorblades.com` through `etl run`. Committed at the user's request; not pushed.

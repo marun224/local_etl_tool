@@ -379,3 +379,43 @@ the fuller record. From Phase 10 on, a section is added at the end of each phase
   `s3:`. *When a bug can pass silently on one platform, assert its absence.*
 - **`cat > file` with nothing piped in waits forever.** It hung a command for ten minutes.
 - **Anchors that assume line wrapping.** A splice script's assert caught it before any harm.
+
+## Phase 10d — SaaS GraphQL (2026-09-23)
+
+**Concepts**
+- **A status code is the transport's opinion, not the application's.** GraphQL puts its
+  failures in the body of a 200. A client that trusts the status loads the hole in the data as
+  if it were whole. Knowing where a protocol reports failure is the first question for any
+  connector.
+- **Relay connections.** `first`/`after` in, `nodes` and `pageInfo { hasNextPage endCursor }`
+  out. The server holds the position, so a cursor shifts less than an offset when the data
+  moves under the read.
+- **Refactor, prove, then build.** Moving REST's HTTP layer was proved behaviour-neutral by
+  REST's own tests, unedited, before a line of GraphQL existed. A refactor proved by tests
+  written after it proves much less.
+- **Mutation checks.** Breaking a rule on purpose and watching the tests fail is how you know
+  the tests are about the rule.
+
+**Decisions and why**
+- **One retry loop, with a judgement hook** (`Client::send_judged`), rather than GraphQL
+  wrapping REST's client in a second loop. Two loops would multiply their `retries` budgets
+  and could disagree about `Retry-After`.
+- **Any error fails**, even with partial data (Settled decision 20); **only all-throttling is
+  retried** (21), so a real error is never hidden behind a retry.
+- **A light textual check, not a parser** (22). It catches the query that never mentions
+  `$after` and cannot reject a valid query; the server stays the authority.
+- **The sink always sends a list**, even for one row: the variable is typed as a list, and a
+  request's shape should not depend on how many rows happened to be left.
+- **A `code` property kind** rather than labelling a GraphQL query as `sql`. Kinds are how the
+  canvas and the manifest describe a value; a wrong label misleads both.
+
+**Mistakes worth not repeating**
+- **Escapes through two interpreters.** `\n` and a trailing `\` inside a Python heredoc run by
+  the Bash tool arrived as real newlines: three broken string literals, which the compiler
+  caught, and ten spaces in the middle of an error message, which nothing caught until it was
+  read by eye. *Edits containing backslashes go through the editor tool, and a message worth
+  keeping is worth one test that pins it whole.*
+- **A splice by line numbers was off by one**, leaving a closing brace in the wrong file. The
+  compiler caught it, but *print the boundaries before cutting.*
+- **`Set-Content -Encoding utf8` wrote a BOM again**, this time into a scratch pipeline, and
+  the pipeline parser refuses a BOM. Recorded in the tracker as a real, small gap.

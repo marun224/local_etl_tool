@@ -80,6 +80,10 @@ pub enum PropertyType {
     Path,
     /// A SQL expression or statement — the canvas offers a code editor.
     Sql,
+    /// Text over several lines that is not SQL: a GraphQL query, a JSON
+    /// request body. The canvas offers the same editor as for SQL; the kind is
+    /// separate so nothing mistakes it for SQL.
+    Code,
     Bool,
     Integer,
     Number,
@@ -97,9 +101,11 @@ impl PropertyType {
     /// Whether a JSON value is acceptable for this type.
     pub fn accepts(self, value: &JsonValue) -> bool {
         match self {
-            PropertyType::Text | PropertyType::Path | PropertyType::Sql | PropertyType::Enum => {
-                value.is_string()
-            }
+            PropertyType::Text
+            | PropertyType::Path
+            | PropertyType::Sql
+            | PropertyType::Code
+            | PropertyType::Enum => value.is_string(),
             PropertyType::Bool => value.is_boolean(),
             PropertyType::Integer => value.is_i64() || value.is_u64(),
             PropertyType::Number => value.is_number(),
@@ -115,7 +121,9 @@ impl PropertyType {
     /// How to describe the expected shape in an error message.
     pub fn expectation(self) -> &'static str {
         match self {
-            PropertyType::Text | PropertyType::Path | PropertyType::Sql => "must be text",
+            PropertyType::Text | PropertyType::Path | PropertyType::Sql | PropertyType::Code => {
+                "must be text"
+            }
             PropertyType::Enum => "must be one of the listed values",
             PropertyType::Bool => "must be true or false",
             PropertyType::Integer => "must be a whole number",
@@ -169,6 +177,10 @@ impl PropertySpec {
 
     pub fn sql(name: &str) -> Self {
         Self::new(name, PropertyType::Sql)
+    }
+
+    pub fn code(name: &str) -> Self {
+        Self::new(name, PropertyType::Code)
     }
 
     pub fn boolean(name: &str) -> Self {
@@ -510,6 +522,9 @@ mod tests {
     fn property_types_accept_only_their_own_shape() {
         assert!(PropertyType::Text.accepts(&json!("x")));
         assert!(!PropertyType::Text.accepts(&json!(1)));
+
+        assert!(PropertyType::Code.accepts(&json!("query {\n  x\n}")));
+        assert!(!PropertyType::Code.accepts(&json!({"query": "x"})));
 
         assert!(PropertyType::Bool.accepts(&json!(true)));
         assert!(!PropertyType::Bool.accepts(&json!("true")));

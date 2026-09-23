@@ -16,6 +16,10 @@
 use etl_plugin_sdk::Connector;
 use std::sync::OnceLock;
 
+#[cfg(test)]
+mod fixture;
+pub mod graphql;
+mod http;
 pub mod rest;
 pub mod xml;
 
@@ -29,6 +33,8 @@ pub fn all() -> &'static [(String, Connector)] {
             Connector::Sink(&xml::XmlSink),
             Connector::Source(&rest::RestSource),
             Connector::Sink(&rest::RestSink),
+            Connector::Source(&graphql::GraphqlSource),
+            Connector::Sink(&graphql::GraphqlSink),
         ]
         .into_iter()
         .map(|connector| (connector.spec().id, connector))

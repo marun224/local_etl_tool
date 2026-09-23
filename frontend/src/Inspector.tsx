@@ -338,13 +338,14 @@ function Control({
       );
 
     case "sql":
+    case "code":
       return (
         <textarea
           className="code"
           rows={3}
           spellCheck={false}
           value={toText(value)}
-          onChange={(event) => onChange(fromText("sql", event.target.value))}
+          onChange={(event) => onChange(fromText(spec.type, event.target.value))}
         />
       );
 

@@ -44,6 +44,7 @@ const everything: ComponentSpec = {
     { name: "title", label: "Title", type: "text", required: true, help: "Some words." },
     { name: "file", label: "File", type: "path" },
     { name: "predicate", label: "Predicate", type: "sql" },
+    { name: "query", label: "Query", type: "code" },
     { name: "header", label: "Header", type: "bool", default: true },
     { name: "limit", label: "Limit", type: "integer" },
     { name: "ratio", label: "Ratio", type: "number" },
@@ -129,6 +130,16 @@ describe("the control chosen for each property type", () => {
     panel();
 
     expect(within(fieldFor("Predicate")).getByRole("textbox").tagName).toBe("TEXTAREA");
+  });
+
+  it("gives code a textarea too, and writes its lines as typed", () => {
+    const { props } = panel();
+    const box = within(fieldFor("Query")).getByRole("textbox");
+    expect(box.tagName).toBe("TEXTAREA");
+
+    fireEvent.change(box, { target: { value: "query {\n  orders { id }\n}" } });
+
+    expect(props()).toEqual({ query: "query {\n  orders { id }\n}" });
   });
 
   it("gives a number a numeric input, stepped for an integer", () => {
