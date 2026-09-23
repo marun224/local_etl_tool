@@ -16,6 +16,7 @@
 //! number of values that arrived before a failure is what identifies the stage
 //! that failed.
 
+use crate::native::{self, Staging};
 use crate::plan::{Control, Plan, Stage};
 use crate::session::{Session, SessionError};
 use crate::sql::quote_path;
@@ -309,6 +310,12 @@ pub fn preview(
 
     let limit = limit.clamp(1, PREVIEW_LIMIT_MAX);
 
+    // A native source upstream of the node has to have read its data for the
+    // view over it to hold anything. Sinks are already gone from `stages`, so
+    // nothing is delivered: a preview stays a read.
+    let mut staging = Staging::default();
+    native::stage_sources(stages.iter().copied(), options, &mut staging)?;
+
     let mut script = String::new();
 
     if let Some(directory) = locate_extension_dir(options) {
@@ -420,6 +427,18 @@ fn run_one_script(
     prepare_sinks(plan, options)?;
     prepare_spills(plan, options)?;
 
+    // The clock covers native staging and delivery too: reading an XML file or
+    // an API is part of the run, and the whole-run figure is the one timing
+    // that is supposed to need no caveat.
+    let started = Instant::now();
+
+    // Native sources read their data before DuckDB starts; native sinks need
+    // somewhere for DuckDB to write. Both files go when `staging` does, on
+    // every path out of this function.
+    let mut staging = Staging::default();
+    native::prepare_sinks(&plan.stages, options, &mut staging)?;
+    let mut notes = native::stage_sources(&plan.stages, options, &mut staging)?;
+
     let mut command = Command::new(&binary);
     command.arg("-json").arg("-c").arg(&script);
 
@@ -427,12 +446,10 @@ fn run_one_script(
         command.current_dir(directory);
     }
 
-    let started = Instant::now();
     let output = command.output().map_err(|source| ExecError::Spawn {
         path: binary.display().to_string(),
         source,
     })?;
-    let elapsed = started.elapsed();
 
     // Whatever happened, the spill files are scratch space and should not be
     // left behind. Cleared before any early return below, so a failed run does
@@ -466,16 +483,24 @@ fn run_one_script(
         return Err(attribute_failure(plan, options.counts, &counts, message));
     }
 
+    // The run succeeded, so native sinks may deliver. One script has no
+    // branches, so nothing was skipped.
+    notes.extend(native::deliver_sinks(
+        &plan.stages,
+        &HashSet::new(),
+        options,
+    )?);
+
     Ok(RunReport {
         stages: outcomes(plan, options.counts, &counts),
         watermarks: read_watermarks(plan, &parse_watermarks(&stdout)),
-        elapsed,
+        elapsed: started.elapsed(),
         duckdb_bin: binary,
         // The report is read by people and written to logs, so it carries the
         // masked script. The unmasked one went to DuckDB and nowhere else.
         script: redact(&script, &options.redact),
         spilled,
-        notes: Vec::new(),
+        notes,
         failures: Vec::new(),
     })
 }
@@ -612,6 +637,14 @@ fn prepare_sinks(plan: &Plan, options: &RunOptions) -> Result<(), ExecError> {
             continue;
         };
 
+        // `s3://bucket/key` is not a directory to make. Until Phase 10c ran an
+        // S3 sink against a real endpoint, this created a local folder called
+        // `s3:` on Linux and failed outright on Windows, so `snk.cloud.s3` had
+        // never once worked there. The store makes its own prefixes.
+        if path.contains("://") {
+            continue;
+        }
+
         let resolved = resolve_against(path, options);
 
         if stage.sink_mode.as_deref() == Some("error_if_exists") && resolved.exists() {
@@ -640,7 +673,7 @@ fn prepare_sinks(plan: &Plan, options: &RunOptions) -> Result<(), ExecError> {
 /// applied to the reported script and to DuckDB's own error output, which is
 /// the path that actually leaks: a failed `ATTACH` quotes the whole connection
 /// string back, password and all.
-fn redact(text: &str, secrets: &[String]) -> String {
+pub(crate) fn redact(text: &str, secrets: &[String]) -> String {
     let mut out = text.to_string();
 
     for secret in secrets {
@@ -688,7 +721,7 @@ fn clear_spills(plan: &Plan, options: &RunOptions) -> usize {
 }
 
 /// A path from the plan, against the run's working directory.
-fn resolve_against(path: &str, options: &RunOptions) -> PathBuf {
+pub(crate) fn resolve_against(path: &str, options: &RunOptions) -> PathBuf {
     match &options.working_dir {
         Some(directory) => directory.join(path),
         None => PathBuf::from(path),
@@ -877,6 +910,13 @@ fn run_driven(plan: &Plan, options: &RunOptions, binary: PathBuf) -> Result<RunR
     prepare_sinks(plan, options)?;
     prepare_spills(plan, options)?;
 
+    // From before native staging, as on the one-script path.
+    let started = Instant::now();
+
+    let mut staging = Staging::default();
+    native::prepare_sinks(&plan.stages, options, &mut staging)?;
+    let staged = native::stage_sources(&plan.stages, options, &mut staging)?;
+
     let mut session = Session::open(
         &binary,
         options.working_dir.as_deref(),
@@ -885,8 +925,6 @@ fn run_driven(plan: &Plan, options: &RunOptions, binary: PathBuf) -> Result<RunR
     )
     .map_err(|source| session_error(source, &extensions, options))?;
 
-    let started = Instant::now();
-
     let mut outcomes: Vec<StageOutcome> = Vec::with_capacity(plan.stages.len());
     let mut failures: Vec<StageFailure> = Vec::new();
     // Stages that cannot run because something they read never got created.
@@ -894,7 +932,7 @@ fn run_driven(plan: &Plan, options: &RunOptions, binary: PathBuf) -> Result<RunR
     // Stages downstream of a branch that went the other way. Separate from
     // `unusable` because this is the pipeline working, not failing.
     let mut untaken: HashSet<String> = HashSet::new();
-    let mut notes: Vec<String> = Vec::new();
+    let mut notes: Vec<String> = staged;
     let mut watermarks: Vec<Watermark> = Vec::new();
     let mut script = String::new();
 
@@ -1021,9 +1059,19 @@ fn run_driven(plan: &Plan, options: &RunOptions, binary: PathBuf) -> Result<RunR
         }
     }
 
+    let _ = session.close();
+
+    // Deliver only what a fully successful run produced, which is the rule
+    // watermarks follow too. A run that carried on past a failure still failed,
+    // and delivering half of it would be the one outcome nobody could undo.
+    if failures.is_empty() {
+        notes.extend(native::deliver_sinks(&plan.stages, &untaken, options)?);
+    } else {
+        notes.extend(native::withheld(&plan.stages));
+    }
+
     let elapsed = started.elapsed();
     let spilled = clear_spills(plan, options);
-    let _ = session.close();
 
     // A run that carried on past a failure still failed, but the report is the
     // reason anyone asked it to carry on: it says which stages ran, which were

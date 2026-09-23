@@ -462,9 +462,7 @@ pub(crate) fn to_hex(bytes: &[u8]) -> String {
 }
 
 fn from_hex(text: &str) -> Option<Vec<u8>> {
-    // `usize::is_multiple_of` would read better but is stable only in 1.87,
-    // and the workspace declares 1.80.
-    if text.len() % 2 != 0 {
+    if !text.len().is_multiple_of(2) {
         return None;
     }
 

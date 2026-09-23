@@ -13,6 +13,7 @@
 pub mod context;
 pub mod exec;
 pub mod lineage;
+mod native;
 pub mod params;
 pub mod plan;
 pub mod report;
@@ -30,8 +31,8 @@ pub use lineage::{lineage, Lineage};
 pub use params::{resolve, ParamError, ParamWarning, Resolved, Resolver};
 pub use plan::specs::{registry, Component, Registry};
 pub use plan::{
-    compile, compile_with, reject_relation, CompileOptions, CountProbe, Input, Plan, Stage,
-    StageIncremental, StageKind, Warning, REJECT_SUFFIX,
+    compile, compile_with, reject_relation, CompileOptions, CountProbe, Direction, Input,
+    NativeStep, Plan, Stage, StageIncremental, StageKind, Warning, NATIVE_DIR, REJECT_SUFFIX,
 };
 pub use report::report_lines;
 pub use session::{Answer, Session, SessionError};

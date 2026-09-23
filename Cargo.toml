@@ -7,6 +7,8 @@ members = [
     "crates/scheduler",
     "crates/console",
     "crates/runner",
+    "crates/plugin-sdk",
+    "crates/connectors",
     "crates/duckdb-engine",
     "crates/cli",
     "apps/desktop",
@@ -16,7 +18,7 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-rust-version = "1.80"
+rust-version = "1.88"
 
 [workspace.dependencies]
 # Internal
@@ -26,6 +28,8 @@ etl-state = { path = "crates/state", version = "0.1.0" }
 etl-scheduler = { path = "crates/scheduler", version = "0.1.0" }
 etl-console = { path = "crates/console", version = "0.1.0" }
 etl-runner = { path = "crates/runner", version = "0.1.0" }
+etl-plugin-sdk = { path = "crates/plugin-sdk", version = "0.1.0" }
+etl-connectors = { path = "crates/connectors", version = "0.1.0" }
 etl-duckdb-engine = { path = "crates/duckdb-engine", version = "0.1.0" }
 
 # External

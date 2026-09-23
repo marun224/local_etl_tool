@@ -1,0 +1,80 @@
+{
+  "formatVersion": 1,
+  "name": "orders_xml",
+  "nodes": [
+    {
+      "id": "read_orders",
+      "type": "source",
+      "position": {
+        "x": 0.0,
+        "y": 0.0
+      },
+      "data": {
+        "label": "Orders XML",
+        "componentId": "src.file.xml",
+        "properties": {
+          "path": "${workspace}/samples/data/orders.xml",
+          "record": "order",
+          "columns": {
+            "@id": "INTEGER",
+            "customer_id": "VARCHAR",
+            "order_ts": "TIMESTAMP",
+            "amount": "DECIMAL(10,2)",
+            "amount@currency": "VARCHAR",
+            "status": "VARCHAR",
+            "note": "VARCHAR"
+          }
+        },
+        "alias": "orders"
+      }
+    },
+    {
+      "id": "from_2026",
+      "type": "transform",
+      "position": {
+        "x": 280.0,
+        "y": 0.0
+      },
+      "data": {
+        "label": "Orders from 2026",
+        "componentId": "xf.filter",
+        "properties": {
+          "predicate": "order_ts >= '2026-01-01'"
+        }
+      }
+    },
+    {
+      "id": "write_orders",
+      "type": "sink",
+      "position": {
+        "x": 560.0,
+        "y": 0.0
+      },
+      "data": {
+        "label": "2026 orders XML",
+        "componentId": "snk.file.xml",
+        "properties": {
+          "path": "${workspace}/samples/out/orders_2026.xml",
+          "root": "orders",
+          "record": "order"
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "source": "read_orders",
+      "target": "from_2026",
+      "sourceHandle": "main",
+      "targetHandle": "in"
+    },
+    {
+      "id": "e2",
+      "source": "from_2026",
+      "target": "write_orders",
+      "sourceHandle": "main",
+      "targetHandle": "in"
+    }
+  ]
+}

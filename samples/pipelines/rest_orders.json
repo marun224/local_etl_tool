@@ -1,0 +1,92 @@
+{
+  "formatVersion": 1,
+  "name": "rest_orders",
+  "nodes": [
+    {
+      "id": "read_orders",
+      "type": "source",
+      "position": {
+        "x": 0.0,
+        "y": 0.0
+      },
+      "data": {
+        "label": "Orders API",
+        "componentId": "src.saas.rest",
+        "properties": {
+          "url": "${api_base}/orders",
+          "auth": "bearer",
+          "token": "${SECRET:api_token}",
+          "records": "/data",
+          "pagination": "cursor",
+          "cursor_path": "/next",
+          "columns": {
+            "order_id": "INTEGER",
+            "customer_id": "VARCHAR",
+            "order_ts": "TIMESTAMP",
+            "amount": "DECIMAL(10,2)",
+            "status": "VARCHAR"
+          }
+        },
+        "alias": "orders"
+      }
+    },
+    {
+      "id": "large_only",
+      "type": "transform",
+      "position": {
+        "x": 280.0,
+        "y": 0.0
+      },
+      "data": {
+        "label": "Over 100",
+        "componentId": "xf.filter",
+        "properties": {
+          "predicate": "amount > 100"
+        }
+      }
+    },
+    {
+      "id": "post_large",
+      "type": "sink",
+      "position": {
+        "x": 560.0,
+        "y": 0.0
+      },
+      "data": {
+        "label": "Large orders API",
+        "componentId": "snk.saas.rest",
+        "properties": {
+          "url": "${api_base}/large-orders",
+          "auth": "bearer",
+          "token": "${SECRET:api_token}",
+          "batch_size": 2,
+          "wrap": "orders"
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "source": "read_orders",
+      "target": "large_only",
+      "sourceHandle": "main",
+      "targetHandle": "in"
+    },
+    {
+      "id": "e2",
+      "source": "large_only",
+      "target": "post_large",
+      "sourceHandle": "main",
+      "targetHandle": "in"
+    }
+  ],
+  "parameters": {
+    "api_base": {
+      "type": "string",
+      "required": true,
+      "default": "http://127.0.0.1:8099",
+      "description": "The API's base URL. The committed default is a local fixture; point it at a real API with --param api_base=https://..."
+    }
+  }
+}

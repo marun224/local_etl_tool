@@ -1626,3 +1626,210 @@ python -c "...GLIBC_ versions in tools\duckdb\targets\linux_amd64\duckdb..." # m
 
 Not committed, not pushed. Docker's daemon is not running, so the container step itself was not
 rehearsed here; the glibc numbers were read from the binaries instead.
+
+## 2026-09-23 — Phase 9 closed; Phase 10 planned
+
+```powershell
+git push origin main          # "Everything up-to-date": the user had already pushed 64878e6, e7f629b
+gh run list --limit 3         # 35833839177 success
+gh run view 35833839177       # all six jobs green; Windows 685 tests, Ubuntu 675, both artifacts,
+#                               the bare debian:12-slim container included
+```
+
+```text
+# Reading, to design Phase 10 (no code changed)
+#  - PLAN_duckle_parity.md: Phase 10, and Phase 4's XML/DuckLake deferral
+#  - Cargo.toml and every crate's [dependencies]
+#  - duckdb-engine: Stage, Plan, RunOptions, run(), run_one_script(), preview(),
+#    prepare_sinks/prepare_spills/clear_spills, the src.file.json spec
+#
+# Edits
+#  - docs/PLAN_duckle_parity.md  — "Phase 10: split and design": the bridge, the crates,
+#                                  10a (SDK + XML), 10b (REST), 10c (verify Phase 4 connectors)
+#  - docs/task_tracker.md        — Phase 9 done; Settled decisions 9-15; 10a-10c rows; the pause
+#                                  note rewritten, the CI story moved to the session log
+# A splice script's assert caught an off-by-one in its own line numbers before writing;
+# fixed and re-run.
+```
+
+Nothing built. Awaiting the user's sign-off on the Phase 10 plan.
+
+## 2026-09-23 — Phase 10a: the plugin SDK, the staging bridge, and XML
+
+```powershell
+# Scratchpad probes of DuckDB, before designing the bridge (bridge\probe.sql and ts.jsonl)
+duckdb -c ".read probe.sql"     # strings stay VARCHAR (probe data inconclusive, see below);
+#                                   declared columns cast; ragged keys merged with sample_size=-1;
+#                                   COPY FORMAT json writes typed JSON, DECIMAL 7.10 as 7.1;
+#                                   an empty file reads as 0 rows
+# Later, after an end-to-end test disagreed:
+duckdb -c "DESCRIBE SELECT * FROM read_json('ts.jsonl', ...)"   # ISO dates/timestamps ARE inferred
+duckdb -c "... read_json(..., all_varchar=true)"                 # FAILED: no such parameter
+duckdb -c "... read_json(..., dateformat='%Q')"                  # FAILED: format refused
+
+# Dependencies
+cargo add quick-xml -p etl-connectors
+#   "ignoring quick-xml@0.42.0 (which requires rustc 1.86)" -> quick-xml 0.41.0 (+ memchr)
+
+# Building, one crate outward at a time
+cargo clippy -p etl-plugin-sdk -p etl-connectors --all-targets -- -D warnings
+#   FAILED once: deprecated Attribute::unescape_value -> normalized_value(XmlVersion::Implicit1_0)
+cargo test -p etl-plugin-sdk -p etl-connectors        # 28 + 5
+cargo build -p etl-duckdb-engine
+#   FAILED once: E0308 x55, a vec! of fn items no longer coerced once chained; typed the binding
+cargo test -p etl-duckdb-engine
+#   FAILED as designed: the_registry_holds_exactly_these_components (the two XML ids); inventory updated
+cargo test -p etl-duckdb-engine --lib -- --list        # recounting: 301, baseline was 289 + 5
+cargo test -p etl-duckdb-engine --test native
+#   FAILED once: E0277 comparing &String with String in a test
+#   FAILED once: without_declared_columns... got "VARCHAR,TIMESTAMP" -- the probe had been wrong
+#   then 9 passing
+
+# Mutation check, by Edit: deliver regardless of failures on the session path
+cargo test -p etl-duckdb-engine --test native
+#   FAILED as intended: a_run_that_fails_delivers_nothing_even_where_its_copy_succeeded. Reverted.
+
+# Through the real binaries
+cargo build -p etl-cli -p etl-runner
+.\target\debug\etl.exe components                               # 56 component(s)
+.\target\debug\etl.exe validate samples\pipelines\orders_xml.json
+.\target\debug\etl.exe plan samples\pipelines\orders_xml.json
+.\target\debug\etl.exe run samples\pipelines\orders_xml.json    # 12 / 7 / 7
+.\target\debug\etl.exe lineage samples\pipelines\orders_xml.json
+.\target\debug\etl.exe build samples\pipelines\orders_xml.json --out samples\out\ci\orders_xml.exe  # 39.5 MB
+<temp>\orders_xml.exe --workspace E:/workspace_09212026/ETL_Local_Tool   # from outside the repo: 12 / 7 / 7
+
+# The gate
+cargo fmt --all --check                                  # clean
+cargo clippy --workspace --all-targets -- -D warnings    # clean
+cargo test --workspace                                   # 739 passing
+npm --prefix frontend run test                           # 117 passing (3 per committed sample; +1 sample)
+npm --prefix frontend run typecheck                      # clean
+npm --prefix frontend run build                          # clean
+```
+
+```bash
+# The CI steps that changed, rehearsed exactly as written
+count=$(./target/debug/etl.exe components | tail -1 | grep -oE '^[0-9]+')   # 56
+./target/debug/etl.exe run samples/pipelines/orders_{enriched,checked,guarded,xml}.json   # all ok
+./target/debug/etl.exe build samples/pipelines/orders_xml.json --out samples/out/ci/xml.exe
+cd $TEMP/etl_ci_rehearse && ./xml.exe --workspace <repo> | tee xml.txt
+grep -q "7 record(s) written to" xml.txt; test "$(grep -c '<order ' <repo>/samples/out/orders_2026.xml)" = "7"
+node -e "require('yaml')..."                            # gate.yml parses
+```
+
+Not rehearsed here: the XML artifact in the bare Linux container, because Docker's daemon is
+not running. CI's artifact job is the first place that will run it.
+
+Not committed.
+
+## 2026-09-23 — Phase 10b: SaaS REST
+
+`ring` confirmed by the user (Settled decision 16).
+
+```powershell
+cargo add ureq -p etl-connectors
+#   "ignoring ureq@3.4.2 (which requires rustc 1.85)" -> requirement 3.2.1, but the LOCK took 3.4.2:
+#   resolver 2 does not consider rust-version when locking
+cargo metadata --format-version 1      # every locked package above 1.80: clap 1.85, indexmap 1.85,
+#                                        zeroize 1.85, Tauri stack up to 1.88 -- pre-existing
+cargo update -p ureq --precise 3.2.1   # ureq 3.4.2 -> 3.2.1, ureq-proto 0.6.4 -> 0.5.3
+#   Cargo.toml: ureq = "~3.2.1"
+#   FAILED quietly: Set-Content -Encoding utf8 wrote a BOM into crates/connectors/Cargo.toml;
+#   found by reading the bytes, stripped with UTF8Encoding($false)
+cargo add tiny_http@0.12 --dev -p etl-connectors
+cargo build -p etl-connectors           # ring compiled from source with MSVC
+cargo clippy -p etl-connectors --all-targets -- -D warnings
+#   FAILED once: unused `std::io::Read` import in the fixture
+cargo test -p etl-connectors
+#   FAILED: 2 sink tests, bodies empty. A debug test printing what the fixture saw showed
+#   GET requests: the sink defaulted to GET. Fixed (direction-specific default, sink refuses GET)
+#   then 56 passing
+cargo test -p etl-duckdb-engine --lib   # 304 (3 new: check at compile time, URL lineage)
+cargo add tiny_http@0.12 --dev -p etl-duckdb-engine
+cargo test -p etl-duckdb-engine --test native
+#   a bash heredoc of the new tests FAILED on quoting; written via a file instead
+#   12 passing (3 REST pipeline tests)
+cargo clippy --workspace --all-targets -- -D warnings
+#   FAILED once: unused `std::io::Read` again, in the engine fixture
+cargo test --workspace                  # 773 passing
+npm --prefix frontend run test
+#   FAILED: 1 of 120, "That component is not in the registry" -- the etl.exe it asks for the
+#   manifest predated REST
+cargo build -p etl-cli -p etl-runner    # 58 component(s)
+npm --prefix frontend run test          # 120 passing
+npm --prefix frontend run typecheck     # clean
+
+# Real HTTPS, once, by hand (read-only, no credentials)
+$env:ETL_DUCKDB_BIN = "...\tools\duckdb\duckdb.exe"
+etl run <scratchpad>\https\releases.json --workspace <scratchpad>\https
+#   GitHub releases API, pagination=link, max_pages=2: exit 3, "reached max_pages (2)" -- as designed
+etl run <scratchpad>\https\releases_one.json --workspace <scratchpad>\https
+#   3 rows over TLS; published_at typed TIMESTAMP
+```
+
+```text
+# Edits: crates/plugin-sdk (check), crates/connectors (rest.rs, rest/tests.rs, xml.rs check,
+# lib.rs), crates/duckdb-engine (plan/mod.rs check call + url_for_lineage, specs inventory,
+# builder_tests, tests/native.rs), samples/pipelines/rest_orders.json, gate.yml (58),
+# docs: connectors.md, PLAN amendment, task_tracker.md, learnings.md, assignments.md
+```
+
+Not committed.
+
+## 2026-09-23 — Phase 10c: Phase 4's connectors against real systems
+
+```powershell
+# Settled decision 17: rust-version 1.80 -> 1.88 in Cargo.toml
+cargo clippy --workspace --all-targets -- -D warnings
+#   FAILED once: manual is_multiple_of in crates/secrets (the Phase 5 workaround); restored
+
+# Lake fixtures, in a scratchpad venv (nothing global)
+duckdb -c "... COPY (...) TO 'dd' (FORMAT delta)"   # FAILED: DuckDB cannot write Delta
+python -m venv <scratchpad>\lakevenv
+<venv>\python -m pip install deltalake "pyiceberg[pyarrow,sql-sqlite]"   # 1.6.5, 0.12.0
+<venv>\python make_tables.py
+#   FAILED once: pyiceberg turns a file:// warehouse URI into /C:/...; plain path instead
+#   copied to crates/duckdb-engine/tests/fixtures/lake/ (13 files, 30 KB)
+etl run <scratchpad>\lake\ws\lake.json
+#   FAILED: my pipeline gave xf.sql two inputs; rewritten with two sinks
+#   FAILED: Iceberg by metadata file + allow_moved_paths -> "…metadata.json\metadata/snap-….avro"
+duckdb -c "... iceberg_scan(root, allow_moved_paths=true, version='00002-…')"   # 12 rows
+#   version 00001 -> 7 rows; without version -> "no version-hint" error
+cargo test -p etl-duckdb-engine --test verified     # 4 lake tests
+#   and again with the original scratchpad table renamed away: still 4
+
+# S3 access properties; golden tests
+#   a bash command began with `cat > /tmp/s3tests.rs`, which waited on stdin for 10 minutes;
+#   stopped with TaskStop, nothing had been written
+cargo test -p etl-duckdb-engine --lib               # 310
+
+# Servers (Docker started by the user)
+./scripts/test-services.ps1
+#   FAILED: PS 5.1 + ErrorActionPreference=Stop died on docker's stderr; now by exit code
+#   FAILED: minio/minio "repository does not exist" on Docker Hub; quay.io/minio/minio works
+#   then Postgres 16, MySQL 8.4 and MinIO ready, bucket etl-test made with quay.io/minio/mc
+cargo test -p etl-duckdb-engine --test verified -- --test-threads 1
+#   FAILED: mysql read-back, "INTERNAL Error: Failed to bind column reference"
+#   FAILED: S3 write, "could not prepare the output directory …\s3://etl-test/…"
+duckdb -c "... ATTACH mysql ...; count(*) on table / on a view / ..."   # table ok, view fails
+duckdb -c "... SET mysql_aggregate_pushdown_enabled=false; ..."         # every case works
+#   fixed both; then FAILED once, intermittently: "Could not move file: Access is denied"
+#   overwriting the test's own Parquet output; tests now write each read-back to its own file
+cargo test -p etl-duckdb-engine --test verified     # 9 passing, three runs in a row
+cargo test --workspace                              # 788 passing (servers up)
+./scripts/fetch-duckdb-extensions.ps1 -Extensions $env:DUCKDB_TEST_EXTENSIONS.Split(',')
+#   the new CI fetch line, rehearsed: all six present and loading
+```
+
+Not committed.
+
+## 2026-09-23 — Paused by the user
+
+```powershell
+./scripts/test-services.ps1 -Stop     # containers and network removed; none left running
+git status -sb                        # main...origin/main, ~50 paths uncommitted (Phase 10)
+```
+
+Docs only: the tracker's pause note and session log; the WebApp repo's RESUME_HERE.md and
+TASK_TRACKER.md now point at its 8 site-sync questions. Not committed.

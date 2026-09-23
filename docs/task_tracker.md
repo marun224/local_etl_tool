@@ -3,75 +3,69 @@
 **State only.** Design lives in [PLAN_duckle_parity.md](PLAN_duckle_parity.md). Read this file
 first when picking the project back up.
 
-> ## ▶ Resumed 2026-09-23 — every CI job has now run; two fixes are written and **unpushed**
+> ## ⏸ Paused 2026-09-23 by the user — **Phases 10a, 10b and 10c are done**, uncommitted, CI not yet run on any
 >
-> **Phase 9 is committed and pushed** as `ad7fc51` (2026-09-23 07:42 +0530), and `gate.yml`
-> ran on it: [run 35809441173](https://github.com/marun224/local_etl_tool/actions/runs/35809441173),
-> **failure**. Read on 2026-09-23. **The Rust itself passed**: on Windows, fmt, clippy and all the
-> tests were green. What failed was the workflow and one script, in three places:
+> **Where it stopped.** After 10c the user chose the website's site-to-product sync next, which
+> lives in the other repo (`E:\workspace_09212026\ETL_Local_WebApp`). There, the site was
+> re-audited against this engine and **8 questions** were written in its
+> `docs/QUESTIONS_site_product_sync.md`, awaiting answers. Then the user paused. **Nothing in
+> this repo is mid-edit**: the gate was green at the last change, and the Docker test services
+> were stopped and removed.
 >
-> | Job | Failed at | Cause | Fix (uncommitted) |
-> |---|---|---|---|
-> | `gate (windows)` | *The registry is all there* | `target/debug/etl.exe` not found. `cargo test` builds the CLI only as a test harness under `deps/`; every rehearsal machine had an old `cargo build` lying around | `gate.yml`: new step `cargo build -p etl-cli` after the tests |
-> | `gate (ubuntu)` | *Fetch DuckDB…* | `fetch-duckdb-extensions.ps1` hard-coded `duckdb.exe`. 9d fixed host detection in `fetch-duckdb.ps1` and missed this script | the script picks `.exe` only on Windows |
-> | `build-runner.ps1` | *Running it again is a no-op* | the second run **did** skip; the script says so with `Write-Host` (stream 6) and `\| Out-String` captured nothing | `gate.yml`: `6>&1` |
-> | `artifact` (both) | never ran | `needs: gate` | — |
-> | `frontend` | **passed** | | |
+> **To resume, in this order:**
 >
-> **How each fix was checked locally, before any push:**
-> - The no-op bug was **reproduced on this machine**. Captured length 0 without `6>&1`, and 151
->   with it and a match. The Linux runner left in `tools/` from 9c makes the script take the
->   same "already present" branch without Docker.
-> - The extensions script still works on Windows: `excel already present`, `excel loads`, exit 0.
->   The Linux branch is checked only by reading it, because Docker's daemon is not running here.
-> - The registry and samples steps' exact bash lines pass against the prebuilt `etl.exe`.
-> - The Windows `artifact` job, which has never run in CI, was rehearsed: bake `orders_checked`,
->   copy it out of the repo, run it with `--workspace` pointing back, and `Ran 6 stage(s)`.
-> - The YAML parses: 4 jobs, and the new step sits between *Tests* and *The registry…*.
+> 1. **Commit and push this repo's Phase 10 work** (about 50 paths: 10a partly staged by the
+>    user, 10b and 10c unstaged). The user commits. CI has never run on any of Phase 10, and its
+>    first run exercises a lot for the first time: the XML artifact steps, the Linux server
+>    tests via `scripts/test-services.ps1`, and a much larger extension fetch under a new cache
+>    key. Expect it to find something.
+> 2. **Answer the website's 8 questions** in the WebApp repo, then its plan, then its build.
+> 3. Or, instead of 2, **Phase 10's next family** (GraphQL first). The user chooses.
 >
-> **The second run** ([35831651720](https://github.com/marun224/local_etl_tool/actions/runs/35831651720),
-> after `91a5f24` + `14be255` were pushed on 2026-09-23 at the user's request) confirmed all three
-> fixes: **`gate (windows)`, `build-runner.ps1` and `frontend` are green.** `gate (ubuntu)` passed fmt
-> and clippy, then failed **one test of 668**:
-> `session::tests::an_error_message_does_not_leak_into_the_next_statement`. The `artifact` jobs
-> still have not run, because they need `gate`.
+> ```powershell
+> gh run list --limit 3                         # after pushing: watch the first Phase 10 run
+> ./scripts/test-services.ps1                   # Docker running: Postgres, MySQL, MinIO
+> cargo test --workspace                        # expect 788 with those variables set
+> ./scripts/test-services.ps1 -Stop             # tidy up afterwards
+> ```
 >
-> **That failure is a real race, not a Linux quirk.** stdout and stderr are separate pipes. A
-> failed statement's marker can come back on stdout before its message arrives on stderr, and
-> the next `execute` then picks the message up as its own. It passed in the 9d container and
-> 200 times in a row on Windows; a busier runner lost the race. **The engine has the same
-> exposure, not just the test:** `exec.rs:1270` (session transport with `--no-counts`) can
-> report a failed stage as succeeded and blame the next one, and `exec.rs:1322` can turn "no new
-> rows" into an error. The counts-on path is covered only by `STDERR_GRACE`'s 250 ms, which is
-> timing rather than a guarantee.
+> **Phase 9 closed on 2026-09-23.** [Run 35833839177](https://github.com/marun224/local_etl_tool/actions/runs/35833839177)
+> of `gate.yml` is **green on all six jobs**: the Windows gate (685 tests), the Ubuntu gate
+> (675), both `artifact` jobs including the bare, offline `debian:12-slim` container, and
+> `build-runner.ps1` and `frontend`. It took three runs; what each found is in the session log
+> under *2026-09-23 — Phase 9 closed*.
 >
-> **Fixed in the working tree, not pushed:** stderr is now framed the way stdout is. Every
-> statement is followed by `SELECT error('__etl_errmark_N__')` as well as the stdout marker,
-> and `read_answer` reads each stream up to its own marker. `STDERR_GRACE` and
-> `Session::message()` are gone. Tried in the scratchpad first against the real `duckdb.exe`
-> (0 misattributed messages in 500 alternating statements, under 1 ms per statement), then built.
-> Seven new tests, **685 in all**. `a_message_that_arrives_after_the_rows_still_belongs_to_its_statement`
-> forces the race with channels and a 150 ms delay, and it **fails** when the old
-> "whatever stderr holds now" read is put back (checked by mutation, reverted by edit). The
-> end-to-end suite went from 9.7 s to 2.8 s, since nothing waits out a grace period any more.
+> **Phase 10a was built on 2026-09-23**, the same day the plan was signed off: the plugin SDK,
+> the staging bridge, and `src.file.xml` / `snk.file.xml`. **56 components, 739 Rust tests**
+> (729 on Linux), 117 frontend. Fmt, clippy and the gate are green on this machine, and the XML
+> pipeline runs from a built artifact outside the repo. **CI has not run on it yet**: nothing
+> is committed. What it built and found is under *From Phase 10a* and in the session log.
 >
-> **The new prelude test found a second, older bug.** A session's prelude checked only that
-> `SELECT 1` returned rows, and a failed `LOAD` does not stop it. **A session never detected a
-> missing extension.** It now also refuses when the prelude said anything. A successful `LOAD`
-> writes 0 bytes to stderr, which was measured before relying on it.
+> **Phase 10b was built on 2026-09-23** too: `src.saas.rest` and `snk.saas.rest`, with five
+> pagination styles, bearer/basic/header auth, retries that honour `Retry-After`, and a
+> `max_pages` cap that errors rather than stops. **58 components, 773 Rust tests** (763 on
+> Linux), 120 frontend. Real HTTPS was checked once by hand against GitHub's public API; the
+> suite itself never leaves 127.0.0.1. What it built and found is under *From Phase 10b*.
 >
-> **The re-run of the failed job** (same run, attempt 2, at the user's request) passed the Ubuntu
-> gate, by luck as expected, and so ran the `artifact` jobs for the first time:
-> **`artifact (windows)` green**. `artifact (ubuntu)` baked and ran from elsewhere, then failed in
-> the bare `debian:12-slim` container: `GLIBC_2.39 not found`. That job built `etl-runner` on the
-> ubuntu-24.04 host, not in the bookworm image the project ships from. It is the 9c glibc lesson,
-> found by a different road. **Fixed in the working tree, not pushed:** on Linux the job now runs
-> `build-runner.ps1` and bakes with `--runner tools/runners/linux_amd64/etl-runner`. Checked here
-> without Docker: the bookworm runner needs glibc ≤ 2.34 and the Linux DuckDB ≤ 2.25, both under
-> Debian 12's 2.36; the YAML parses.
+> **Phase 10c was done on 2026-09-23** too: Phase 4's Postgres, MySQL, Delta, Iceberg and S3
+> connectors run against real systems for the first time, and **three of the five were
+> broken**. `snk.cloud.s3` had never worked on Windows; `src.db.mysql` could not be counted or
+> aggregated; `src.lake.iceberg` could not read a moved table the way its help said to. All
+> three are fixed and pinned by tests that failed first. **788 Rust tests** (778 on Linux)
+> with the servers up. See *From Phase 10c* for the table.
 >
-> **After those two land, every job has a fix for what it last found.** Nothing is known to be
-> failing. Phase 9 is done when the next run is green.
+> **The declared Rust version is now 1.88** (Settled decision 17), which is what the lockfile
+> already needed.
+>
+> **Next:** the website's site-to-product sync is unblocked (its questions wait in the WebApp
+> repo), and Phase 10's later families remain, GraphQL first. The user chooses.
+>
+> **`ring` is accepted** as rustls's cryptography provider (Settled decision 16, 2026-09-23).
+>
+> **Commits.** The user commits. Claude commits or pushes only when explicitly asked in the
+> moment. This machine has **no global git identity**; when asked, Claude uses
+> `-c user.name="Arun M" -c user.email=marun.mahadevu@gmail.com` per command, the identity on
+> every commit here, and writes no git config. (User instructions, 2026-09-23.)
 >
 > **The project is on a new machine.** It moved from `D:\workspace\ETL_Local_Tool` (user `mr`)
 > to `E:\workspace_09212026\ETL_Local_Tool` (user `admin`). What came across and what did not,
@@ -86,45 +80,29 @@ first when picking the project back up.
 > | node 24, npm, git, Docker (daemon not running), Python 3.12 (no PyYAML) | present |
 > | `gh` | 2.101.0, installed 2026-09-23, logged in as `marun224`. Not on PATH in terminals opened before the install: use `"C:\Program Files\GitHub CLI\gh.exe"` or restart VS Code |
 >
-> **Checked here on 2026-09-23 without Rust:** frontend 114 tests passing, typecheck clean,
-> build clean; the prebuilt `etl.exe` lists 54 components and the three samples print
-> 12/5/7/6/6, 12/10+2/9+1/9/2/1, and 12 through with the branch taken.
-> **The full local gate is green on this machine** (2026-09-23, after the toolchain install):
-> `cargo fmt --all --check` clean, `cargo clippy --workspace --all-targets -- -D warnings`
-> clean, **`cargo test --workspace` 678 passing** (48 cli, 65 console, 10 desktop, 282 engine,
-> 51 e2e, 15 metadata, 26 runner, 113 scheduler, 23 secrets, 45 state). A cold build took
-> 4m26s for clippy and 8m39s to the end of the tests. After the tests, `target\debug\etl.exe`
-> *still* carried its 2026-09-17 timestamp — the CI bug, seen directly — and the new
-> `cargo build -p etl-cli` step replaced it (12:51), with the samples unchanged.
->
 > **To resume:**
 >
 > ```powershell
-> # the user commits and pushes the session fix and the artifact-job fix, then:
-> gh run watch                     # the second run of gate.yml
-> gh run view <id> --log-failed    # whatever it finds
+> # read PLAN_duckle_parity.md, "Phase 10: split and design", then:
+> cargo test --workspace            # expect 788; without the test servers 5 of those only skip
+> .\target\debug\etl.exe components  # expect 58
+> gh run list --limit 3             # the last run should be green
 > ```
->
-> Phase 9 is done when that run is green: all four jobs, on both operating systems.
->
-> **Commits are the user's.** Claude does not `git add`, `commit` or `push` in this repo —
-> changes are left in the working tree with a suggested message. (User instruction,
-> 2026-09-23. This overrides the workflow file's "git on start" rule.)
 >
 > **What the workflow does**, and what was checked locally before writing it:
 >
 > | Job | Checked locally by |
 > |---|---|
-> | `gate (windows)` — fmt, clippy, 678 tests, samples | running it, repeatedly |
-> | `gate (ubuntu)` — fmt, clippy, **668 tests**, samples | `cargo test` in `rust:1.96-slim-bookworm` |
+> | `gate (windows)` — fmt, clippy, 788 tests (servers skip), samples | running it, repeatedly |
+> | `gate (ubuntu)` — fmt, clippy, **778 tests** with Postgres, MySQL and MinIO, samples | `cargo test` in `rust:1.96-slim-bookworm` |
 > | `artifact (both)` — bake, run from elsewhere, run in a bare container | Phase 9b and 9c |
 > | `cross-build-script` — `build-runner.ps1`, ELF check, unbaked contract, no-op rerun | each assertion run by hand |
-> | `frontend` — 114 tests, typecheck, build | running it |
+> | `frontend` — 120 tests, typecheck, build | running it |
 >
 > **The Linux job excludes `apps/desktop`.** Tauri needs WebKitGTK, GTK, glib and `pkg-config`
 > to compile, and `cargo test --workspace` on Linux fails on exactly that. Installing system
 > libraries on every run to build a window no server opens is the wrong trade, so Linux tests
-> the headless product — 668 of the 678 — and Windows tests everything. **668 + 10 desktop = 678**,
+> the headless product — 778 of the 788 — and Windows tests everything but the servers. **778 + 10 desktop = 788**,
 > which is the arithmetic to check if either number moves.
 >
 > **CI fetches only the `excel` extension, not all nine.** Exactly one test loads one
@@ -139,14 +117,16 @@ first when picking the project back up.
 >
 > ```powershell
 > cd E:\workspace_09212026\ETL_Local_Tool
-> cargo test --workspace                                            # expect 678 passing
-> npm --prefix frontend run test                                    # expect 114 passing
+> ./scripts/test-services.ps1                                       # Postgres, MySQL, MinIO in Docker
+> cargo test --workspace                                            # expect 788 passing
+> npm --prefix frontend run test                                    # expect 120 passing
 > npm --prefix frontend run typecheck                               # expect clean
 > npm --prefix frontend run build                                   # expect clean
-> .\target\debug\etl.exe components                                 # expect 54
+> .\target\debug\etl.exe components                                 # expect 58
 > .\target\debug\etl.exe run samples\pipelines\orders_enriched.json # expect 12/5/7/6/6
 > .\target\debug\etl.exe run samples\pipelines\orders_checked.json  # expect 12/10+2/9+1/9/2/1
 > .\target\debug\etl.exe run samples\pipelines\orders_guarded.json  # expect 12 through, branch taken
+> .\target\debug\etl.exe run samples\pipelines\orders_xml.json      # expect 12/7/7, XML written
 > ```
 >
 > Phase 9's own acceptance, still reproducible and still the thing worth re-running:
@@ -157,37 +137,32 @@ first when picking the project back up.
 > docker run --rm --network none -v "${PWD}:/w" -w /w debian:12-slim ./orders_checked-linux_amd64
 > ```
 >
-> **State of the tree:** `ad7fc51` (Phase 9) is the last commit and is pushed. Uncommitted as
-> of 2026-09-23: the three CI fixes (`.github/workflows/gate.yml`,
-> `scripts/fetch-duckdb-extensions.ps1`), the workflow file's two new rules, `.gitignore`
-> gaining `*.code-workspace`, this tracker, `commands.md`, and the new
-> [learnings.md](learnings.md) and [assignments.md](assignments.md).
-> The remote is `github.com/marun224/local_etl_tool` (private).
+> **State of the tree:** everything through `e7f629b` is committed and pushed. **All of Phases
+> 10a and 10b is uncommitted**: `crates/plugin-sdk/`, `crates/connectors/` (`xml.rs`,
+> `rest.rs`), the engine changes (`native.rs`, `plan/`, `exec.rs`, `tests/native.rs`), the
+> samples `orders.xml`, `orders_xml.json` and `rest_orders.json`, `gate.yml`,
+> `Cargo.toml`/`Cargo.lock`, and the docs. The remote is `github.com/marun224/local_etl_tool`
+> (private). Phase 10c's work is uncommitted too: the S3, MySQL and Iceberg fixes, the
+> `tests/verified.rs` suite and its lake fixtures, `scripts/test-services.ps1`, and `gate.yml`.
 >
 > **`tools/` is git-ignored and reproducible**, now with a Linux side: host DuckDB and 9
 > extensions, a Linux DuckDB, one Linux extension, and a Linux `etl-runner`. `fetch-duckdb.ps1`,
 > `fetch-duckdb-extensions.ps1` and `build-runner.ps1` each take a `-Platform`.
->
-> **Two stray directories were removed from the repo root** on 2026-09-23, both empty and
-> untracked: `${workspace}\samples\out` (from a pre-Phase-5 run, before `${workspace}` was
-> substituted) and `D\workspace\ETL_Local_Tool\samples\out`, whose name was `D` + U+F03A — the
-> character Windows stores for a `:` written from a Linux container. That one is the
-> Phase 9c `${workspace}` bug's footprint: a container run wrote to a literal `D:/workspace/...`.
 
 
 ## Where things stand
 
-- **Next phase:** Phase 10 — Rust-native connectors — once 9d's CI run is green.
-- **In progress:** **9d.** Every CI job has run at least once. The first run's three bugs are
-  fixed and pushed. The second found a real race in the session and a glibc floor in the
-  Linux artifact job; both are fixed in the working tree, not pushed. 9a–9c complete.
-- **Blocked on:** the user committing and pushing, so CI can run again. The local gate is
-  green on this machine (685 tests, 2026-09-23).
+- **Next phase:** **paused by the user on 2026-09-23.** The website's site-to-product sync
+  was chosen and has 8 questions waiting in the WebApp repo; Phase 10's later families
+  (GraphQL first) remain the alternative. First, on resume: commit and push Phase 10.
+- **In progress:** nothing. **Phases 0–9 and 10a–10c are done** (all of 10 on 2026-09-23;
+  local gate green, CI to follow once committed).
+- **Blocked on:** nothing.
 
 Phase 9 was split into 9a–9d on 2026-09-17 before starting, the same way 6 and 8 were:
 **9a** the artifact and the payload format, **9b** the engine and extensions inside it,
-**9c** cross-building, **9d** the CI matrix that makes Phase 9's "done" true. 9a–9c are
-complete; 9d is written and has not run.
+**9c** cross-building, **9d** the CI matrix that makes Phase 9's "done" true. **All four
+are complete**; 9d on 2026-09-23, when CI went green on its third run.
 
 Phase 6 was split into 6a and 6b on 2026-09-16 before starting; **both are complete**
 (2026-09-16). The execution-model decision 6b turned on is recorded in
@@ -204,7 +179,7 @@ pass), `ctl.throttle` (nothing to throttle until Phase 10 has a row cursor).
 **a scheduler that runs them**, and **a console to watch it from**. From the repo root:
 
 ```powershell
-cargo test --workspace        # 678 tests: 282 engine, 113 scheduler, 65 console, 51 e2e, 48 cli, 45 state, 26 runner, 23 secrets, 15 metadata, 10 desktop
+cargo test --workspace        # 773 tests: 304 engine, 113 scheduler, 65 console, 56 connectors, 51 e2e, 48 cli, 45 state, 26 runner, 23 secrets, 15 metadata, 12 native e2e, 10 desktop, 5 plugin-sdk
 .\target\debug\etl.exe run samples\pipelines\orders_enriched.json
 .\target\debug\etl.exe validate samples\pipelines\orders_enriched.json
 .\target\debug\etl.exe plan samples\pipelines\orders_enriched.json --script
@@ -256,19 +231,39 @@ exists — writing the report only if one does. `plan.needs_session()` decides t
 because they read something that never got created, and the failures. The exit code is 3 either
 way. Getting the report back is the entire point of asking a run to continue.
 
-**Fifty-four components exist.** Sources: `src.cloud.http`, `src.cloud.s3`, `src.db.mysql`,
+**Fifty-eight components exist.** Sources: `src.cloud.http`, `src.cloud.s3`, `src.db.mysql`,
 `src.db.postgres`, `src.db.sqlite`, `src.file.csv`, `src.file.excel`, `src.file.json`,
-`src.file.jsonl`, `src.file.parquet`, `src.lake.delta`, `src.lake.iceberg`. Transforms:
+`src.file.jsonl`, `src.file.parquet`, `src.file.xml`, `src.lake.delta`, `src.lake.iceberg`,
+`src.saas.rest`. Transforms:
 `xf.aggregate`, `xf.cast`, `xf.dedup`, `xf.derive`, `xf.distinct`, `xf.except`,
 `xf.filter`, `xf.intersect`, `xf.join`, `xf.limit`,
 `xf.pivot`, `xf.rename`, `xf.sample`, `xf.select`, `xf.sort`, `xf.sql`, `xf.union`,
 `xf.unpivot`, `xf.window`. Sinks: `snk.cloud.s3`, `snk.db.mysql`, `snk.db.postgres`,
 `snk.db.sqlite`, `snk.file.csv`, `snk.file.excel`, `snk.file.json`, `snk.file.jsonl`,
-`snk.file.parquet`. Quality: `qa.accepted_values`, `qa.expression`, `qa.not_null`, `qa.range`,
+`snk.file.parquet`, `snk.file.xml`, `snk.saas.rest`. Quality: `qa.accepted_values`, `qa.expression`, `qa.not_null`, `qa.range`,
 `qa.referential`, `qa.regex`, `qa.unique`. Quality assertions, which fail the run rather than
 partitioning rows and so have no reject port: `qa.row_count`, `qa.schema_match`. Control:
 `ctl.branch`, `ctl.fail`, `ctl.log`, `ctl.sequence`, `ctl.wait`. Everything else in the six
 namespaces compiles to `UnsupportedComponent`, by design.
+
+**Four of them are written in Rust, not lowered to DuckDB alone.** `src.file.xml` and
+`snk.file.xml` (Phase 10a) and `src.saas.rest` and `snk.saas.rest` (Phase 10b) are the
+*native* components, for data DuckDB cannot reach.
+They are registered like any other, so the canvas, validation, lineage, the scheduler, the
+console and a built artifact all have them, but their rows cross to and from DuckDB through a
+JSON Lines staging file under `.etl/tmp/native/`. A native source reads **before** DuckDB
+starts and its node is a view over that file. A native sink is a `COPY` into it, delivered
+**after** DuckDB, and only when the whole run succeeded.
+
+```powershell
+.\target\debug\etl.exe run samples\pipelines\orders_xml.json   # 12 / 7 / 7, samples/out/orders_2026.xml
+# rest_orders.json reads ${api_base}/orders and posts to ${api_base}/large-orders, with the
+# token from ${SECRET:api_token}. It needs an API: tests/native.rs runs it against a fixture.
+```
+
+What each connector promises is in [connectors.md](connectors.md); adding one is the last
+section of [adding_a_component.md](adding_a_component.md). The SDK is `crates/plugin-sdk`,
+the connectors are `crates/connectors`, and the engine's half is `crates/duckdb-engine/src/native.rs`.
 
 **There is a desktop shell, and it is a thin caller.** `apps/desktop/` is a Tauri 2 window over
 five IPC commands — `list_components`, `compile_pipeline`, `validate_pipeline`, `run_pipeline`,
@@ -574,6 +569,8 @@ so.
 extension, which sits badly with Phase 9's vendored set) and DuckLake (a catalog format that
 needs its own design pass rather than a thirteenth copy of the ATTACH shape). Both are listed
 under Phase 4 in the plan, so both need a decision recorded there rather than quietly dropping.
+**XML arrived in Phase 10a** as a native component, which is where the plan's amendment sent
+it. DuckLake is still undecided.
 
 **Not built yet:** Phases 9–12, and the three control components deferred out of 6b. **The canvas cannot edit an `incremental` block or a schedule** — both survive a GUI
 round trip untouched, but there is no panel for either; a schedule is not in the pipeline
@@ -612,12 +609,15 @@ fail the run. That is `ctl.fail`'s shape and it needs 6b's execution-model decis
 | 8b | — the runner: history, `--json`, lineage | **done** | 2026-09-16 |
 | 8c | — scheduler: interval, cron, file-watch | **done** | 2026-09-16 |
 | 8d | — web console: serve, token auth, roles | **done** | 2026-09-16 |
-| 9 | Standalone binary export + air-gapped packaging | **in progress** (9d: every job run; 2 fixes unpushed) | |
+| 9 | Standalone binary export + air-gapped packaging | **done** | 2026-09-23 |
 | 9a | — the artifact, and the payload format | **done** | 2026-09-17 |
 | 9b | — the engine and its extensions inside the file | **done** | 2026-09-17 |
 | 9c | — cross-building (Linux from Windows) | **done** | 2026-09-17 |
-| 9d | — the CI matrix | **2 runs 2026-09-23; last fixes unpushed** | 2026-09-17 |
-| 10 | Rust-native connectors | not started | |
+| 9d | — the CI matrix | **done** (green on the third run) | 2026-09-23 |
+| 10 | Rust-native connectors | **in progress** (10a–10c done; later families open) | |
+| 10a | — plugin SDK, staging bridge, XML | **done** (CI to follow) | 2026-09-23 |
+| 10b | — SaaS REST, source and sink | **done** (CI to follow) | 2026-09-23 |
+| 10c | — verify Phase 4's database and lake connectors | **done** (CI to follow) | 2026-09-23 |
 | 11 | AI assistant + MCP server | not started | |
 | 12 | Benchmarks + parity audit | not started | |
 
@@ -673,9 +673,46 @@ fail the run. That is `ctl.fail`'s shape and it needs 6b's execution-model decis
    parses untrusted input off a socket and checks auth tokens, which is a different risk class,
    and "write your own HTTP server" is the wrong instinct there.
 
+9. **Rust-native connectors reach DuckDB through a JSON Lines staging file.** Agreed
+   2026-09-23. A native source writes records before DuckDB starts and compiles to a view over
+   `read_json`; a native sink is a `COPY ... (FORMAT json)` that the connector delivers after
+   a successful run. No new dependency, the same shape as a `disk` spill, and both transports
+   and `preview` stay as they are. Parquet (the `arrow` crates) and linking DuckDB in-process
+   were the alternatives. The second would reverse the execution-model decision.
+10. **Connector dependencies are pure Rust, blocking where possible.** Agreed 2026-09-23. No
+    system C libraries, so the bookworm build of the Linux runner and the air-gapped story are
+    unaffected. `tokio` only when a family cannot avoid it, decided per family.
+11. **Phase 10 is split 10a / 10b / 10c.** Agreed 2026-09-23. 10a is the SDK and the bridge,
+    proven by XML (deferred from Phase 4); 10b is SaaS REST; later families one sub-phase each.
+12. **SaaS REST is the first network family.** Agreed 2026-09-23. It is testable against a local
+    `tiny_http` fixture with no Docker, and it makes true the website's "REST / GraphQL" entry
+    that the 2026-09-23 audit found unbuilt.
+13. **Sources and sinks both, from the start.** Agreed 2026-09-23. This was the one answer that
+    differed from the recommendation (sources first), so 10a builds an XML writer and 10b a REST
+    sink.
+14. **Built artifacts run native connectors.** Agreed 2026-09-23. `etl-runner` gets them through
+    the engine, so `etl run` and an artifact share one code path; Settled decision 5's reasoning.
+15. **Phase 4's database and lake connectors get verified in their own phase, 10c, after 10b.**
+    Agreed 2026-09-23. It needs Docker running and test tables. The website's site-to-product
+    sync waits on it.
+16. **`ring` is rustls's cryptography provider.** Agreed 2026-09-23, at the start of 10b. `ring`
+    contains C and assembly that `cargo` compiles itself, with no *system* library, so the
+    bookworm build of the Linux runner and the Windows build are unaffected. It meets Settled
+    decision 10's reason but not its letter, which is why it was asked rather than assumed.
+    The pure-Rust alternative (`rustls-rustcrypto`) is not yet production-grade. Needs a C
+    compiler at build time: MSVC on Windows (installed 2026-09-23), gcc in the bookworm image.
+17. **The declared Rust version is 1.88.** Agreed 2026-09-23, option (a) of the question raised
+    in 10b. The lockfile already needed it: `clap` 4.6, `indexmap` and `zeroize` 1.85, the Tauri
+    stack 1.88. The one lint it changed was `usize::is_multiple_of` in `etl-secrets`, which the
+    old 1.80 had forced into `% 2 != 0` back in Phase 5, and is now restored. `quick-xml` 0.41 and
+    `ureq` `~3.2.1` stay pinned where 10a and 10b put them, because they are tested there. Moving
+    them up is a separate, deliberate step, as is `aes-gcm` 0.11.
+
 ## Open decisions
 
-None open. Resolved 2026-09-23, all as recommended: (1) the session's stderr race is fixed by
+None open.
+
+Resolved 2026-09-23, all as recommended: (1) the session's stderr race is fixed by
 framing stderr with an `error()` marker, not by softening the test; (2) the failed Ubuntu job
 was re-run before the fix, which got the `artifact` jobs their first run; (3) DuckDB's
 `Infinity` in `-json` output is a known gap, recorded under *From Phase 9d, once CI actually
@@ -1064,6 +1101,129 @@ ran*. Earlier ones were resolved 2026-09-16 (Settled decisions 5–8).
   JSON. `parse_values` would report `BadOutput` for any row containing one, on the session path
   and in previews. No sample produces one. The fix is to rewrite those tokens outside string
   literals before parsing, or to cast doubles in probes.
+
+### From Phase 10a
+
+- **"Unset `columns` means all text" was wrong, and a test said so.** DuckDB's JSON reader types
+  an ISO date or timestamp found inside a string, as `src.file.csv` and `src.file.json` do. The
+  first scratch probe missed it because its two dates had different shapes. `read_json` has no
+  `all_varchar`, and an impossible `dateformat` is refused, so this is now the documented
+  behaviour rather than something to fight. The plan's 10a section carries a dated amendment.
+- **quick-xml 0.41, not 0.42.** 0.42 needs Rust 1.86 and the workspace declares 1.80; Cargo's
+  MSRV-aware resolver picked 0.41, which is Settled decision 4's situation again. One
+  dependency came with it (`memchr`). 0.41 reports each entity as its own `GeneralRef` event,
+  splitting the text around it, so text is gathered across events. Its `trim_text` option would
+  have eaten the spaces in `fish &amp; chips`, and is not used.
+- **A connector's failure is a `StageFailed`, not a new error type.** It names the node, and
+  secrets are masked by the same `redact` DuckDB's errors go through. A new
+  `ExecError` variant would have been one more thing for the CLI, the console and the scheduler
+  to match on, for no difference anyone sees.
+- **Staging cleanup is a guard, not a call.** `Staging` deletes its files on drop, so the session
+  path's early returns, which already skip spill cleanup, cannot leak staging files. The test
+  suite checks the staging directory is empty after every native run, failures included.
+- **The run's clock now starts before native staging**, on both transports. `RunReport::elapsed`
+  is documented as the whole run, and reading an XML file is part of it.
+- **Deliver-only-after-success was mutation-checked.** Making the session path deliver
+  regardless fails exactly one test, `a_run_that_fails_delivers_nothing_even_where_its_copy_succeeded`,
+  with "delivered despite a failed run". Reverted by edit.
+- **DuckDB writes `DECIMAL` as a JSON number**, so `72.40` reaches an XML sink as `72.4`.
+  Documented in connectors.md; cast to `VARCHAR` before the sink to keep a fixed form.
+- **The frontend went from 114 tests to 117 with no frontend change.** It runs three tests per
+  committed sample, one of which rebuilds the sample's wiring against the engine's real
+  manifest. So the canvas has already been shown to accept the XML sample.
+- **A built artifact grew 0.4 MB** (39.1 to 39.5 MB) for both connectors. CI's `artifact` job
+  now bakes the XML pipeline too, and runs it from elsewhere and in the bare container.
+
+### From Phase 10b
+
+- **The first draft of the sink sent GET requests**, with no body, and would have reported
+  success. `Settings::from` fell back to GET when no method was given. In a pipeline the spec's
+  default (POST) is always filled in first, so only a direct call could hit it. The fixture
+  showed it straight away, because it records every request rather than only answering them.
+  The default method now comes from the direction, and a sink refuses GET outright.
+- **A connector's own rules now run at compile time.** The SDK's new `check` hook lets
+  `etl validate` and the canvas refuse "cursor pagination without `cursor_path`" instead of
+  the first page of a run. The engine maps a `ConnectorError::Property` to the ordinary
+  `EngineError::InvalidProperty`, so nothing downstream learned a new error.
+- **The declared Rust version is fiction.** Adding `ureq` showed that `cargo add` picks a
+  version for the declared 1.80 but resolver 2 locks the newest, so `^3.2.1` locked 3.4.2 (needs
+  1.85). Looking further: the lock has needed up to 1.88 for a while. Pinned `~3.2.1` to stop
+  10b adding to it; the rest is an open decision.
+- **An API may quote the credential back in its error**, and that text goes into ours. The
+  existing `redact` masks it, and a test sends a 401 whose body contains the token to prove it.
+- **Lineage strips credentials from URLs**: `user:pass@`, the query string and the fragment. A
+  query string is where an API key most often travels.
+- **The frontend's wiring test asks the built `etl.exe` for the manifest.** A stale binary
+  (built before REST) made it report "That component is not in the registry" for the new
+  sample. Rebuilding fixed it. CI's frontend job has no binary, so there that check is skipped;
+  it only really runs where someone has built `etl` first.
+- **`ring` compiled from source with no trouble** on MSVC here; CI's bookworm image has gcc.
+  The connectors crate's tree is ureq, rustls, ring, webpki-roots, flate2 and small helpers,
+  with no system library.
+- **Real HTTPS, once, by hand**: GitHub's public releases API over TLS, following real
+  `Link: rel="next"` headers until `max_pages` stopped it with an error, then one page into a
+  CSV with `published_at` typed as `TIMESTAMP`. The suite stays on 127.0.0.1.
+- **PowerShell 5.1's `Set-Content -Encoding utf8` wrote a BOM into `Cargo.toml`** while pinning
+  ureq. Caught by checking the bytes, and stripped. Cargo tolerated it; git diffs would not
+  have.
+
+### From Phase 10c
+
+**The five connectors Phase 4 had only compared as SQL, run against real systems:**
+
+| Connector | Against | Result |
+|---|---|---|
+| `src.lake.delta` | a table written by `deltalake` 1.6.5, two commits | **works**: 12 rows, typed, both commits |
+| `src.lake.iceberg` | a table written by `pyiceberg` 0.12 and then moved | **was broken for moved tables**; fixed |
+| `src.db.postgres`, `snk.db.postgres` | PostgreSQL 16 in Docker | **works**: overwrite, append, append onto a missing table |
+| `src.db.mysql`, `snk.db.mysql` | MySQL 8.4 in Docker | **reading was broken**; fixed. Writing worked |
+| `src.cloud.s3`, `snk.cloud.s3` | MinIO in Docker | **writing never worked on Windows**, and could not reach MinIO at all; fixed |
+
+- **`snk.cloud.s3` treated `s3://bucket/key` as a local directory to create** before the run.
+  On Windows that is an invalid path, so the S3 sink had **never once worked there**. On Linux
+  it quietly created a local folder called `s3:` and carried on. `prepare_sinks` now skips any
+  path with `://`, and the round-trip test asserts no `s3:` folder appears, which is what
+  catches it on Linux, where the run itself would pass.
+- **S3 could not be pointed at anything but AWS's defaults.** No key, no region, no endpoint,
+  so public buckets only. Added `key_id`/`secret`, `session_token`, `region`, `endpoint`,
+  `url_style` and `use_ssl`. They become a DuckDB `CREATE OR REPLACE SECRET`, temporary (nothing
+  written to `~/.duckdb`), named for the node and **scoped to its bucket**, so two nodes can
+  reach two buckets as two accounts. An `http://` or `https://` endpoint sets `use_ssl`. Nothing
+  set means no secret, exactly as before.
+- **DuckDB 1.5.5's MySQL extension cannot aggregate over a view.** `count(*)`, `sum`, and GROUP
+  BY over a view of a MySQL table fail with `INTERNAL Error: Failed to bind column reference`;
+  the same straight on the table works. Every source here is a view, so even the row count
+  tripped it. `src.db.mysql` now sets `mysql_aggregate_pushdown_enabled=false` first, which
+  fixes every case tried (count, sum, GROUP BY, filter then count, ORDER BY with LIMIT). The
+  aggregate runs in DuckDB instead: slower on a huge table, correct on all of them. Revisit
+  when the pinned DuckDB moves.
+- **`src.lake.iceberg` told people to point at the metadata file**, and with
+  `allow_moved_paths` that fails: DuckDB takes the path as the table's root and appends
+  `metadata/...`, giving `….metadata.json/metadata/snap-….avro`. The working form is the
+  table's root plus `version` (the metadata file's name without `.metadata.json`). Added
+  `version`, which also reads an **earlier snapshot**: version 00001 of the fixture returns the
+  first commit's seven rows. The failing combination is refused at compile time with the fix
+  in the message. Checked with the original table hidden, so the moved copy really is what
+  is read.
+- **MinIO no longer publishes to Docker Hub.** `minio/minio` answers "repository does not
+  exist". `quay.io/minio/minio` and `quay.io/minio/mc` still serve. Any S3-compatible server
+  would do for these tests.
+- **Windows PowerShell 5.1 made the service script die on docker's own stderr** (pull
+  progress, "not found") under `$ErrorActionPreference = 'Stop'`, even with `2>$null`. The
+  script now decides by exit code, which is what should decide it anyway.
+- **Overwriting a Parquet file on Windows can fail with "Could not move file: Access is
+  denied"**, intermittently, while something still holds the old file: a virus scanner, or the
+  query that read it a moment before. Seen once in a test, never reproduced in three further
+  runs. The tests now write each read-back to its own file. A user overwriting outputs on
+  Windows could meet the same thing; worth watching, not yet worth code.
+- **`cargo test` reports a skipped test as `ok`.** Without the servers, `tests/verified.rs` says
+  "9 passed" when four ran. Counting what passed means knowing which tests had their servers.
+- **CI's engine cache key now names the extension set.** The fetch step is skipped on a cache
+  hit, so a key naming only the DuckDB version would restore last week's excel-only engine,
+  and the new tests would skip rather than fail.
+- **How the lake fixtures were made** is in `crates/duckdb-engine/tests/fixtures/lake/README.md`,
+  with the script. pyiceberg on Windows needs a plain warehouse path, not a `file://` URI, which
+  it turns into `/C:/...`.
 
 ## Session log
 
@@ -1755,3 +1915,184 @@ Everything here came from running things rather than from writing YAML.
 **CI has never run.** Phase 9's "done" is a green matrix, and this has only been reasoned about
 and locally rehearsed. The first real run should be expected to find something; that is what
 first CI runs do.
+
+### 2026-09-23 — Phase 9 closed: three CI runs, and a new machine
+
+The project moved to a new machine. It was set up, the first CI run was read, and
+Phase 9 was closed on the third run. Committed and pushed by the user as `91a5f24`,
+`14be255`, `64878e6` and `e7f629b`.
+
+#### What each CI run found
+
+**Phase 9 is committed and pushed** as `ad7fc51` (2026-09-23 07:42 +0530), and `gate.yml`
+ran on it: [run 35809441173](https://github.com/marun224/local_etl_tool/actions/runs/35809441173),
+**failure**. Read on 2026-09-23. **The Rust itself passed**: on Windows, fmt, clippy and all the
+tests were green. What failed was the workflow and one script, in three places:
+
+| Job | Failed at | Cause | Fix (uncommitted) |
+|---|---|---|---|
+| `gate (windows)` | *The registry is all there* | `target/debug/etl.exe` not found. `cargo test` builds the CLI only as a test harness under `deps/`; every rehearsal machine had an old `cargo build` lying around | `gate.yml`: new step `cargo build -p etl-cli` after the tests |
+| `gate (ubuntu)` | *Fetch DuckDB…* | `fetch-duckdb-extensions.ps1` hard-coded `duckdb.exe`. 9d fixed host detection in `fetch-duckdb.ps1` and missed this script | the script picks `.exe` only on Windows |
+| `build-runner.ps1` | *Running it again is a no-op* | the second run **did** skip; the script says so with `Write-Host` (stream 6) and `\| Out-String` captured nothing | `gate.yml`: `6>&1` |
+| `artifact` (both) | never ran | `needs: gate` | — |
+| `frontend` | **passed** | | |
+
+**How each fix was checked locally, before any push:**
+- The no-op bug was **reproduced on this machine**. Captured length 0 without `6>&1`, and 151
+  with it and a match. The Linux runner left in `tools/` from 9c makes the script take the
+  same "already present" branch without Docker.
+- The extensions script still works on Windows: `excel already present`, `excel loads`, exit 0.
+  The Linux branch is checked only by reading it, because Docker's daemon is not running here.
+- The registry and samples steps' exact bash lines pass against the prebuilt `etl.exe`.
+- The Windows `artifact` job, which has never run in CI, was rehearsed: bake `orders_checked`,
+  copy it out of the repo, run it with `--workspace` pointing back, and `Ran 6 stage(s)`.
+- The YAML parses: 4 jobs, and the new step sits between *Tests* and *The registry…*.
+
+**The second run** ([35831651720](https://github.com/marun224/local_etl_tool/actions/runs/35831651720),
+after `91a5f24` + `14be255` were pushed on 2026-09-23 at the user's request) confirmed all three
+fixes: **`gate (windows)`, `build-runner.ps1` and `frontend` are green.** `gate (ubuntu)` passed fmt
+and clippy, then failed **one test of 668**:
+`session::tests::an_error_message_does_not_leak_into_the_next_statement`. The `artifact` jobs
+still have not run, because they need `gate`.
+
+**That failure is a real race, not a Linux quirk.** stdout and stderr are separate pipes. A
+failed statement's marker can come back on stdout before its message arrives on stderr, and
+the next `execute` then picks the message up as its own. It passed in the 9d container and
+200 times in a row on Windows; a busier runner lost the race. **The engine has the same
+exposure, not just the test:** `exec.rs:1270` (session transport with `--no-counts`) can
+report a failed stage as succeeded and blame the next one, and `exec.rs:1322` can turn "no new
+rows" into an error. The counts-on path is covered only by `STDERR_GRACE`'s 250 ms, which is
+timing rather than a guarantee.
+
+**Fixed in the working tree, not pushed:** stderr is now framed the way stdout is. Every
+statement is followed by `SELECT error('__etl_errmark_N__')` as well as the stdout marker,
+and `read_answer` reads each stream up to its own marker. `STDERR_GRACE` and
+`Session::message()` are gone. Tried in the scratchpad first against the real `duckdb.exe`
+(0 misattributed messages in 500 alternating statements, under 1 ms per statement), then built.
+Seven new tests, **685 in all**. `a_message_that_arrives_after_the_rows_still_belongs_to_its_statement`
+forces the race with channels and a 150 ms delay, and it **fails** when the old
+"whatever stderr holds now" read is put back (checked by mutation, reverted by edit). The
+end-to-end suite went from 9.7 s to 2.8 s, since nothing waits out a grace period any more.
+
+**The new prelude test found a second, older bug.** A session's prelude checked only that
+`SELECT 1` returned rows, and a failed `LOAD` does not stop it. **A session never detected a
+missing extension.** It now also refuses when the prelude said anything. A successful `LOAD`
+writes 0 bytes to stderr, which was measured before relying on it.
+
+**The re-run of the failed job** (same run, attempt 2, at the user's request) passed the Ubuntu
+gate, by luck as expected, and so ran the `artifact` jobs for the first time:
+**`artifact (windows)` green**. `artifact (ubuntu)` baked and ran from elsewhere, then failed in
+the bare `debian:12-slim` container: `GLIBC_2.39 not found`. That job built `etl-runner` on the
+ubuntu-24.04 host, not in the bookworm image the project ships from. It is the 9c glibc lesson,
+found by a different road. **Fixed in the working tree, not pushed:** on Linux the job now runs
+`build-runner.ps1` and bakes with `--runner tools/runners/linux_amd64/etl-runner`. Checked here
+without Docker: the bookworm runner needs glibc ≤ 2.34 and the Linux DuckDB ≤ 2.25, both under
+Debian 12's 2.36; the YAML parses.
+
+**After those two land, every job has a fix for what it last found.** Nothing is known to be
+failing. Phase 9 is done when the next run is green.
+
+**The third run**, [35833839177](https://github.com/marun224/local_etl_tool/actions/runs/35833839177),
+on `e7f629b`: **green on all six jobs.** Windows gate 685 tests, Ubuntu gate 675, both artifact
+jobs including the bare, offline `debian:12-slim` container. Phase 9's "done" met.
+
+#### The local gate on the new machine
+
+**Checked here on 2026-09-23 without Rust:** frontend 114 tests passing, typecheck clean,
+build clean; the prebuilt `etl.exe` lists 54 components and the three samples print
+12/5/7/6/6, 12/10+2/9+1/9/2/1, and 12 through with the branch taken.
+**The full local gate is green on this machine** (2026-09-23, after the toolchain install):
+`cargo fmt --all --check` clean, `cargo clippy --workspace --all-targets -- -D warnings`
+clean, **`cargo test --workspace` 678 passing** (48 cli, 65 console, 10 desktop, 282 engine,
+51 e2e, 15 metadata, 26 runner, 113 scheduler, 23 secrets, 45 state). A cold build took
+4m26s for clippy and 8m39s to the end of the tests. After the tests, `target\debug\etl.exe`
+*still* carried its 2026-09-17 timestamp — the CI bug, seen directly — and the new
+`cargo build -p etl-cli` step replaced it (12:51), with the samples unchanged.
+
+#### Housekeeping
+
+**Two stray directories were removed from the repo root** on 2026-09-23, both empty and
+untracked: `${workspace}\samples\out` (from a pre-Phase-5 run, before `${workspace}` was
+substituted) and `D\workspace\ETL_Local_Tool\samples\out`, whose name was `D` + U+F03A — the
+character Windows stores for a `:` written from a Linux container. That one is the
+Phase 9c `${workspace}` bug's footprint: a container run wrote to a literal `D:/workspace/...`.
+
+### 2026-09-23 — Phase 10a: the plugin SDK, the staging bridge, and XML
+
+Signed off and built the same day. Probed DuckDB's `read_json` and `COPY … (FORMAT json)` in the
+scratchpad first, on the five behaviours the bridge rests on. One of those probes was wrong in a
+way only the end-to-end test found (see *From Phase 10a*).
+
+- `crates/plugin-sdk/` — new. `Source`, `Sink`, `RecordWriter`, `RecordReader`, `Context`,
+  `Summary`, `ConnectorError`, `columns_property`. No I/O. 5 tests.
+- `crates/connectors/` — new. `all()` and `find()`; `xml.rs` with `XmlSource` and `XmlSink`.
+  28 tests: entities, CDATA, attributes on records and children, namespaces, the four
+  refusals, a byte-stable round trip, the atomic write leaving the old file untouched.
+- `crates/duckdb-engine/src/plan/` — `NativeStep`, `Direction`, `NATIVE_DIR`, `Stage::native`;
+  `native_source` and `native_sink` builders; `native_components()` appended to the registry.
+- `crates/duckdb-engine/src/native.rs` — new. Staging sources, preparing and delivering sinks,
+  the `Staging` guard, and the JSON Lines reader and writer. 5 tests.
+- `crates/duckdb-engine/src/exec.rs` — the bridge on `run_one_script`, `run_driven` and
+  `preview`; delivery only when the run has no failures; the clock moved before staging.
+- `crates/duckdb-engine/tests/native.rs` — new. 9 end-to-end tests against real DuckDB.
+- `samples/data/orders.xml`, `samples/pipelines/orders_xml.json` — the acceptance fixture.
+- `.github/workflows/gate.yml` — 56 components, `orders_xml` in the samples, and baked, run
+  from elsewhere and run in the bare container by the `artifact` job.
+- `docs/connectors.md` — new: delivery semantics. `docs/adding_a_component.md` — the native
+  section.
+
+**739 Rust tests, 117 frontend.** Fmt, clippy with `-D warnings`, typecheck and build clean.
+`etl run samples/pipelines/orders_xml.json` prints 12 / 7 / 7, and the same pipeline baked with
+`etl build` runs from a directory outside the repo. Not committed.
+
+### 2026-09-23 — Phase 10b: SaaS REST
+
+`ring` confirmed as rustls's provider at the start (Settled decision 16).
+
+- `crates/plugin-sdk/src/lib.rs` — `Source::check` and `Sink::check`, default accept;
+  `Connector::check`.
+- `crates/connectors/src/rest.rs` — new. `RestSource`, `RestSink`, and the shared `Client`:
+  auth, retries with doubling backoff and `Retry-After`, `min_interval_ms`, timeouts; five
+  pagination styles; `max_pages`; base64 for basic auth. 25 tests against a `tiny_http`
+  fixture that records every request.
+- `crates/connectors/src/xml.rs` — element-name checks moved into `check`.
+- `crates/duckdb-engine/src/plan/mod.rs` — connectors' `check` called while compiling;
+  `url_for_lineage`; `Stage::external` from `url`.
+- `crates/duckdb-engine/tests/native.rs` — 3 REST pipeline tests: the committed sample end to
+  end with an encrypted token, a 401 echoing the token (masked), a sink failing after DuckDB.
+- `samples/pipelines/rest_orders.json` — cursor pagination, bearer secret, batches of 2.
+- `docs/connectors.md` — the REST section. `gate.yml` — 58 components.
+
+**773 Rust tests, 120 frontend.** Fmt, clippy with `-D warnings`, typecheck clean. Not
+committed.
+
+### 2026-09-23 — Phase 10c: Phase 4's connectors against real systems
+
+The declared Rust version was raised to 1.88 first (Settled decision 17). Delta and Iceberg
+were verified before Docker was running; the servers once the user started it.
+
+- `crates/duckdb-engine/tests/verified.rs` — new. 4 lake tests against committed fixtures,
+  5 server tests that skip without `ETL_TEST_POSTGRES`, `ETL_TEST_MYSQL` or `ETL_TEST_S3`.
+- `crates/duckdb-engine/tests/fixtures/lake/` — Delta and Iceberg tables from `deltalake` and
+  `pyiceberg`, 30 KB, with the README and script that made them.
+- `scripts/test-services.ps1` — new. Postgres 16, MySQL 8.4 and MinIO in Docker, readiness
+  waits, the bucket via `mc`; prints the variables, or writes them to `$GITHUB_ENV` in CI.
+- `crates/duckdb-engine/src/exec.rs` — `prepare_sinks` skips remote paths.
+- `crates/duckdb-engine/src/plan/{specs.rs, builders.rs}` — S3 access properties and the
+  scoped secret; Iceberg `version` and the moved-path refusal; the MySQL pushdown setting.
+- `crates/secrets/src/lib.rs` — `is_multiple_of` back, now that 1.88 is declared.
+- `.github/workflows/gate.yml` — the services step on Ubuntu; `DUCKDB_TEST_EXTENSIONS` in the
+  fetch step and the cache key.
+
+**788 Rust tests with the servers up**, three runs in a row for the verification suite. Fmt,
+clippy clean. Not committed.
+
+### 2026-09-23 — Paused by the user
+
+After 10c the user chose the website's site-to-product sync. In the WebApp repo the site was
+re-audited against this engine (58 components, 10c's verification): 12 of its 46 listed
+connectors are built and verified, Amazon S3 works but was checked only against MinIO, 33 are
+not built, and XML is built but not listed. Eight questions were written there, and the user
+paused before answering them. This repo was left with the gate green at the last change, the
+Docker test services stopped and removed, and all of Phase 10 uncommitted.
+

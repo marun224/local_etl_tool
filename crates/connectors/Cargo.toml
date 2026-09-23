@@ -1,6 +1,6 @@
 [package]
-name = "etl-duckdb-engine"
-description = "Compiles a pipeline document into an ordered plan of DuckDB SQL stages."
+name = "etl-connectors"
+description = "Components written in Rust, for data DuckDB cannot reach"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,13 +8,10 @@ rust-version.workspace = true
 
 [dependencies]
 etl-metadata.workspace = true
-etl-secrets.workspace = true
 etl-plugin-sdk.workspace = true
-etl-connectors.workspace = true
-serde.workspace = true
+quick-xml = "0.41.0"
 serde_json.workspace = true
-thiserror.workspace = true
+ureq = "~3.2.1"
 
 [dev-dependencies]
-etl-secrets.workspace = true
 tiny_http = "0.12"

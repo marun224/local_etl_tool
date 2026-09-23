@@ -956,6 +956,38 @@ fn an_s3_sink_writes_the_format_it_was_given() {
 }
 
 #[test]
+fn a_moved_iceberg_table_is_read_from_its_root_at_a_named_version() {
+    let plan = compile_one(
+        "src.lake.iceberg",
+        json!({ "path": "lake/orders", "allow_moved_paths": true, "version": "00002-abc" }),
+    );
+
+    assert_eq!(
+        sql_of(&plan, "n"),
+        r#"CREATE OR REPLACE TEMP VIEW "n" AS (SELECT * FROM iceberg_scan('lake/orders', allow_moved_paths=true, version='00002-abc'));"#
+    );
+}
+
+#[test]
+fn a_moved_iceberg_table_named_by_its_metadata_file_is_refused_with_the_fix() {
+    let error = compile_one_err(
+        "src.lake.iceberg",
+        json!({
+            "path": "lake/orders/metadata/00002-abc.metadata.json",
+            "allow_moved_paths": true
+        }),
+    );
+
+    assert!(
+        error
+            .to_string()
+            .contains("must be the table's root directory"),
+        "{error}"
+    );
+    assert!(error.to_string().contains("version"), "{error}");
+}
+
+#[test]
 fn the_lakehouse_sources_call_their_own_scan_functions() {
     let iceberg = compile_one("src.lake.iceberg", json!({ "path": "warehouse/orders" }));
 
@@ -1602,4 +1634,244 @@ fn referential_tests_the_left_input_against_the_right() {
         "{sql}"
     );
     assert!(sql.contains(r#"FROM (SELECT * FROM "orders")"#), "{sql}");
+}
+
+// ---------------------------------------------------------------------------
+// Native components: the SQL half, and what the planner hands the executor
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_native_source_is_a_view_over_its_staging_file() {
+    let plan = compile_one(
+        "src.file.xml",
+        json!({ "path": "in.xml", "record": "order" }),
+    );
+
+    // Every field read as text, and the whole file sampled so a field first
+    // seen late is not dropped.
+    assert_eq!(
+        sql_of(&plan, "n"),
+        r#"CREATE OR REPLACE TEMP VIEW "n" AS (SELECT * FROM read_json('.etl/tmp/native/n.jsonl', format='newline_delimited', sample_size=-1));"#
+    );
+
+    let step = plan.stage("n").unwrap().native.as_ref().expect("native");
+    assert_eq!(step.direction, crate::plan::Direction::Ingest);
+    assert_eq!(step.staging, ".etl/tmp/native/n.jsonl");
+    assert_eq!(
+        step.properties["record"], "order",
+        "resolved properties travel"
+    );
+}
+
+#[test]
+fn declared_columns_are_read_as_those_types_and_only_those() {
+    let plan = compile_one(
+        "src.file.xml",
+        json!({
+            "path": "in.xml",
+            "record": "order",
+            "columns": { "id": "INTEGER", "amount": "DECIMAL(10,2)" }
+        }),
+    );
+
+    assert_eq!(
+        sql_of(&plan, "n"),
+        r#"CREATE OR REPLACE TEMP VIEW "n" AS (SELECT * FROM read_json('.etl/tmp/native/n.jsonl', format='newline_delimited', columns={'id': 'INTEGER', 'amount': 'DECIMAL(10,2)'}));"#
+    );
+}
+
+#[test]
+fn a_declared_column_type_cannot_smuggle_in_sql() {
+    let error = compile_one_err(
+        "src.file.xml",
+        json!({ "path": "in.xml", "record": "r", "columns": { "id": "INT'); DROP TABLE x; --" } }),
+    );
+
+    assert!(
+        error.to_string().contains("is not a SQL type name"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_native_source_still_needs_its_required_properties() {
+    let error = compile_one_err("src.file.xml", json!({ "path": "in.xml" }));
+
+    assert_eq!(
+        error,
+        EngineError::MissingProperty {
+            id: "n".to_string(),
+            component_id: "src.file.xml".to_string(),
+            property: "record".to_string(),
+        }
+    );
+}
+
+#[test]
+fn a_native_source_takes_the_watermark_filter_like_any_other() {
+    let mut source = node(
+        "n",
+        "src.file.xml",
+        json!({ "path": "in.xml", "record": "order" }),
+    );
+    source.data.incremental = Some(etl_metadata::Incremental {
+        column: "order_ts".to_string(),
+        start: Some("2026-01-01".to_string()),
+        extra: Default::default(),
+    });
+
+    let plan = compile(&document(vec![source], vec![])).expect("compiles");
+
+    assert!(
+        sql_of(&plan, "n").contains(r#"WHERE "order_ts" > '2026-01-01'"#),
+        "{}",
+        sql_of(&plan, "n")
+    );
+}
+
+#[test]
+fn a_native_sink_copies_into_its_staging_file_as_json_lines() {
+    let plan = compile_two(
+        ("src.file.csv", json!({ "path": "in.csv" })),
+        ("snk.file.xml", json!({ "path": "out/orders.xml" })),
+    );
+
+    assert_eq!(
+        sql_of(&plan, "b"),
+        r#"COPY (SELECT * FROM "a") TO '.etl/tmp/native/b.jsonl' (FORMAT json);"#
+    );
+
+    let stage = plan.stage("b").unwrap();
+    let step = stage.native.as_ref().expect("native");
+    assert_eq!(step.direction, crate::plan::Direction::Egress);
+    assert_eq!(
+        step.properties["root"], "records",
+        "the spec's defaults applied"
+    );
+    assert_eq!(step.properties["record"], "record");
+
+    // The real destination is where `mode` is checked and the directory made,
+    // exactly as for a file sink DuckDB writes itself.
+    assert_eq!(stage.sink_path.as_deref(), Some("out/orders.xml"));
+    assert_eq!(stage.sink_mode.as_deref(), Some("overwrite"));
+    assert_eq!(stage.external.as_deref(), Some("out/orders.xml"));
+}
+
+#[test]
+fn a_component_duckdb_lowers_has_no_native_half() {
+    let plan = compile_one("src.file.csv", json!({ "path": "in.csv" }));
+    assert!(plan.stage("n").unwrap().native.is_none());
+}
+
+#[test]
+fn a_connectors_own_rules_are_checked_at_compile_time() {
+    // Cursor pagination without saying where the cursor is: the spec cannot
+    // see that, the connector can, and `validate` should say so rather than
+    // the first page of a run.
+    let error = compile_one_err(
+        "src.saas.rest",
+        json!({ "url": "https://api.example.com/orders", "pagination": "cursor" }),
+    );
+
+    assert_eq!(
+        error,
+        EngineError::InvalidProperty {
+            id: "n".to_string(),
+            property: "cursor_path".to_string(),
+            reason: "is required for cursor pagination: say where each response holds the next \
+                     cursor, e.g. /meta/next_cursor"
+                .to_string(),
+        }
+    );
+}
+
+#[test]
+fn lineage_names_an_api_without_its_credentials() {
+    let plan = compile_one(
+        "src.saas.rest",
+        json!({ "url": "https://user:hunter2@api.example.com/v1/orders?api_key=s3cret&x=1" }),
+    );
+
+    assert_eq!(
+        plan.stage("n").unwrap().external.as_deref(),
+        Some("https://api.example.com/v1/orders")
+    );
+}
+
+#[test]
+fn a_url_for_lineage_keeps_the_endpoint_and_drops_what_could_be_a_secret() {
+    use crate::plan::url_for_lineage;
+
+    for (url, expected) in [
+        ("https://api.x.com/v1/a", "https://api.x.com/v1/a"),
+        ("https://api.x.com", "https://api.x.com"),
+        (
+            "https://u:p@api.x.com:8443/a?k=v#f",
+            "https://api.x.com:8443/a",
+        ),
+        ("http://api.x.com/a#only-fragment", "http://api.x.com/a"),
+        ("not a url?x=1", "not a url"),
+    ] {
+        assert_eq!(url_for_lineage(url), expected, "{url}");
+    }
+}
+
+#[test]
+fn s3_with_no_access_properties_emits_no_secret() {
+    let plan = compile_one("src.cloud.s3", json!({ "path": "s3://bucket/a.parquet" }));
+    assert!(
+        !sql_of(&plan, "n").contains("SECRET"),
+        "{}",
+        sql_of(&plan, "n")
+    );
+}
+
+#[test]
+fn s3_access_becomes_a_secret_scoped_to_the_bucket() {
+    let plan = compile_one(
+        "src.cloud.s3",
+        json!({
+            "path": "s3://orders/2026/*.parquet",
+            "key_id": "AKIA", "secret": "shh", "region": "eu-west-1",
+            "endpoint": "http://localhost:9000", "url_style": "path"
+        }),
+    );
+
+    assert_eq!(
+        sql_of(&plan, "n"),
+        "CREATE OR REPLACE SECRET \"n_s3\" (TYPE s3, KEY_ID 'AKIA', SECRET 'shh', REGION 'eu-west-1', \
+         URL_STYLE 'path', ENDPOINT 'localhost:9000', USE_SSL false, SCOPE 's3://orders');\n\
+         CREATE OR REPLACE TEMP VIEW \"n\" AS (SELECT * FROM read_parquet('s3://orders/2026/*.parquet'));"
+    );
+}
+
+#[test]
+fn an_endpoint_without_a_scheme_takes_use_ssl_from_the_property() {
+    let plan = compile_two(
+        ("src.file.csv", json!({ "path": "in.csv" })),
+        (
+            "snk.cloud.s3",
+            json!({ "path": "s3://out/x.parquet", "endpoint": "minio:9000", "use_ssl": false }),
+        ),
+    );
+
+    let sql = sql_of(&plan, "b");
+    assert!(
+        sql.contains("ENDPOINT 'minio:9000', USE_SSL false"),
+        "{sql}"
+    );
+    assert!(
+        sql.ends_with("TO 's3://out/x.parquet' (FORMAT parquet, COMPRESSION 'zstd');"),
+        "{sql}"
+    );
+}
+
+#[test]
+fn half_a_key_pair_is_refused_by_the_missing_half() {
+    let error = compile_one_err(
+        "src.cloud.s3",
+        json!({ "path": "s3://b/a.parquet", "key_id": "AKIA" }),
+    );
+
+    assert!(error.to_string().contains("property 'secret'"), "{error}");
 }

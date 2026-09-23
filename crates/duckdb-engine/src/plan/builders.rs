@@ -32,6 +32,9 @@ pub(crate) struct Lowering<'a> {
     pub materialize: Materialize,
     /// Where a `disk` node spills to. Set by the planner, not by the builder.
     pub spill_path: Option<&'a str>,
+    /// Where a native component's records are staged. Set by the planner for
+    /// a component written in Rust, and `None` for everything else.
+    pub staging: Option<&'a str>,
     /// The watermark filter for an incremental source, when there is one to
     /// apply. Builders do not read it either: like `materialize`, it is applied
     /// by `create_view`, so it lands on all twelve sources rather than on
@@ -280,7 +283,88 @@ fn cloud_reader(node: &Lowering<'_>) -> Result<String, EngineError> {
 }
 
 pub(crate) fn source_s3(node: &Lowering<'_>) -> Result<String, EngineError> {
-    cloud_reader(node)
+    with_s3_secret(node, cloud_reader(node)?)
+}
+
+/// Put this node's S3 credentials ahead of its statement, if it has any.
+///
+/// A DuckDB secret, `TEMPORARY` by default so nothing is written to the
+/// user's DuckDB home, named after the node and scoped to its bucket. The scope
+/// is what lets two nodes reach two buckets as two different accounts: DuckDB
+/// picks the secret whose scope matches the path. Two nodes giving different
+/// credentials for the *same* bucket is the one arrangement this cannot serve.
+///
+/// Nothing set means no secret at all, which leaves DuckDB's own defaults -- the
+/// environment's AWS variables, or anonymous access -- exactly as before.
+fn with_s3_secret(node: &Lowering<'_>, statement: String) -> Result<String, EngineError> {
+    let key_id = optional_str(node, "key_id")?;
+    let secret = optional_str(node, "secret")?;
+    let session_token = optional_str(node, "session_token")?;
+    let region = optional_str(node, "region")?;
+    let endpoint = optional_str(node, "endpoint")?;
+    let url_style = optional_str(node, "url_style")?;
+
+    if [key_id, secret, session_token, region, endpoint, url_style]
+        .iter()
+        .all(Option::is_none)
+    {
+        return Ok(statement);
+    }
+
+    if key_id.is_some() != secret.is_some() {
+        return Err(EngineError::InvalidProperty {
+            id: node.node_id.to_string(),
+            property: if key_id.is_some() { "secret" } else { "key_id" }.to_string(),
+            reason: "is needed too: key_id and secret only work as a pair".to_string(),
+        });
+    }
+
+    let mut options = vec!["TYPE s3".to_string()];
+    let mut option = |name: &str, value: Option<&str>| {
+        if let Some(value) = value {
+            options.push(format!("{name} {}", quote_literal(value)));
+        }
+    };
+    option("KEY_ID", key_id);
+    option("SECRET", secret);
+    option("SESSION_TOKEN", session_token);
+    option("REGION", region);
+    option("URL_STYLE", url_style);
+
+    if let Some(endpoint) = endpoint {
+        // DuckDB wants host:port. A scheme, which is how people usually write
+        // an endpoint, is read as the answer to use_ssl rather than refused.
+        let (host, ssl) = match endpoint.split_once("://") {
+            Some(("http", host)) => (host, false),
+            Some(("https", host)) => (host, true),
+            _ => (endpoint, resolved_bool(node, "use_ssl")?),
+        };
+        options.push(format!(
+            "ENDPOINT {}",
+            quote_literal(host.trim_end_matches('/'))
+        ));
+        options.push(format!("USE_SSL {ssl}"));
+    }
+
+    let path = required_str(node, "path")?;
+    options.push(format!("SCOPE {}", quote_literal(&bucket_of(path))));
+
+    Ok(format!(
+        "CREATE OR REPLACE SECRET {} ({});\n{statement}",
+        quote_identifier(&format!("{}_s3", node.node_id)),
+        options.join(", ")
+    ))
+}
+
+/// `s3://bucket/some/key*.csv` → `s3://bucket`.
+fn bucket_of(path: &str) -> String {
+    match path.split_once("://") {
+        Some((scheme, rest)) => {
+            let bucket = rest.split('/').next().unwrap_or(rest);
+            format!("{scheme}://{bucket}")
+        }
+        None => path.to_string(),
+    }
 }
 
 pub(crate) fn source_http(node: &Lowering<'_>) -> Result<String, EngineError> {
@@ -293,12 +377,34 @@ pub(crate) fn source_http(node: &Lowering<'_>) -> Result<String, EngineError> {
 
 pub(crate) fn source_iceberg(node: &Lowering<'_>) -> Result<String, EngineError> {
     let path = required_str(node, "path")?;
+    let moved = resolved_bool(node, "allow_moved_paths")?;
+    let version = optional_str(node, "version")?;
 
-    let body = format!(
-        "SELECT * FROM iceberg_scan({}, allow_moved_paths={})",
-        quote_path(path),
-        resolved_bool(node, "allow_moved_paths")?
-    );
+    // Found in Phase 10c against a table written by pyiceberg and then moved:
+    // with allow_moved_paths, DuckDB treats `path` as the table's root and
+    // joins `metadata/...` onto it, so a metadata-file path becomes
+    // `….metadata.json/metadata/snap-….avro` and fails with a message about a
+    // file nobody named. Said plainly here instead.
+    if moved
+        && path
+            .trim_end_matches(['/', '\\'])
+            .ends_with(".metadata.json")
+    {
+        return Err(EngineError::InvalidProperty {
+            id: node.node_id.to_string(),
+            property: "path".to_string(),
+            reason: "must be the table's root directory when allow_moved_paths is set, not a \
+                     .metadata.json file; name the metadata file in version instead"
+                .to_string(),
+        });
+    }
+
+    let mut arguments = vec![quote_path(path), format!("allow_moved_paths={moved}")];
+    if let Some(version) = version {
+        arguments.push(format!("version={}", quote_literal(version)));
+    }
+
+    let body = format!("SELECT * FROM iceberg_scan({})", arguments.join(", "));
 
     Ok(create_view(node, &body))
 }
@@ -372,7 +478,18 @@ pub(crate) fn source_postgres(node: &Lowering<'_>) -> Result<String, EngineError
 }
 
 pub(crate) fn source_mysql(node: &Lowering<'_>) -> Result<String, EngineError> {
-    source_database(node, "mysql")
+    // Found in Phase 10c against a real MySQL 8.4: with DuckDB 1.5.5's mysql
+    // extension, any aggregate over a *view* of a MySQL table -- a count, a
+    // sum, a GROUP BY -- fails with "INTERNAL Error: Failed to bind column
+    // reference". The same aggregate straight on the table works. Every source
+    // here is a view, so the row count alone tripped it. Turning the
+    // extension's aggregate pushdown off fixes every case tried; the aggregate
+    // then runs in DuckDB, which is slower for a huge table and correct for
+    // all of them. Revisit when the pinned DuckDB moves.
+    Ok(format!(
+        "SET mysql_aggregate_pushdown_enabled=false;\n{}",
+        source_database(node, "mysql")?
+    ))
 }
 
 pub(crate) fn source_sqlite(node: &Lowering<'_>) -> Result<String, EngineError> {
@@ -821,7 +938,73 @@ pub(crate) fn sink_s3(node: &Lowering<'_>) -> Result<String, EngineError> {
         }
     };
 
-    Ok(copy_to(&upstream, path, &options))
+    with_s3_secret(node, copy_to(&upstream, path, &options))
+}
+
+// ---------------------------------------------------------------------------
+// Native components: the SQL half
+// ---------------------------------------------------------------------------
+
+/// A source written in Rust: a view over the file its connector stages.
+///
+/// The connector runs before DuckDB and writes JSON Lines to `staging`; this is
+/// the view that reads them. Everything a view gets -- the incremental filter,
+/// materialisation, an alias, a count probe -- it gets through `create_view`
+/// like any other source.
+///
+/// Without `columns`, DuckDB infers the types the way it does for
+/// `src.file.json` and `src.file.csv`: an ISO date or timestamp becomes a
+/// `DATE` or `TIMESTAMP`, and everything else a connector wrote as a string
+/// stays text. The whole file is sampled, so a field that first appears on row
+/// 50,000 is not dropped. With `columns`, DuckDB reads exactly those, cast --
+/// which is the way to be certain, and the way to keep a timestamp's text
+/// exactly as written (inference turns `T` into a space).
+pub(crate) fn native_source(node: &Lowering<'_>) -> Result<String, EngineError> {
+    let staging = staging_path(node)?;
+
+    let shape = match node.properties.get("columns") {
+        Some(JsonValue::Object(pairs)) if !pairs.is_empty() => {
+            let columns = map_entries(node, "columns", pairs, |column, declared| {
+                Ok(format!(
+                    "{}: {}",
+                    quote_literal(column),
+                    quote_literal(&type_name(node, declared)?)
+                ))
+            })?;
+            format!("columns={{{}}}", columns.join(", "))
+        }
+        _ => "sample_size=-1".to_string(),
+    };
+
+    let body = format!(
+        "SELECT * FROM read_json({}, format='newline_delimited', {shape})",
+        quote_path(staging)
+    );
+
+    Ok(create_view(node, &body))
+}
+
+/// A sink written in Rust: DuckDB writes the rows to the staging file as JSON
+/// Lines, and the connector delivers them after the run succeeds.
+pub(crate) fn native_sink(node: &Lowering<'_>) -> Result<String, EngineError> {
+    let upstream = exactly_one_input(node)?;
+    let staging = staging_path(node)?;
+
+    Ok(copy_to(&upstream, staging, "FORMAT json"))
+}
+
+fn staging_path<'a>(node: &Lowering<'a>) -> Result<&'a str, EngineError> {
+    // The planner sets this for every component the connector registry knows,
+    // and the registry is where these builders are paired with them -- so this
+    // is a registry that disagrees with itself, not a user mistake.
+    node.staging.ok_or_else(|| EngineError::InvalidProperty {
+        id: node.node_id.to_string(),
+        property: "componentId".to_string(),
+        reason: format!(
+            "'{}' is registered as native but has no connector",
+            node.component_id
+        ),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1547,6 +1730,7 @@ pub(crate) fn control_for(
         alias: None,
         materialize: Materialize::Auto,
         spill_path: None,
+        staging: None,
         // A control node reads properties through this, and builds no
         // relation of its own; there is nothing for a watermark to narrow.
         incremental: None,

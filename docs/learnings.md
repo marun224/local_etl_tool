@@ -268,3 +268,114 @@ the fuller record. From Phase 10 on, a section is added at the end of each phase
   timing instead.
 - A check that cannot fail: the session prelude's "did `SELECT 1` return rows" was always true.
   Writing the test for the new behaviour is what exposed it.
+
+## Phase 10a — The plugin SDK, the staging bridge, and XML (2026-09-23)
+
+**Concepts**
+- **A bridge through a file.** Rust code and a separate DuckDB process exchange rows as
+  JSON Lines: one JSON object per line, which DuckDB's `read_json` reads and `COPY … (FORMAT
+  json)` writes. A source runs *before* DuckDB and its node is a view over the file; a sink is
+  a `COPY` into the file, delivered *after* DuckDB.
+- **Trait objects in a static registry.** `Connector::Source(&'static dyn Source)` lets the
+  engine hold every connector in one list, and the component registry pairs each with the one
+  builder for its direction, so adding a connector needs no line in the engine.
+- **A streaming XML parser.** `quick-xml` hands out events (start, text, entity, end) rather
+  than a tree. The reader is a small state machine over them: outside a record, inside one,
+  inside a column.
+- **RAII cleanup.** `Staging` deletes its files in `Drop`, so every early return cleans up
+  without remembering to.
+- **Write-then-rename.** Writing to `<file>.partial` and renaming makes a file replacement
+  all-or-nothing.
+
+**Decisions and why**
+- JSON Lines, not Parquet, for the bridge (Settled decision 9): no new dependency, and the
+  same shape as a `disk` spill.
+- Refuse nested XML, repeated elements and mixed content **by name and byte position** rather
+  than flatten them by a rule somebody would have to guess.
+- The writer is the reader in reverse (`@x` becomes an attribute, `child@x` an attribute of the
+  child, a null is left out), so a flat document round-trips byte for byte.
+- A failed run delivers nothing, including under `continueOnFailure`, which is the rule
+  watermarks already follow.
+- Accept DuckDB's type inference for undeclared columns instead of fighting it, because it
+  matches every other source and the alternative was a hack.
+
+**Mistakes worth not repeating**
+- **A probe that agreed with the plan was taken as proof.** Its two sample dates had different
+  shapes, so DuckDB gave up inferring and the "all text" claim looked true. An end-to-end test
+  on realistic data showed otherwise. *Probe with the data the feature will actually see.*
+- Counting tests from a baseline without checking the baseline: a run that already included
+  five new tests made seven more look like five had gone missing. *Before chasing a missing
+  number, recount what the old number held.*
+- A `vec![...]` of function items stopped coercing to function pointers as soon as it was
+  chained with an iterator, so the type had to be written down. Easy to lose ten minutes to.
+- A deprecated method (`unescape_value`) passed the test build and failed clippy's
+  `-D warnings`. Run clippy, not just the tests, before calling a crate done.
+
+## Phase 10b — SaaS REST (2026-09-23)
+
+**Concepts**
+- **Pagination is a state machine** that decides two things after each page: what to ask for
+  next, and whether there is a next at all. Page, offset, cursor and `Link` headers differ only
+  in those two answers.
+- **Which failures to retry.** 429 and 5xx are the server saying "not now"; 400, 401, 403 and
+  404 are "not like this", and sending the same request again cannot change them.
+  `Retry-After` is the server's own answer to "how long", and wins over any backoff.
+- **At-least-once delivery.** A batch that the API processed but did not acknowledge will be
+  sent again. The safe targets are APIs that deduplicate or upsert.
+- **A recording test fixture.** A local server that records every request, and not only
+  answers it, lets a test assert on what was *sent*: method, headers, query, body.
+
+**Decisions and why**
+- `max_pages` errors rather than stops, so a capped load can never pass for a complete one.
+- A cursor that repeats is refused at once, not 1,000 requests later.
+- A sink batch of one is a bare object; any larger size is always an array, even for a last
+  batch of one, so the request's shape never depends on the row count.
+- The SDK gained `check`, so rules spanning properties fail at `etl validate` and in the
+  canvas, not on page one of a run.
+- Pinned `ureq` to the 3.2 series rather than let the lock drift past the declared Rust
+  version, and raised the wider problem instead of quietly living with it.
+
+**Mistakes worth not repeating**
+- **A default that is right in one direction and silently wrong in the other.** The sink
+  inherited "GET unless told otherwise" from the source: no body, no error, no data. Only the
+  recording fixture showed it. *When code is shared by two directions, check each default
+  against each direction.*
+- **A test that depends on a build artifact went stale.** The frontend asked an `etl.exe`
+  built before REST existed, and failed for a reason that had nothing to do with the code.
+  *Rebuild what a test shells out to before believing its failure.*
+- **`Set-Content -Encoding utf8` on PowerShell 5.1 writes a BOM.** It happened to a
+  `Cargo.toml`. Write files with the editor tools, or with `UTF8Encoding($false)`.
+- **Quoting heredocs for a shell inside another tool** broke twice. Long text with quotes goes
+  through a file.
+
+## Phase 10c — Phase 4's connectors against real systems (2026-09-23)
+
+**Concepts**
+- **Verification is a different thing from testing.** Phase 4's golden tests proved the SQL was
+  the SQL we meant. Running it against a real server proved whether that SQL does anything
+  useful. Three of five did not.
+- **Reference fixtures.** A table written by the format's *own* library (`deltalake`,
+  `pyiceberg`) tests the reader against something it did not make itself, which is the only
+  test of a reader worth having.
+- **Throwaway servers.** Containers started by a script, on high fixed ports, with a readiness
+  probe that runs a real query rather than a ping.
+- **Tests that skip honestly.** A test needing a server skips without one, and says so.
+  `cargo test` still counts it as passed, which has to be remembered when reading a total.
+
+**Decisions and why**
+- Declared Rust 1.88, the truth the lockfile already required (Settled decision 17).
+- Worked around DuckDB's MySQL bug with a documented setting rather than routing through
+  `mysql_query`, which would have sent raw SQL past our own quoting.
+- Refused the failing Iceberg combination at compile time with the fix in the message, rather
+  than leaving users DuckDB's message about a file nobody named.
+- S3 credentials become a *temporary*, bucket-scoped DuckDB secret: nothing on disk, and two
+  buckets can use two accounts.
+
+**Mistakes worth not repeating**
+- **Help text that nobody had followed.** "The table's metadata location" was the one input
+  that failed for a moved table. *Test the instructions, not only the code.*
+- **A path check that assumed every path is local.** `prepare_sinks` made a directory of
+  `s3://...`. It failed loudly on Windows and silently on Linux, where it made a folder called
+  `s3:`. *When a bug can pass silently on one platform, assert its absence.*
+- **`cat > file` with nothing piped in waits forever.** It hung a command for ten minutes.
+- **Anchors that assume line wrapping.** A splice script's assert caught it before any harm.

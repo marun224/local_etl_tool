@@ -1,0 +1,12 @@
+[package]
+name = "etl-plugin-sdk"
+description = "The contract between the engine and a connector written in Rust"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+etl-metadata.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

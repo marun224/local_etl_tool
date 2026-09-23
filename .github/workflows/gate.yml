@@ -34,6 +34,9 @@ env:
   # The version scripts/fetch-duckdb.ps1 pins. Named here as well so the cache
   # key moves when it does; they must not disagree.
   DUCKDB_VERSION: v1.5.5
+  # The extensions the gate's tests load. Part of the cache key, for the reason
+  # given at the cache step.
+  DUCKDB_TEST_EXTENSIONS: excel,delta,iceberg,httpfs,postgres,mysql
 
 jobs:
   gate:
@@ -84,30 +87,42 @@ jobs:
       # tools/ is git-ignored on purpose -- 284 MB of build inputs do not belong
       # in a repo -- so CI fetches it. Cached on the pinned version, because the
       # engine only moves when somebody decides it moves.
+      # The key names the extension set as well as the version. The fetch step
+      # below is skipped on a cache hit, so a key that ignored the list would
+      # restore last week's engine without this week's extensions, and the
+      # tests that need them would skip rather than fail: silently unverified.
       - name: Cache the vendored engine
         id: duckdb-cache
         uses: actions/cache@v4
         with:
           path: tools/duckdb
-          key: duckdb-${{ matrix.os }}-${{ env.DUCKDB_VERSION }}
+          key: duckdb-${{ matrix.os }}-${{ env.DUCKDB_VERSION }}-${{ env.DUCKDB_TEST_EXTENSIONS }}
 
-      # Only `excel`, not all nine. Exactly one test loads an extension
-      # (an_excel_round_trip_loads_the_extension_and_moves_the_rows) and it
-      # wants that one; fetching the rest would be ~250 MB per run to prove
-      # nothing. If a second test ever needs another, this line is where it goes
-      # and the failure will say which extension is missing.
-      - name: Fetch DuckDB and the one extension the tests load
+      # Exactly the extensions some test loads, and no more. `excel` for the
+      # Phase 4 round trip; since Phase 10c, `delta`, `iceberg` and `httpfs` for
+      # the lake fixtures, and `postgres` and `mysql` for the servers below. If
+      # another test ever needs another, it goes in DUCKDB_TEST_EXTENSIONS and the
+      # test that skipped without it will say which one it wanted.
+      - name: Fetch DuckDB and the extensions the tests load
         if: steps.duckdb-cache.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
           ./scripts/fetch-duckdb.ps1 -Version $env:DUCKDB_VERSION
-          ./scripts/fetch-duckdb-extensions.ps1 -Version $env:DUCKDB_VERSION -Extensions excel
+          ./scripts/fetch-duckdb-extensions.ps1 -Version $env:DUCKDB_VERSION -Extensions $env:DUCKDB_TEST_EXTENSIONS.Split(',')
 
       - name: Formatting
         run: cargo fmt --all --check
 
       - name: Clippy
         run: cargo clippy ${{ matrix.scope }} --all-targets -- -D warnings
+
+      # Phase 10c: PostgreSQL, MySQL and MinIO in containers, for
+      # tests/verified.rs. Linux only, because Windows runners cannot run Linux
+      # containers; on Windows those tests skip, and the lake ones still run.
+      - name: Start the servers the verification tests use
+        if: matrix.os == 'ubuntu-latest'
+        shell: pwsh
+        run: ./scripts/test-services.ps1
 
       - name: Tests
         run: cargo test ${{ matrix.scope }}
@@ -126,7 +141,7 @@ jobs:
         run: |
           count=$(${{ matrix.etl }} components | tail -1 | grep -oE '^[0-9]+')
           echo "components: $count"
-          test "$count" = "54"
+          test "$count" = "58"
 
       - name: The samples still print what they printed
         shell: bash
@@ -135,6 +150,7 @@ jobs:
           ${{ matrix.etl }} run samples/pipelines/orders_enriched.json
           ${{ matrix.etl }} run samples/pipelines/orders_checked.json
           ${{ matrix.etl }} run samples/pipelines/orders_guarded.json
+          ${{ matrix.etl }} run samples/pipelines/orders_xml.json
 
   # Phase 9's "done": a self-contained artifact, built and then run somewhere it
   # has no right to work.
@@ -151,10 +167,12 @@ jobs:
             # Windows will not execute a file with no extension, so the baked
             # artifact has to be named like one.
             baked: checked.exe
+            baked_xml: xml.exe
             runner: ""
           - os: ubuntu-latest
             etl: ./target/debug/etl
             baked: checked
+            baked_xml: xml
             # The runner that ships, not the one cargo just built. A runner
             # built on the ubuntu-24.04 host needs glibc 2.39 and will not start
             # on Debian 12 -- the second CI run found exactly that, which is the
@@ -198,12 +216,16 @@ jobs:
         shell: pwsh
         run: ./scripts/build-runner.ps1 -Platform linux_amd64
 
+      # Two pipelines: one DuckDB runs alone, and one with a component written
+      # in Rust at each end (Phase 10a), whose connectors have to travel inside
+      # the runner rather than beside it.
       - name: Bake a pipeline into an executable
         shell: bash
         run: |
           set -e
           ${{ matrix.etl }} build samples/pipelines/orders_checked.json --out ${{ matrix.baked }} ${{ matrix.runner }}
-          ls -l ${{ matrix.baked }}
+          ${{ matrix.etl }} build samples/pipelines/orders_xml.json --out ${{ matrix.baked_xml }} ${{ matrix.runner }}
+          ls -l ${{ matrix.baked }} ${{ matrix.baked_xml }}
 
       # The property the ${workspace} fix bought, and the one that was broken
       # until Phase 9c ran a cross-built artifact: an artifact must not carry the
@@ -213,10 +235,13 @@ jobs:
         run: |
           set -e
           mkdir -p "$RUNNER_TEMP/elsewhere"
-          cp ${{ matrix.baked }} "$RUNNER_TEMP/elsewhere/"
+          cp ${{ matrix.baked }} ${{ matrix.baked_xml }} "$RUNNER_TEMP/elsewhere/"
           cd "$RUNNER_TEMP/elsewhere"
           ./${{ matrix.baked }} --workspace "$GITHUB_WORKSPACE" | tee out.txt
           grep -q "Ran 6 stage(s)" out.txt
+          ./${{ matrix.baked_xml }} --workspace "$GITHUB_WORKSPACE" | tee xml.txt
+          grep -q "7 record(s) written to" xml.txt
+          test "$(grep -c '<order ' "$GITHUB_WORKSPACE/samples/out/orders_2026.xml")" = "7"
 
       # The air-gap claim, and the only test that actually makes it. A base image
       # with no Rust, no DuckDB and -- with --network none -- nothing to reach
@@ -230,6 +255,10 @@ jobs:
             -v "$PWD:/w" -w /w \
             debian:12-slim ./${{ matrix.baked }} | tee container.txt
           grep -q "Ran 6 stage(s)" container.txt
+          docker run --rm --network none \
+            -v "$PWD:/w" -w /w \
+            debian:12-slim ./${{ matrix.baked_xml }} | tee container-xml.txt
+          grep -q "7 record(s) written to" container-xml.txt
 
   # `scripts/build-runner.ps1` is the only part of the cross-build story that
   # nothing else covers, and both of its failure modes -- the wrong base image,

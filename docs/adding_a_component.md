@@ -240,3 +240,48 @@ cargo test --workspace
 
 The component should appear in the listing and in the manifest, with its
 property schema, without any further work — that is the registry doing its job.
+
+## Native components (written in Rust)
+
+For data DuckDB cannot reach: a format with no reader, an API with no extension. Everything
+above still applies to the *spec*. What differs is that there is no builder to write and no
+line in `specs.rs` at all. Added in Phase 10a; `src.file.xml` and `snk.file.xml` are the worked
+example, in [`crates/connectors/src/xml.rs`](../crates/connectors/src/xml.rs).
+
+1. **Implement the trait** from `etl-plugin-sdk` in a new module of `crates/connectors/`:
+   `Source` (read records, write them to a `RecordWriter`) or `Sink` (read records from a
+   `RecordReader`, deliver them). A record is a JSON object. `spec()` returns the
+   `ComponentSpec` exactly as above, and a source's spec should include
+   `etl_plugin_sdk::columns_property()`.
+2. **List it** in `etl_connectors::all()`. That is the whole registration: the engine adds
+   every connector listed there to its registry, paired with the one builder for its
+   direction, so the canvas, `etl components`, validation, lineage, the scheduler, the
+   console and a built artifact all have it.
+3. **Test the connector** in its own crate, against strings and temporary files, with no
+   DuckDB. The engine's side of the bridge is already tested once for everybody, in
+   `crates/duckdb-engine/tests/native.rs`.
+4. **Add it to the inventory** in `specs/tests.rs`, as for any component.
+5. **Write its delivery semantics** in [connectors.md](connectors.md): what it promises, what
+   it does not, and what a failure partway leaves behind. That is half of "done" for a
+   connector.
+
+What the engine does with it, so you do not have to:
+
+- A source runs **before** DuckDB, writing its records to `.etl/tmp/native/<node_id>.jsonl`.
+  The node's SQL is a view over that file (see `builders::native_source`), so counts,
+  `incremental`, `materialize` and aliases work unchanged.
+- A sink's SQL is a `COPY` into its staging file (`builders::native_sink`). The connector is
+  called **after** DuckDB, and only when the whole run succeeded.
+- A `path` property on a sink is where `mode` is checked and the parent directory is made,
+  the same as for a file sink DuckDB writes itself.
+- Errors from the connector become a stage failure naming the node, with secrets masked.
+- Staging files are deleted on every path out of a run.
+
+Two rules that are easy to break:
+
+- **Connectors never depend on the engine.** They know about records and their own
+  properties, and nothing about SQL or plans.
+- **Pure Rust, blocking where possible** (Settled decision 10). No system C libraries, since
+  the Linux runner is built in a bare bookworm image and ships with no dependencies. An async
+  runtime only if a family genuinely cannot avoid one, and then it is a decision recorded in
+  the tracker, not a line in a `Cargo.toml`.

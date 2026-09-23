@@ -898,6 +898,207 @@ documented statement of delivery semantics.
 
 **Done (per family).** Registered, tested, semantics documented.
 
+#### Phase 10: split and design (questions answered 2026-09-23)
+
+Decisions, recorded in the tracker as Settled decisions 9–15:
+
+| # | Question | Answer |
+|---|---|---|
+| 9 | How rows from Rust reach DuckDB | **A staging file in JSON Lines**, read with `read_json`. No new dependency, and the same shape as a `disk` spill |
+| 10 | Client dependencies | **Pure-Rust, blocking where possible.** No system C libraries. `tokio` only if a family cannot do without it, decided family by family |
+| 11 | How the phase splits | **10a** the SDK and the staging bridge, proven by XML; **10b** SaaS REST; later families one sub-phase each |
+| 12 | Which network family comes first | **SaaS REST** |
+| 13 | Direction | **Sources and sinks both, from the start** |
+| 14 | Do built artifacts run native connectors | **Yes.** `etl-runner` gets them through the engine, one code path |
+| 15 | Verifying Phase 4's database and lake connectors | **Its own small phase after 10b**, called 10c |
+
+**Transforms are not part of this.** The plan text above names a `Transform` trait. It is
+deferred, because every transform so far is SQL that DuckDB runs better than Rust would, and
+a trait with no implementation is the stub-crate mistake this plan warns against. It arrives
+with the first transform DuckDB cannot express.
+
+##### The bridge: how a native connector joins a plan
+
+A native component is registered like any other, as a spec and a builder in `specs.rs`, so
+the canvas palette, `etl components`, validation and lineage all get it for free. What
+differs is that its builder also fills in `Stage::native`:
+
+```rust
+pub struct NativeStep {
+    pub component_id: String,
+    pub properties: JsonValue,  // resolved: parameters, contexts and secrets already applied
+    pub staging: String,        // .etl/tmp/native/<node_id>.jsonl, relative like a spill path
+    pub direction: Direction,   // Ingest (a source) or Egress (a sink)
+}
+```
+
+- **A native source** runs *before* DuckDB starts. It writes its records to the staging file
+  as JSON Lines, and its SQL is an ordinary view over that file:
+  `CREATE OR REPLACE TEMP VIEW "<id>" AS (SELECT * FROM read_json('<staging>',
+  format='newline_delimited', columns={...}))`. A source has no upstream, so it can always run
+  first. That is what keeps **both transports and `preview` unchanged**: all three call one
+  `stage_native_sources` before DuckDB, the way they already call `prepare_spills`.
+- **A native sink** is a `COPY (SELECT * FROM "<from>") TO '<staging>' (FORMAT json)`, and the
+  connector delivers the staging file *after* DuckDB finishes. It runs only if the run
+  succeeded, so a failed pipeline never half-delivers. `preview` drops sinks as it already
+  does.
+- **Types.** JSON loses them, so a source declares its output columns, either fixed by the
+  connector or from a `columns` map property (name to DuckDB type, the `xf.cast` shape), and
+  the builder passes them as `read_json`'s `columns`. Unset means all `VARCHAR`, which is
+  honest: XML and most REST payloads are text until somebody says otherwise.
+- **Counts, incremental, materialisation and lineage need no change.** A native source *is* a
+  view once staged, so the count probe, the incremental `WHERE col > mark` wrapper and
+  `materialize` all apply as they do to `src.file.json`. `Stage::external` is the file path
+  or URL, never a token.
+- **Secrets.** Properties are resolved before compile like everyone else's. A connector's
+  error text goes through the same `redact` as DuckDB's stderr, because an HTTP client quotes
+  URLs and headers back just as `ATTACH` quotes connection strings.
+- **Staging is scratch.** It is cleared after the run, best-effort and counted, as spills are.
+  Its path is derived from the node id so `compile` stays pure, which carries the spill trade:
+  two concurrent runs of one pipeline in one directory would share staging files. The
+  scheduler already serialises runs, and a hand-run beside it is the known unguarded case.
+- **The report** gains a line per native stage: records staged or delivered, and for a sink,
+  how far it got if it failed partway.
+
+##### Crates
+
+- **`crates/plugin-sdk`** (`etl-plugin-sdk`): the traits, and nothing that does I/O.
+  `Source::read(&self, props, &mut dyn RecordWriter, &Context) -> Result<Summary, ConnectorError>`
+  and `Sink::write(&self, props, &mut dyn RecordReader, &Context) -> Result<Summary, ConnectorError>`.
+  A record is a `serde_json::Map`, which is what JSON Lines holds. `Context` carries the working
+  directory, the redaction list and a cancellation flag for later.
+- **`crates/connectors`** (`etl-connectors`): the implementations, and `specs()` listing each
+  one's `ComponentSpec`. It depends on `plugin-sdk` and `metadata`, **never on the engine**. The
+  engine depends on it, so the CLI, the runner, the desktop app and the console all have it
+  through the engine without a line of their own. That is decision 14.
+
+##### Phase 10a — the SDK, the bridge, and XML
+
+**Goal.** A Rust-native connector runs end to end in both directions, on both transports, in
+`preview`, and inside a built artifact, proven by the XML reader Phase 4 deferred here.
+
+**Files.** `crates/plugin-sdk/`, `crates/connectors/{lib.rs, xml.rs}`,
+`crates/duckdb-engine/src/{plan/mod.rs, plan/specs.rs, plan/builders.rs, exec.rs, native.rs}`,
+`samples/data/orders.xml`, `samples/pipelines/orders_xml.json`, `docs/connectors.md` (new:
+delivery semantics per family), `docs/adding_a_component.md` (a native section).
+
+**Do.**
+- `src.file.xml`: `path`, `record` (the element that is one row, e.g. `order`), optional
+  `columns`. A record's child elements and attributes become fields, attributes prefixed `@`.
+  Nested elements beyond one level are refused by name rather than flattened by guesswork.
+- `snk.file.xml`: `path`, `root` and `record` element names, `mode` (`overwrite` or
+  `error_if_exists`, the same two sinks already take). Written to a temporary file and renamed
+  into place, so a failed write never leaves half a document.
+- Parser and writer: **`quick-xml`**, which is pure Rust with no C. The dependency that decision
+  10 allows here.
+- Wire the bridge into `run_one_script`, `run_driven` and `preview`, then delivery and cleanup.
+
+**Verify.**
+- Unit: XML parsing (attributes, empty elements, entities, CDATA, a deeper nesting refused) and
+  writing (escaping round-trips).
+- Golden SQL for both builders.
+- End to end: `orders.xml` to Parquet on the one-script path; CSV to XML and back, byte-stable;
+  the same pipeline with a `policy` so it takes the session path; `preview` of an XML source
+  node writes nothing; a failing upstream means the XML sink never writes.
+- A built artifact of the XML pipeline runs from outside the repo (CI's artifact job gains it).
+- Mutation check on the "deliver only after success" rule.
+- The gate: fmt, clippy, all tests, samples; 56 components.
+
+**Done.** Both XML components registered and tested, the bridge on all three entry points,
+and XML's delivery semantics written in `docs/connectors.md`.
+
+**Amended 2026-09-23, on completion.** One thing in the design above was wrong, and running it
+is what showed it: *"Unset means all `VARCHAR`"* is not what DuckDB does. Its JSON reader
+recognises an ISO date or timestamp inside a string and types it, the way `src.file.csv` and
+`src.file.json` already type their columns. The first probe missed this because its two
+sample dates had different shapes, so inference gave up and left them as text. There is no
+`all_varchar` for `read_json`, and an impossible `dateformat` is refused. So forcing text would
+mean a hack, and the behaviour is consistent with every other source. Kept as DuckDB does it,
+and documented: unset means DuckDB infers, and `columns` is how to be certain.
+
+##### Phase 10b — SaaS REST
+
+**Goal.** Read from and write to an HTTP JSON API with authentication, pagination, rate limits
+and retries, with none of it running at 3 am untested.
+
+**Files.** `crates/connectors/src/rest.rs` plus tests with a fixture server, `docs/connectors.md`,
+a sample against a local fixture.
+
+**Do.**
+- `src.saas.rest`: `url`, `method`, `headers` (map), `query` (map), `auth` (`none`, `bearer`,
+  `basic`, `header`) whose token takes `${SECRET:...}`, `records` (a JSON pointer to the array,
+  e.g. `/data`), `pagination` (`none`, `page`, `offset`, `cursor`, `link`) with its own settings,
+  `max_pages` (a cap, default 1000, hitting it is an error rather than a silent stop),
+  `min_interval_ms`, `timeout_ms`, `columns`.
+- `snk.saas.rest`: `url`, `method` (`POST`/`PUT`/`PATCH`), `headers`, `auth`, `batch_size`
+  (1 sends one object per request, more sends an array), `wrap` (an optional key to nest the
+  batch under).
+- Retries on 429 and 5xx, with doubling backoff that honours `Retry-After`, and never on other 4xx.
+- HTTP client: **`ureq`** (blocking, no async runtime) with `rustls` and bundled `webpki-roots`
+  certificates, so an artifact carries its trust store the way it carries its engine. **One
+  thing to know:** rustls needs a cryptography provider, and the default, `ring`, contains C and
+  assembly. It is compiled from source by `cargo` with no *system* library, so the bookworm build
+  and the Windows build are unaffected. That meets decision 10's reason, but not its letter.
+  The alternative, a pure-Rust provider, is not yet production-grade. **The phase starts by
+  confirming this with the user.**
+
+**Verify.** Every behaviour against a local `tiny_http` fixture server, which is already in the
+lockfile, so there is no network and no Docker: each pagination mode, the `max_pages` cap, 429
+with `Retry-After`, a 500 then success, a 401 not retried, auth headers present, a secret masked
+in an error, sink batching, and a sink failing on batch 3 reporting 2 delivered. Both OSes in CI.
+
+**Done.** Both REST components registered and tested, and delivery semantics written: the source
+is a snapshot per run, not transactional, since pages can shift while being read; the sink is
+at-least-once per batch, and a partial failure says how many batches landed.
+
+**Amended 2026-09-23, on completion.** Built as designed, with these additions and deviations:
+
+- **The SDK grew a `check` hook** (default: accept) on `Source` and `Sink`, which the engine
+  calls while compiling. Rules spanning properties, such as "cursor pagination needs
+  `cursor_path`", are now refused by `etl validate` and the canvas, not by the first page of a
+  run. XML moved its element-name checks there too.
+- **`ureq` is pinned `~3.2.1`**, not the newest 3.4, because 3.4 needs Rust 1.85 and the
+  connectors crate declares 1.80. The workspace uses resolver 2, which does not consider Rust
+  versions when locking, so a caret requirement would have let the lock drift past the
+  declared minimum. That check also showed **the workspace-wide 1.80 has not been true for
+  some time** (clap, indexmap, zeroize and the Tauri stack need up to 1.88). That is an open
+  decision in the tracker, not something 10b changed.
+- **Lineage names an API by its endpoint only.** `Stage::external` for a component with a
+  `url` is the URL without `user:pass@`, query string or fragment. `src.cloud.http` gains a
+  lineage entry the same way.
+- **The source can POST a search** (`method` = `POST`, `body`), because enough search APIs
+  work that way to make it a first-page problem rather than a later one.
+- **No watermark push-down.** The source reads every page on every run, like every native
+  source; the incremental filter applies afterwards. Binding `${since}` into `query` does it
+  by hand. A first-class version is a later addition, not a 10b one.
+- **Real HTTPS was checked once, by hand:** GitHub's public releases API over TLS, with
+  `Link` pagination, typed columns, and `max_pages` refusing to stop quietly. The suite itself
+  never leaves 127.0.0.1.
+
+##### Phase 10c — verifying Phase 4's database and lake connectors
+
+**Goal.** Postgres, MySQL, Delta, Iceberg and S3 have been run against real systems, not only
+had their SQL compared. The website's site-to-product sync is waiting on this.
+
+**Do.** Postgres and MySQL through Docker (the daemon has to be running); local Delta and
+Iceberg test tables; S3 against MinIO, which needs credential, region and endpoint properties
+that `src.cloud.s3` does not have yet. Written up per connector, working or not.
+
+**Done.** Each of the five is either verified with a test, or has a written reason why not.
+
+**Amended 2026-09-23, on completion.** Done in one sitting. **Three of the five were broken**
+in ways only running them could show: the S3 sink had never worked on Windows (it tried to
+make a local directory of `s3://...`), MySQL sources failed on any aggregate over their view
+(a DuckDB 1.5.5 extension bug, worked around), and Iceberg could not read a moved table by
+its metadata file. All three are fixed, with the S3 access properties the plan anticipated and
+an Iceberg `version`. Delta and Postgres worked as written. The tracker's *From Phase 10c* has
+the detail. The servers run in Docker from `scripts/test-services.ps1`, locally and in CI's
+Ubuntu gate; the lake tables are committed fixtures.
+
+**Later families**, planned one at a time when reached, in the plan's order: GraphQL (the
+nearest, since it reuses 10b's HTTP layer), streaming as bounded micro-batches, NoSQL,
+warehouses over their own protocols, vector DBs.
+
 ### Phase 11 — AI assistant + MCP server
 
 **Goal.** A local model writes valid pipeline JSON; external agents drive the studio.

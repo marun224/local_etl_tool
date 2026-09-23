@@ -127,6 +127,55 @@ impl Materialize {
 /// and something Phase 8's scheduler will have to give a run id.
 pub const SPILL_DIR: &str = ".etl/tmp";
 
+/// Where a native component's records are staged, relative to the working
+/// directory. Beside the spills, for the same reasons and with the same trade.
+pub const NATIVE_DIR: &str = ".etl/tmp/native";
+
+/// A URL as lineage may show it: scheme, host and path, and nothing that can
+/// hold a credential. `user:pass@` goes, and so does the query string, which is
+/// where an API key most often travels (`?api_key=...`). What is left names the
+/// endpoint, which is what lineage is asking about.
+pub fn url_for_lineage(url: &str) -> String {
+    let without_query = url.split(['?', '#']).next().unwrap_or(url);
+
+    match without_query.split_once("://") {
+        Some((scheme, rest)) => {
+            let (authority, path) = match rest.find('/') {
+                Some(index) => rest.split_at(index),
+                None => (rest, ""),
+            };
+            let host = authority.rsplit('@').next().unwrap_or(authority);
+            format!("{scheme}://{host}{path}")
+        }
+        None => without_query.to_string(),
+    }
+}
+
+/// Which way records cross between a native component and DuckDB.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    /// A source: the connector writes the staging file before DuckDB starts,
+    /// and the stage is a view over it.
+    Ingest,
+    /// A sink: DuckDB writes the staging file, and the connector delivers it
+    /// after a run that succeeded.
+    Egress,
+}
+
+/// What the executor needs to run a native component's half of a stage.
+///
+/// The SQL half is in [`Stage::sql`] like anyone's. This is the other half:
+/// which connector, with what properties, through which file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeStep {
+    pub direction: Direction,
+    /// Resolved: parameters, contexts and secrets substituted, and the spec's
+    /// defaults applied. What the connector is handed.
+    pub properties: JsonValue,
+    /// The staging file, relative to the working directory, like a spill path.
+    pub staging: String,
+}
+
 /// One upstream connection into a stage.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Input {
@@ -335,6 +384,9 @@ pub struct Stage {
     /// is asking about, and a connection string is the one property most
     /// likely to hold a password.
     pub external: Option<String>,
+    /// For a component written in Rust rather than lowered to DuckDB alone:
+    /// the connector's half of the stage. `None` for everything else.
+    pub native: Option<NativeStep>,
 }
 
 /// An incremental source, resolved against what the workspace remembers.
@@ -993,6 +1045,39 @@ fn build_stages(
                 }
             });
 
+            // A component written in Rust gets its staging file here, derived
+            // from the node id like a spill path so that compiling stays pure.
+            // Its builder writes the SQL half; this is the connector's half.
+            let connector = etl_connectors::find(&component_id);
+
+            // A connector's own rules, the ones that span properties. Here, so
+            // `validate` and the canvas refuse what the run would have refused.
+            if let Some(connector) = &connector {
+                connector.check(&properties).map_err(|error| match error {
+                    etl_plugin_sdk::ConnectorError::Property { property, reason } => {
+                        EngineError::InvalidProperty {
+                            id: node.id.clone(),
+                            property,
+                            reason,
+                        }
+                    }
+                    other => EngineError::InvalidProperty {
+                        id: node.id.clone(),
+                        property: "properties".to_string(),
+                        reason: other.to_string(),
+                    },
+                })?;
+            }
+
+            let native = connector.map(|connector| NativeStep {
+                direction: match connector {
+                    etl_plugin_sdk::Connector::Source(_) => Direction::Ingest,
+                    etl_plugin_sdk::Connector::Sink(_) => Direction::Egress,
+                },
+                properties: properties.clone(),
+                staging: format!("{NATIVE_DIR}/{}.jsonl", node.id),
+            });
+
             let sql = (component.build)(&builders::Lowering {
                 node_id: &node.id,
                 component_id: &component_id,
@@ -1001,6 +1086,7 @@ fn build_stages(
                 alias: node.data.alias.as_deref(),
                 materialize,
                 spill_path: spill_path.as_deref(),
+                staging: native.as_ref().map(|step| step.staging.as_str()),
                 incremental: incremental
                     .as_ref()
                     .map(|state| builders::IncrementalFilter {
@@ -1030,12 +1116,15 @@ fn build_stages(
                 StageKind::Source | StageKind::Sink => {
                     let read = |key: &str| properties.get(key).and_then(JsonValue::as_str);
 
-                    read("path").map(str::to_string).or_else(|| {
-                        read("table").map(|table| match read("schema") {
-                            Some(schema) => format!("{schema}.{table}"),
-                            None => table.to_string(),
+                    read("path")
+                        .map(str::to_string)
+                        .or_else(|| read("url").map(url_for_lineage))
+                        .or_else(|| {
+                            read("table").map(|table| match read("schema") {
+                                Some(schema) => format!("{schema}.{table}"),
+                                None => table.to_string(),
+                            })
                         })
-                    })
                 }
                 _ => None,
             };
@@ -1083,6 +1172,7 @@ fn build_stages(
                 spill_path,
                 incremental,
                 external,
+                native,
             })
         })
         .collect()

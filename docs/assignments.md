@@ -4,8 +4,8 @@ Hands-on exercises drawn from what each phase built. Each one has a goal, a hint
 check the answer. Mark one done by changing `[ ]` to `[x]` and adding the date.
 
 Phases 0–9 were back-filled on 2026-09-23. **Every exercise below runs with the prebuilt
-`target\debug\etl.exe`** unless it is marked 🦀, which means it needs the Rust toolchain. That
-toolchain is not installed on this machine yet.
+`target\debug\etl.exe`** unless it is marked 🦀, which means it needs the Rust toolchain
+(installed on this machine on 2026-09-23, with the MSVC Build Tools it links with).
 
 Work from the repo root. Copy a sample before changing it, so the committed ones stay intact:
 
@@ -62,7 +62,8 @@ Copy-Item samples\pipelines\orders_enriched.json samples\out\scratch\
   *Do:* add `xf.head` — the first *n* rows, like `xf.limit` but with a different name and a
   default `n` of 10.
   *Check:* `cargo test --workspace` fails in exactly one place (the registry inventory) until
-  you update it, then passes. `etl components` lists 55, and the desktop palette shows it
+  you update it, then passes. `etl components` lists one more than before (59, with the 58 there
+  are after Phase 10b), and the desktop palette shows it
   **with no frontend change**.
 
 ## Phase 5 — Parameters, contexts, secrets
@@ -145,3 +146,106 @@ Copy-Item samples\pipelines\orders_enriched.json samples\out\scratch\
   `frontend`), write down pass or fail. For any failure, find the first error line with
   `gh run view <id> --log-failed`. Before fixing anything, predict which local check *should*
   have caught it, and why it did not.
+
+## Phase 10a — Native components
+
+- [ ] **A18. Watch the bridge.**
+  *Goal:* see the staging file that sits between a connector and DuckDB.
+  *Do:* `etl plan samples\pipelines\orders_xml.json`, then run it. While the plan is in front
+  of you, find the path the XML source's view reads from.
+  *Check:* the view reads `.etl/tmp/native/read_orders.jsonl`, and after the run that
+  directory is empty. Explain why the file is gone, and why it is named after the node id and
+  not after the pipeline.
+
+- [ ] **A19. Break the XML on purpose.**
+  *Do:* copy `samples/data/orders.xml` to `samples/out/scratch/`, point a copy of the pipeline
+  at it, and make three separate changes: nest a `<city>` inside `<customer_id>`; give one
+  order two `<status>` elements; put the word `loose` directly inside an `<order>`.
+  *Check:* each run fails naming the element and a byte position. Say for each one why
+  refusing is better than guessing, and what a user should do instead.
+
+- [ ] **A20. Types in and out.**
+  *Do:* remove the `columns` block from a copy of `orders_xml.json`, and change the sink to a
+  Parquet file. Then `DESCRIBE` the Parquet file with DuckDB.
+  *Hint:* `.\tools\duckdb\duckdb.exe -c "DESCRIBE SELECT * FROM 'samples/out/x.parquet'"`.
+  *Check:* `order_ts` is a `TIMESTAMP` and `amount` is text. Explain why the two differ, and
+  why the committed sample declares `columns` anyway.
+
+- [ ] **A21. Nothing half-delivered.**
+  *Do:* add a second branch to a copy of `orders_xml.json` that fails (an `xf.filter` on a
+  column that does not exist), put `"policy": {"continueOnFailure": true}` on it, and run.
+  *Check:* the run ends failed (exit 3), `orders_2026.xml` is not written, and the report says
+  `nothing delivered, because the run failed`. Which settled decision and which older rule does
+  this match?
+
+- [ ] **A22. 🦀 Write a connector.**
+  *Goal:* follow the native section of [adding_a_component.md](adding_a_component.md).
+  *Do:* add `src.file.lines`: one record per line of a text file, with a single column `line`,
+  and optionally `skip_blank`.
+  *Check:* the engine needs no edit beyond the inventory test; `etl components` lists 59; a
+  pipeline reading this very file into CSV runs; and you have written its delivery semantics in
+  [connectors.md](connectors.md).
+
+## Phase 10b — REST
+
+- [ ] **A23. Read the retry rules off the wire.**
+  *Goal:* see which failures are retried, and how the wait grows.
+  *Do:* run `cargo test -p etl-connectors rest:: -- --nocapture` and read
+  `a_5xx_is_retried_with_backoff`, `a_4xx_other_than_429_is_not_retried_and_says_why` and
+  `a_retry_after_too_long_to_honour_is_an_error_not_a_hang`.
+  *Check:* explain, in one sentence each, why a 503 is retried, why a 401 is not, and why a
+  `Retry-After: 86400` is an error rather than a wait.
+
+- [ ] **A24. A real API, read-only.**
+  *Do:* copy `samples/pipelines/rest_orders.json` to `samples/out/scratch/`, and change the
+  source to read `https://api.github.com/repos/duckdb/duckdb/releases` with
+  `"query": {"per_page": "5"}`, no auth, `records` empty, `pagination` = `link`,
+  `"max_pages": 2`, and `columns` of `tag_name` and `published_at`. Replace the filter and the
+  REST sink with one `snk.file.csv`.
+  *Check:* the run fails with `reached max_pages (2)`. Explain why that is the behaviour you
+  want, then set `max_pages` so it succeeds and count the releases.
+
+- [ ] **A25. Where the credential goes, and where it does not.**
+  *Do:* `etl secret set api_token --stdin`, then run `etl plan` and `etl lineage` on your copy
+  from A24 after adding `"auth": "bearer", "token": "${SECRET:api_token}"`.
+  *Check:* the token appears in neither output. Put `?api_key=x` on the end of the URL and run
+  `etl lineage` again. Explain why the query string is dropped there.
+
+- [ ] **A26. At-least-once, in your own words.**
+  *Do:* read *Delivery semantics* for `snk.saas.rest` in [connectors.md](connectors.md).
+  *Check:* describe a failure where a batch arrives twice, and one where a row is never sent.
+  For each, say what the report tells you and what you would do next.
+
+- [ ] **A27. 🦀 A sixth pagination style.**
+  *Do:* add `pagination = "token_header"`: the next page's token arrives in a response header
+  named by `token_header` and is sent back in a query parameter.
+  *Hint:* `Reply` would need the header; `Pagination::advance` decides what comes next.
+  *Check:* a fixture test for it, `check` refusing it without `token_header`, and
+  [connectors.md](connectors.md)'s table updated.
+
+## Phase 10c — Verification against real systems
+
+- [ ] **A28. Start the servers, run the suite.**
+  *Do:* start Docker, run `./scripts/test-services.ps1`, set the three variables it prints,
+  then `cargo test -p etl-duckdb-engine --test verified -- --nocapture`.
+  *Check:* 9 pass and nothing says `skipping`. Run it again without the variables and
+  explain why it still says 9 passed.
+
+- [ ] **A29. Read an Iceberg table as it was.**
+  *Do:* write a pipeline reading
+  `crates/duckdb-engine/tests/fixtures/lake/orders_iceberg` with `allow_moved_paths` and
+  `version` set to the `00001-…` metadata file's name (without `.metadata.json`), into CSV.
+  *Check:* 7 rows. Set `version` to the `00002-…` file and get 12. Then point `path` at the
+  metadata file itself and read the refusal. Why is that combination refused?
+
+- [ ] **A30. Two S3 accounts.**
+  *Do:* with the servers up, write a pipeline with two `src.cloud.s3` nodes on two different
+  buckets and `etl plan` it.
+  *Check:* two `CREATE OR REPLACE SECRET` statements, each `SCOPE`d to its own bucket. Explain
+  what would go wrong if two nodes gave different credentials for the *same* bucket.
+
+- [ ] **A31. The MySQL bug, by hand.**
+  *Do:* in DuckDB, `ATTACH` the test MySQL, make a view over a table, and `SELECT count(*)`
+  from the view. Then `SET mysql_aggregate_pushdown_enabled=false` and try again.
+  *Check:* the first fails with an internal error and the second answers. Explain what the
+  setting trades away.

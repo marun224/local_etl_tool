@@ -95,7 +95,7 @@ pub fn registry() -> &'static Registry {
 
 /// Every component, paired with the function that lowers it.
 fn all_components() -> Vec<(ComponentSpec, BuildFn)> {
-    vec![
+    let lowered_by_duckdb: Vec<(ComponentSpec, BuildFn)> = vec![
         // -- Sources ------------------------------------------------------
         (
             ComponentSpec::new("src.file.csv", "CSV file")
@@ -222,15 +222,20 @@ fn all_components() -> Vec<(ComponentSpec, BuildFn)> {
                 .description("Read a file from S3 or another S3-compatible store.")
                 .icon("cloud-download")
                 .requires_extension("httpfs")
-                .properties(vec![
-                    PropertySpec::path("path")
-                        .required()
-                        .help("An s3:// URI. Globs are allowed."),
-                    cloud_format(),
-                    PropertySpec::boolean("header")
-                        .default(JsonValue::Bool(true))
-                        .help("For CSV: treat the first row as column names."),
-                ]),
+                .properties(
+                    vec![
+                        PropertySpec::path("path")
+                            .required()
+                            .help("An s3:// URI. Globs are allowed."),
+                        cloud_format(),
+                        PropertySpec::boolean("header")
+                            .default(JsonValue::Bool(true))
+                            .help("For CSV: treat the first row as column names."),
+                    ]
+                    .into_iter()
+                    .chain(s3_access())
+                    .collect(),
+                ),
             builders::source_s3,
         ),
         (
@@ -260,14 +265,19 @@ fn all_components() -> Vec<(ComponentSpec, BuildFn)> {
                 // the late failure this mechanism exists to prevent.
                 .requires_extension("httpfs")
                 .properties(vec![
-                    PropertySpec::path("path")
-                        .required()
-                        .help("The table's metadata location."),
+                    PropertySpec::path("path").required().help(
+                        "The table's root directory, or one of its .metadata.json files. A \
+                         root directory needs version set, unless it has a version-hint.text.",
+                    ),
+                    PropertySpec::text("version").help(
+                        "Which metadata version to read: its file name without \
+                         .metadata.json. Also reads an earlier snapshot.",
+                    ),
                     PropertySpec::boolean("allow_moved_paths")
                         .default(JsonValue::Bool(false))
                         .help(
-                            "Resolve data files relative to the table, for a table that \
-                               has been copied elsewhere.",
+                            "For a table copied or moved from where it was written. Needs path \
+                             to be the table's root directory, and version.",
                         ),
                 ]),
             builders::source_iceberg,
@@ -574,19 +584,24 @@ fn all_components() -> Vec<(ComponentSpec, BuildFn)> {
                 .description("Write a file to S3 or another S3-compatible store.")
                 .icon("cloud-upload")
                 .requires_extension("httpfs")
-                .properties(vec![
-                    PropertySpec::path("path").required().help("An s3:// URI."),
-                    cloud_format(),
-                    PropertySpec::boolean("header")
-                        .default(JsonValue::Bool(true))
-                        .help("For CSV: write column names as the first row."),
-                    PropertySpec::enumerated(
-                        "compression",
-                        &["zstd", "snappy", "gzip", "brotli", "lz4", "uncompressed"],
-                    )
-                    .default(JsonValue::String("zstd".into()))
-                    .help("For Parquet."),
-                ]),
+                .properties(
+                    vec![
+                        PropertySpec::path("path").required().help("An s3:// URI."),
+                        cloud_format(),
+                        PropertySpec::boolean("header")
+                            .default(JsonValue::Bool(true))
+                            .help("For CSV: write column names as the first row."),
+                        PropertySpec::enumerated(
+                            "compression",
+                            &["zstd", "snappy", "gzip", "brotli", "lz4", "uncompressed"],
+                        )
+                        .default(JsonValue::String("zstd".into()))
+                        .help("For Parquet."),
+                    ]
+                    .into_iter()
+                    .chain(s3_access())
+                    .collect(),
+                ),
             builders::sink_s3,
         ),
         // -- Sinks: databases ----------------------------------------------
@@ -812,7 +827,28 @@ fn all_components() -> Vec<(ComponentSpec, BuildFn)> {
                 ]),
             builders::control_passthrough,
         ),
-    ]
+    ];
+
+    lowered_by_duckdb
+        .into_iter()
+        .chain(native_components())
+        .collect()
+}
+
+/// The components written in Rust, from `etl-connectors`.
+///
+/// Their specs live with their connectors rather than in the table above, and
+/// every one of them lowers the same way for its direction: a view over the file
+/// it staged, or a copy into the file it will deliver. So a connector needs no
+/// line here -- listing it in `etl_connectors::all` is the whole registration.
+fn native_components() -> impl Iterator<Item = (ComponentSpec, BuildFn)> {
+    etl_connectors::all().iter().map(|(_, connector)| {
+        let build: BuildFn = match connector {
+            etl_plugin_sdk::Connector::Source(_) => builders::native_source,
+            etl_plugin_sdk::Connector::Sink(_) => builders::native_sink,
+        };
+        (connector.spec(), build)
+    })
 }
 
 /// The file formats the object-storage components can read and write. Narrower
@@ -821,6 +857,29 @@ fn all_components() -> Vec<(ComponentSpec, BuildFn)> {
 fn cloud_format() -> PropertySpec {
     PropertySpec::enumerated("format", &["parquet", "csv", "json"])
         .default(JsonValue::String("parquet".into()))
+}
+
+/// How an S3 node reaches its bucket, when DuckDB's defaults will not do: a key
+/// pair, a region, or an S3-compatible endpoint such as MinIO. Added in Phase
+/// 10c, because without them `src.cloud.s3` could read public buckets only and
+/// could not be pointed at MinIO at all.
+fn s3_access() -> Vec<PropertySpec> {
+    vec![
+        PropertySpec::text("key_id").help("Access key id. Set it and secret together."),
+        PropertySpec::text("secret")
+            .help("Secret access key. Use ${SECRET:name} rather than the value itself."),
+        PropertySpec::text("session_token").help("For temporary credentials."),
+        PropertySpec::text("region").help("e.g. eu-west-1."),
+        PropertySpec::text("endpoint").help(
+            "For an S3-compatible store, e.g. http://localhost:9000 for MinIO. An http:// or \
+             https:// prefix sets use_ssl.",
+        ),
+        PropertySpec::enumerated("url_style", &["vhost", "path"])
+            .help("MinIO and most S3-compatible stores want path."),
+        PropertySpec::boolean("use_ssl")
+            .default(JsonValue::Bool(true))
+            .help("Only used with endpoint, when it has no http:// or https:// prefix."),
+    ]
 }
 
 /// What every database source is configured with. The three of them differ only
