@@ -377,3 +377,18 @@ Copy-Item samples\pipelines\orders_enriched.json samples\out\scratch\
   `Credentials` for the whole run?
   *Check:* a written answer naming the two requests, their headers, and what a local run
   (no instance) must do quickly rather than wait for a timeout.
+
+## Phase 10i — the Kinesis sink
+
+- [ ] **A49. A half-successful call.**
+  *Do:* read `records_refused_for_throughput_alone_are_sent_again` and change the fixture to
+  refuse the first and last records of the call.
+  *Check:* predict the second call's contents, run it, and explain why a consumer reading
+  the stream could see order 5 before order 1 with the same key.
+
+- [ ] **A50. 🦀 Keeping order through a resend.**
+  *Do:* sketch a `strict_order` option under which a refused record also holds back every
+  later record with the same key until it lands.
+  *Hint:* the records after it in the same call have already landed. What would have to
+  happen before the call, not after it?
+  *Check:* a written answer comparing its cost (calls, throughput) with the default.

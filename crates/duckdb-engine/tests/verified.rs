@@ -1035,6 +1035,33 @@ fn kinesis_call(endpoint: &str, target: &str, body: serde_json::Value) -> serde_
     }
 }
 
+/// Every record a stream holds, from each shard's start.
+fn kinesis_records(endpoint: &str, stream: &str) -> usize {
+    let shards = kinesis_call(
+        endpoint,
+        "ListShards",
+        serde_json::json!({ "StreamName": stream }),
+    );
+    let mut count = 0;
+    for shard in shards["Shards"].as_array().unwrap() {
+        let iterator = kinesis_call(
+            endpoint,
+            "GetShardIterator",
+            serde_json::json!({
+                "StreamName": stream, "ShardId": shard["ShardId"],
+                "ShardIteratorType": "TRIM_HORIZON",
+            }),
+        );
+        let records = kinesis_call(
+            endpoint,
+            "GetRecords",
+            serde_json::json!({ "ShardIterator": iterator["ShardIterator"], "Limit": 10000 }),
+        );
+        count += records["Records"].as_array().unwrap().len();
+    }
+    count
+}
+
 /// A two-shard stream for one test, holding `orders`, deleted when dropped.
 struct KinesisStream {
     endpoint: String,
@@ -1133,7 +1160,8 @@ fn kinesis_orders(
     }
     let resolver = Resolver::new(workspace)
         .bind("kinesis_endpoint", endpoint)
-        .bind("stream", stream);
+        .bind("stream", stream)
+        .bind("large_stream", &format!("{stream}-large"));
     let resolved = resolve(&document(&json.to_string()), &resolver).expect("resolves");
     compile_with(
         &resolved.document,
@@ -1154,6 +1182,27 @@ fn the_kinesis_sample_carries_on(name: &str, policy: Option<serde_json::Value>) 
     };
     let orders = sample_orders();
     let stream = kinesis_stream(&endpoint, name, &orders[..10]);
+    // Where the sample puts the large orders: the name kinesis_orders binds.
+    let large = KinesisStream {
+        endpoint: endpoint.clone(),
+        name: format!("{}-large", stream.name),
+    };
+    kinesis_call(
+        &endpoint,
+        "CreateStream",
+        serde_json::json!({ "StreamName": large.name, "ShardCount": 2 }),
+    );
+    for _ in 0..100 {
+        let summary = kinesis_call(
+            &endpoint,
+            "DescribeStreamSummary",
+            serde_json::json!({ "StreamName": large.name }),
+        );
+        if summary["StreamDescriptionSummary"]["StreamStatus"] == "ACTIVE" {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
 
     let first = run(
         &kinesis_orders(
@@ -1166,7 +1215,8 @@ fn the_kinesis_sample_carries_on(name: &str, policy: Option<serde_json::Value>) 
         &options(&workspace),
     )
     .expect("runs");
-    assert_eq!(rows(&first), [Some(10), Some(5), Some(5)]);
+    assert_eq!(rows(&first), [Some(10), Some(5), Some(5), Some(5)]);
+    assert_eq!(kinesis_records(&endpoint, &large.name), 5);
     assert_eq!(
         query(
             &binary,
@@ -1188,7 +1238,8 @@ fn the_kinesis_sample_carries_on(name: &str, policy: Option<serde_json::Value>) 
         &options(&workspace),
     )
     .expect("runs");
-    assert_eq!(rows(&second), [Some(0), Some(0), Some(0)]);
+    assert_eq!(rows(&second), [Some(0), Some(0), Some(0), Some(0)]);
+    assert_eq!(kinesis_records(&endpoint, &large.name), 5, "nothing new");
 
     kinesis_put(&endpoint, &stream.name, &orders[10..]);
     let third = run(
@@ -1203,6 +1254,8 @@ fn the_kinesis_sample_carries_on(name: &str, policy: Option<serde_json::Value>) 
     )
     .expect("runs");
     assert_eq!(rows(&third)[0], Some(2));
+    let put = rows(&third)[3].unwrap() as usize;
+    assert_eq!(kinesis_records(&endpoint, &large.name), 5 + put);
 }
 
 #[test]

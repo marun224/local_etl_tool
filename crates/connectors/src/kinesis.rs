@@ -1,4 +1,5 @@
-//! Amazon Kinesis Data Streams, read in **bounded micro-batches**.
+//! Amazon Kinesis Data Streams, read in **bounded micro-batches**, and written
+//! with `PutRecords` (see *The sink*).
 //!
 //! Kinesis is a JSON-over-HTTPS API, so this goes through the same blocking
 //! `ureq` layer as REST and GraphQL: no `tokio`. Every request is signed with
@@ -26,11 +27,12 @@
 //! position lives in this project's state file, as for Kafka and NATS.
 
 use crate::aws::{self, Credentials, Sources};
-use crate::http::{base64_decode, positive, text, Client, Extra, Judged, Settings};
+use crate::http::{base64_bytes, base64_decode, positive, text, Client, Extra, Judged, Settings};
 use crate::kafka::{key_text, timestamp_text, value_columns, Format, Start};
 use etl_metadata::{ComponentSpec, PropertySpec};
 use etl_plugin_sdk::{
-    columns_property, ConnectorError, Context, Record, RecordWriter, Source, Summary,
+    columns_property, ConnectorError, Context, Record, RecordReader, RecordWriter, Sink, Source,
+    Summary,
 };
 use serde_json::{json, Map, Value as JsonValue};
 use std::collections::{BTreeMap, BTreeSet};
@@ -95,6 +97,28 @@ pub(crate) fn with_connection(own: Vec<PropertySpec>) -> Vec<PropertySpec> {
     ];
     properties.extend(own);
     properties
+}
+
+/// What can be refused before any request: keys given by halves, an endpoint
+/// that is not one. Credentials themselves are looked for when the run starts.
+fn check_connection(properties: &JsonValue) -> Result<(), ConnectorError> {
+    let partial_keys = text(properties, "access_key_id").is_some()
+        != text(properties, "secret_access_key").is_some();
+    if partial_keys {
+        return Err(ConnectorError::property(
+            "access_key_id",
+            "and secret_access_key are set together or not at all",
+        ));
+    }
+    if let Some(endpoint) = text(properties, "endpoint") {
+        if host_of(endpoint.trim_end_matches('/')).is_none() {
+            return Err(ConnectorError::property(
+                "endpoint",
+                format!("'{endpoint}' is not http://host[:port] or https://host[:port]"),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// A signed Kinesis API client.
@@ -466,22 +490,7 @@ impl SourceSettings {
                 ))
             }
         };
-        let partial_keys = text(properties, "access_key_id").is_some()
-            != text(properties, "secret_access_key").is_some();
-        if partial_keys {
-            return Err(ConnectorError::property(
-                "access_key_id",
-                "and secret_access_key are set together or not at all",
-            ));
-        }
-        if let Some(endpoint) = text(properties, "endpoint") {
-            if host_of(endpoint.trim_end_matches('/')).is_none() {
-                return Err(ConnectorError::property(
-                    "endpoint",
-                    format!("'{endpoint}' is not http://host[:port] or https://host[:port]"),
-                ));
-            }
-        }
+        check_connection(properties)?;
         Ok(SourceSettings {
             stream,
             start,
@@ -873,4 +882,333 @@ pub(crate) fn row(
         key_text(record["PartitionKey"].as_str().map(str::as_bytes)),
     );
     Ok(row)
+}
+
+// ---------------------------------------------------------------------------
+// The sink
+// ---------------------------------------------------------------------------
+
+/// `snk.stream.kinesis`.
+pub struct KinesisSink;
+
+/// The most one `PutRecords` takes: 500 records, 5 MiB with their keys.
+const PUT_RECORDS_LIMIT: u64 = 500;
+const PUT_RECORDS_BYTES: usize = 5 * 1024 * 1024;
+
+/// The most one record may be: 1 MiB of data and key together.
+const RECORD_BYTES: usize = 1024 * 1024;
+
+/// A partition key is 1 to 256 characters.
+const KEY_CHARACTERS: usize = 256;
+
+/// The first wait before sending refused records again, doubling each time.
+const RESEND_BACKOFF: Duration = Duration::from_millis(200);
+
+impl Sink for KinesisSink {
+    fn spec(&self) -> ComponentSpec {
+        ComponentSpec::new("snk.stream.kinesis", "Kinesis stream")
+            .description(
+                "Put rows into an Amazon Kinesis data stream, one JSON record each, up to 500 \
+                 to a PutRecords call. Records Kinesis refuses for throughput are sent again.",
+            )
+            .icon("radio")
+            .properties(with_connection(vec![
+                PropertySpec::text("partition_key_column").help(
+                    "The column whose value is each record's partition key. Records with the \
+                     same key go to the same shard, in order. Unset, rows are spread across \
+                     shards by their row number.",
+                ),
+                PropertySpec::integer("batch_size")
+                    .default(JsonValue::from(PUT_RECORDS_LIMIT))
+                    .help(
+                        "Records per PutRecords call, at most 500. A call is also kept under \
+                         Kinesis's 5 MiB.",
+                    ),
+            ]))
+    }
+
+    fn check(&self, properties: &JsonValue) -> Result<(), ConnectorError> {
+        SinkSettings::from(properties).map(|_| ())
+    }
+
+    fn write(
+        &self,
+        properties: &JsonValue,
+        input: &mut dyn RecordReader,
+        _context: &Context,
+    ) -> Result<Summary, ConnectorError> {
+        let settings = SinkSettings::from(properties)?;
+        let mut api = Api::connect(properties, &Sources::process())?;
+        write_records(&mut api, &settings, input, RESEND_BACKOFF)
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct SinkSettings {
+    pub(crate) stream: String,
+    pub(crate) key_column: Option<String>,
+    pub(crate) batch_size: u64,
+    pub(crate) retries: u32,
+}
+
+impl SinkSettings {
+    pub(crate) fn from(properties: &JsonValue) -> Result<Self, ConnectorError> {
+        let stream = text(properties, "stream")
+            .ok_or_else(|| ConnectorError::property("stream", "is required"))?
+            .trim()
+            .to_string();
+        check_connection(properties)?;
+        let batch_size = positive(properties, "batch_size", PUT_RECORDS_LIMIT)?;
+        if batch_size > PUT_RECORDS_LIMIT {
+            return Err(ConnectorError::property(
+                "batch_size",
+                format!("{batch_size} is more than 500, the most one PutRecords call takes"),
+            ));
+        }
+        Ok(SinkSettings {
+            stream,
+            key_column: text(properties, "partition_key_column").map(str::to_string),
+            batch_size,
+            retries: properties
+                .get("retries")
+                .and_then(JsonValue::as_u64)
+                .unwrap_or(5) as u32,
+        })
+    }
+}
+
+/// One row, ready to put.
+#[derive(Debug)]
+pub(crate) struct Entry {
+    /// Counted from 1, for messages.
+    pub(crate) row: u64,
+    /// Base64, as `PutRecords` takes it.
+    pub(crate) data: String,
+    pub(crate) key: String,
+    /// Data and key, before base64: what Kinesis's limits count.
+    pub(crate) size: usize,
+}
+
+/// Row `row` (counted from 1) as a record: the row as JSON, and its key.
+pub(crate) fn entry(
+    row: u64,
+    record: &Record,
+    key_column: Option<&str>,
+) -> Result<Entry, ConnectorError> {
+    let key = match key_column {
+        None => row.to_string(),
+        Some(column) => match record.get(column) {
+            None => {
+                return Err(ConnectorError::property(
+                    "partition_key_column",
+                    format!("'{column}' is not a column of the rows"),
+                ))
+            }
+            Some(JsonValue::Null) => {
+                return Err(ConnectorError::Data(format!(
+                    "row {row}: '{column}' is null, and Kinesis needs a partition key for every \
+                     record"
+                )))
+            }
+            Some(JsonValue::String(text)) => text.clone(),
+            Some(other) => other.to_string(),
+        },
+    };
+    let characters = key.chars().count();
+    if characters == 0 || characters > KEY_CHARACTERS {
+        return Err(ConnectorError::Data(format!(
+            "row {row}: a partition key must be 1 to 256 characters, and this one is {characters}"
+        )));
+    }
+
+    let data =
+        serde_json::to_vec(record).map_err(|error| ConnectorError::Data(error.to_string()))?;
+    let size = data.len() + key.len();
+    if size > RECORD_BYTES {
+        return Err(ConnectorError::Data(format!(
+            "row {row} is {size} bytes with its partition key, and Kinesis takes at most \
+             {RECORD_BYTES} (1 MiB) in one record"
+        )));
+    }
+    Ok(Entry {
+        row,
+        data: base64_bytes(&data),
+        key,
+        size,
+    })
+}
+
+/// What has been put so far, for the summary and for a failure's message.
+#[derive(Default)]
+struct Delivered {
+    records: u64,
+    calls: u64,
+    resent: u64,
+    shards: BTreeSet<String>,
+}
+
+impl Delivered {
+    fn failed(&self, stream: &str, error: impl std::fmt::Display) -> ConnectorError {
+        ConnectorError::Data(format!(
+            "{error}. {} record(s) had been put into '{stream}' before this, and stay there",
+            self.records
+        ))
+    }
+}
+
+/// Every row of `input` into the stream, a `PutRecords` call at a time.
+pub(crate) fn write_records(
+    api: &mut Api,
+    settings: &SinkSettings,
+    input: &mut dyn RecordReader,
+    backoff: Duration,
+) -> Result<Summary, ConnectorError> {
+    let stream = settings.stream.as_str();
+    let mut delivered = Delivered::default();
+    let mut batch: Vec<Entry> = Vec::new();
+    let mut batch_bytes = 0usize;
+    let mut row = 0u64;
+
+    while let Some(record) = input.read()? {
+        row += 1;
+        let entry = entry(row, &record, settings.key_column.as_deref()).map_err(|error| {
+            match error {
+                // A setting that cannot work says so plainly, before anything is put.
+                ConnectorError::Property { .. } if delivered.records == 0 => error,
+                other => delivered.failed(stream, other),
+            }
+        })?;
+        let full = batch.len() as u64 == settings.batch_size
+            || batch_bytes + entry.size > PUT_RECORDS_BYTES;
+        if full {
+            put(
+                api,
+                settings,
+                std::mem::take(&mut batch),
+                backoff,
+                &mut delivered,
+            )?;
+            batch_bytes = 0;
+        }
+        batch_bytes += entry.size;
+        batch.push(entry);
+    }
+    if !batch.is_empty() {
+        put(api, settings, batch, backoff, &mut delivered)?;
+    }
+
+    let detail = if delivered.records == 0 {
+        format!("0 records; nothing put into '{stream}'")
+    } else {
+        let mut detail = format!(
+            "{} record(s) in {} call(s) into '{stream}', landing on {} shard(s) (credentials \
+             from {})",
+            delivered.records,
+            delivered.calls,
+            delivered.shards.len(),
+            api.credentials_source()
+        );
+        if delivered.resent > 0 {
+            detail.push_str(&format!(
+                "; {} sent again after Kinesis refused them for throughput",
+                delivered.resent
+            ));
+        }
+        detail
+    };
+    Ok(Summary::new(delivered.records, detail))
+}
+
+/// What a refused record's `ErrorCode` means: worth sending again, or not.
+pub(crate) fn resendable(code: &str) -> bool {
+    matches!(
+        code,
+        "ProvisionedThroughputExceededException" | "InternalFailure" | "KMSThrottlingException"
+    )
+}
+
+/// One `PutRecords`, and again for the records it refused, up to `retries`
+/// more times. A call can put some of its records and refuse others; only the
+/// refused ones are sent again, so they land after the call's others.
+fn put(
+    api: &mut Api,
+    settings: &SinkSettings,
+    entries: Vec<Entry>,
+    backoff: Duration,
+    delivered: &mut Delivered,
+) -> Result<(), ConnectorError> {
+    let stream = settings.stream.as_str();
+    let mut pending = entries;
+    let mut attempt = 0u32;
+
+    loop {
+        let body = json!({
+            "StreamName": stream,
+            "Records": pending
+                .iter()
+                .map(|entry| json!({ "Data": entry.data, "PartitionKey": entry.key }))
+                .collect::<Vec<_>>(),
+        });
+        let answer = api
+            .call("PutRecords", &body)
+            .map_err(|error| delivered.failed(stream, error))?;
+        delivered.calls += 1;
+
+        let results = answer["Records"].as_array().cloned().unwrap_or_default();
+        if results.len() != pending.len() {
+            return Err(delivered.failed(
+                stream,
+                format!(
+                    "Kinesis PutRecords answered for {} record(s) of {} sent, so which landed \
+                     is unknown",
+                    results.len(),
+                    pending.len()
+                ),
+            ));
+        }
+
+        let mut refused = Vec::new();
+        let mut last_refusal = String::new();
+        for (entry, result) in pending.into_iter().zip(&results) {
+            match result["ErrorCode"].as_str() {
+                None => {
+                    delivered.records += 1;
+                    if let Some(shard) = result["ShardId"].as_str() {
+                        delivered.shards.insert(shard.to_string());
+                    }
+                }
+                Some(code) => {
+                    let message = result["ErrorMessage"].as_str().unwrap_or_default();
+                    if !resendable(code) {
+                        return Err(delivered.failed(
+                            stream,
+                            format!("Kinesis refused row {}: {code}: {message}", entry.row),
+                        ));
+                    }
+                    last_refusal = format!("{code}: {message}");
+                    refused.push(entry);
+                }
+            }
+        }
+
+        if refused.is_empty() {
+            return Ok(());
+        }
+        if attempt == settings.retries {
+            return Err(delivered.failed(
+                stream,
+                format!(
+                    "Kinesis still refused {} record(s), the first row {}, after {} resend(s); \
+                     the last refusal said {last_refusal}",
+                    refused.len(),
+                    refused[0].row,
+                    settings.retries
+                ),
+            ));
+        }
+        std::thread::sleep(backoff.saturating_mul(1 << attempt.min(6)));
+        attempt += 1;
+        delivered.resent += refused.len() as u64;
+        pending = refused;
+    }
 }

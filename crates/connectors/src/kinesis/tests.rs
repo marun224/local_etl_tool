@@ -621,3 +621,396 @@ fn a_shard_max_records_never_reached_is_read_from_its_start_next_time() {
     second.sort_unstable();
     assert_eq!(second, [10, 11, 100, 101, 102], "nothing skipped");
 }
+
+// ---------------------------------------------------------------------------
+// The sink, first against a local fixture that answers PutRecords as told
+// ---------------------------------------------------------------------------
+
+fn sink_settings(properties: JsonValue) -> SinkSettings {
+    SinkSettings::from(&properties).unwrap()
+}
+
+/// The records a `PutRecords` request carried, decoded: (data, key).
+fn put_records(request: &crate::fixture::Seen) -> Vec<(JsonValue, String)> {
+    let body: JsonValue = serde_json::from_str(&request.body).unwrap();
+    body["Records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|record| {
+            let data = base64_decode(record["Data"].as_str().unwrap()).unwrap();
+            (
+                serde_json::from_slice(&data).unwrap(),
+                record["PartitionKey"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect()
+}
+
+/// A `PutRecords` answer: every record put on shard 0, except those at
+/// `refused` (indexes into the call), refused with `code`.
+fn answer(request: &crate::fixture::Seen, refused: &[usize], code: &str) -> crate::fixture::Answer {
+    let count = put_records(request).len();
+    let records: Vec<JsonValue> = (0..count)
+        .map(|index| {
+            if refused.contains(&index) {
+                json!({ "ErrorCode": code, "ErrorMessage": "Rate exceeded for shard" })
+            } else {
+                json!({ "SequenceNumber": format!("{index}"), "ShardId": "shardId-000000000000" })
+            }
+        })
+        .collect();
+    crate::fixture::ok(json!({ "FailedRecordCount": refused.len(), "Records": records }))
+}
+
+fn orders(count: u64) -> Vec<JsonValue> {
+    (1..=count)
+        .map(|id| json!({ "id": id, "customer": format!("C{}", id % 3) }))
+        .collect()
+}
+
+fn write_to_fixture(
+    fixture: &crate::fixture::Fixture,
+    settings: &SinkSettings,
+    rows: Vec<JsonValue>,
+) -> Result<Summary, ConnectorError> {
+    let mut reader = crate::fixture::records(rows);
+    write_records(
+        &mut fixture_api(fixture),
+        settings,
+        &mut reader,
+        Duration::from_millis(1),
+    )
+}
+
+#[test]
+fn a_sink_setting_that_cannot_work_is_refused_by_property() {
+    let refused = |properties: JsonValue| KinesisSink.check(&properties).unwrap_err().to_string();
+    assert!(refused(json!({})).starts_with("property 'stream'"));
+    assert!(
+        refused(json!({ "stream": "s", "batch_size": 501 })).starts_with("property 'batch_size'")
+    );
+    assert!(refused(json!({ "stream": "s", "batch_size": 0 })).starts_with("property 'batch_size'"));
+    assert!(refused(json!({ "stream": "s", "secret_access_key": "x" }))
+        .starts_with("property 'access_key_id'"));
+    KinesisSink
+        .check(&json!({ "stream": "s", "batch_size": 500, "partition_key_column": "id" }))
+        .expect("fine");
+}
+
+#[test]
+fn a_row_becomes_one_record_under_its_key_or_its_row_number() {
+    let row = json!({ "id": 7, "customer": "C1", "note": null });
+    let row = row.as_object().unwrap();
+
+    let keyed = entry(3, row, Some("customer")).unwrap();
+    assert_eq!(keyed.key, "C1");
+    assert_eq!(
+        serde_json::from_slice::<JsonValue>(&base64_decode(&keyed.data).unwrap()).unwrap(),
+        json!({ "id": 7, "customer": "C1", "note": null }),
+        "the whole row, as JSON"
+    );
+    assert_eq!(
+        entry(3, row, Some("id")).unwrap().key,
+        "7",
+        "a number as text"
+    );
+    assert_eq!(
+        entry(3, row, None).unwrap().key,
+        "3",
+        "unset: the row number"
+    );
+
+    let missing = entry(3, row, Some("nope")).unwrap_err().to_string();
+    assert!(
+        missing.starts_with("property 'partition_key_column'"),
+        "{missing}"
+    );
+    let null = entry(3, row, Some("note")).unwrap_err().to_string();
+    assert!(null.starts_with("row 3: 'note' is null"), "{null}");
+
+    let long = json!({ "k": "x".repeat(257) });
+    let error = entry(1, long.as_object().unwrap(), Some("k"))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("1 to 256 characters"), "{error}");
+
+    let big = json!({ "blob": "x".repeat(1024 * 1024) });
+    let error = entry(9, big.as_object().unwrap(), None)
+        .unwrap_err()
+        .to_string();
+    assert!(error.starts_with("row 9 is 104"), "{error}");
+    assert!(error.contains("at most 1048576 (1 MiB)"), "{error}");
+}
+
+#[test]
+fn calls_hold_at_most_batch_size_records_and_5_mib() {
+    let fixture = crate::fixture::serve(|_, request| answer(request, &[], ""));
+    let summary = write_to_fixture(
+        &fixture,
+        &sink_settings(json!({ "stream": "s", "batch_size": 4 })),
+        orders(10),
+    )
+    .unwrap();
+    let sizes: Vec<usize> = fixture
+        .seen()
+        .iter()
+        .map(|r| put_records(r).len())
+        .collect();
+    assert_eq!(sizes, [4, 4, 2]);
+    assert_eq!(summary.records, 10);
+    assert!(
+        summary
+            .detail
+            .starts_with("10 record(s) in 3 call(s) into 's', landing on 1 shard(s)"),
+        "{}",
+        summary.detail
+    );
+    let ids: Vec<u64> = fixture
+        .seen()
+        .iter()
+        .flat_map(put_records)
+        .map(|(data, _)| data["id"].as_u64().unwrap())
+        .collect();
+    assert_eq!(ids, (1..=10).collect::<Vec<_>>(), "in the rows' order");
+
+    // Nine rows of 600 KB: eight fit under 5 MiB, the ninth waits.
+    let fixture = crate::fixture::serve(|_, request| answer(request, &[], ""));
+    let rows = (0..9)
+        .map(|_| json!({ "blob": "x".repeat(600_000) }))
+        .collect();
+    write_to_fixture(&fixture, &sink_settings(json!({ "stream": "s" })), rows).unwrap();
+    let sizes: Vec<usize> = fixture
+        .seen()
+        .iter()
+        .map(|r| put_records(r).len())
+        .collect();
+    assert_eq!(sizes, [8, 1]);
+}
+
+#[test]
+fn nothing_to_write_makes_no_call() {
+    let fixture = crate::fixture::serve(|_, request| answer(request, &[], ""));
+    let summary =
+        write_to_fixture(&fixture, &sink_settings(json!({ "stream": "s" })), vec![]).unwrap();
+    assert!(fixture.seen().is_empty());
+    assert_eq!(summary.detail, "0 records; nothing put into 's'");
+}
+
+#[test]
+fn records_refused_for_throughput_alone_are_sent_again() {
+    // The first call refuses its second and fourth records; the second call
+    // must carry exactly those two, and is answered in full.
+    let fixture = crate::fixture::serve(|index, request| match index {
+        0 => answer(request, &[1, 3], "ProvisionedThroughputExceededException"),
+        _ => answer(request, &[], ""),
+    });
+    let summary = write_to_fixture(
+        &fixture,
+        &sink_settings(json!({ "stream": "s", "partition_key_column": "customer" })),
+        orders(5),
+    )
+    .unwrap();
+
+    let seen = fixture.seen();
+    assert_eq!(seen.len(), 2);
+    let again: Vec<(u64, String)> = put_records(&seen[1])
+        .into_iter()
+        .map(|(data, key)| (data["id"].as_u64().unwrap(), key))
+        .collect();
+    assert_eq!(again, [(2, "C2".to_string()), (4, "C1".to_string())]);
+    assert_eq!(summary.records, 5);
+    assert!(
+        summary
+            .detail
+            .ends_with("; 2 sent again after Kinesis refused them for throughput"),
+        "{}",
+        summary.detail
+    );
+}
+
+#[test]
+fn records_still_refused_after_the_retries_fail_saying_what_landed() {
+    // The first record is refused every time; the other four land at once.
+    let fixture = crate::fixture::serve(|index, request| {
+        answer(
+            request,
+            &[0],
+            if index == 0 {
+                "InternalFailure"
+            } else {
+                "ProvisionedThroughputExceededException"
+            },
+        )
+    });
+    let error = write_to_fixture(
+        &fixture,
+        &sink_settings(json!({ "stream": "s", "retries": 2 })),
+        orders(5),
+    )
+    .unwrap_err()
+    .to_string();
+    assert_eq!(fixture.seen().len(), 3, "the call and 2 resends");
+    assert!(
+        error.starts_with("Kinesis still refused 1 record(s), the first row 1, after 2 resend(s)"),
+        "{error}"
+    );
+    assert!(
+        error.ends_with("4 record(s) had been put into 's' before this, and stay there"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_refusal_that_waiting_will_not_mend_fails_at_once() {
+    let fixture =
+        crate::fixture::serve(|_, request| answer(request, &[2], "KMSAccessDeniedException"));
+    let error = write_to_fixture(
+        &fixture,
+        &sink_settings(json!({ "stream": "s", "batch_size": 3 })),
+        orders(6),
+    )
+    .unwrap_err()
+    .to_string();
+    assert_eq!(
+        fixture.seen().len(),
+        1,
+        "not sent again, and no second batch"
+    );
+    assert!(
+        error.starts_with("Kinesis refused row 3: KMSAccessDeniedException"),
+        "{error}"
+    );
+    assert!(error.contains("2 record(s) had been put"), "{error}");
+}
+
+#[test]
+fn a_bad_row_after_some_were_put_says_how_many() {
+    let fixture = crate::fixture::serve(|_, request| answer(request, &[], ""));
+    let mut rows = orders(3);
+    rows.push(json!({ "id": 4, "customer": null }));
+    let error = write_to_fixture(
+        &fixture,
+        &sink_settings(
+            json!({ "stream": "s", "batch_size": 2, "partition_key_column": "customer" }),
+        ),
+        rows,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.starts_with("row 4: 'customer' is null"), "{error}");
+    assert!(error.contains("2 record(s) had been put"), "{error}");
+}
+
+// ---------------------------------------------------------------------------
+// The sink against kinesis-mock, read back through the source
+// ---------------------------------------------------------------------------
+
+fn read_all(endpoint: &str, stream: &str) -> Vec<Record> {
+    let mut out: Vec<Record> = Vec::new();
+    KinesisSource
+        .read(&properties(endpoint, stream), &mut out, &Context::default())
+        .expect("reads back");
+    out
+}
+
+#[test]
+fn rows_put_are_read_back_each_key_on_one_shard_in_order() {
+    let Some(endpoint) = server() else { return };
+    let stream = create(&endpoint, "sink-keys", 2);
+
+    let rows: Vec<JsonValue> = (1..=30)
+        .map(|id| json!({ "id": id, "customer": format!("C{:02}", id % 7) }))
+        .collect();
+    let mut reader = crate::fixture::records(rows);
+    let mut sink = properties(&endpoint, &stream);
+    sink["partition_key_column"] = json!("customer");
+    sink["batch_size"] = json!(8);
+    let summary = KinesisSink
+        .write(&sink, &mut reader, &Context::default())
+        .expect("writes");
+    assert_eq!(summary.records, 30);
+    assert!(
+        summary.detail.contains("in 4 call(s)"),
+        "{}",
+        summary.detail
+    );
+
+    let back = read_all(&endpoint, &stream);
+    assert_eq!(back.len(), 30);
+    let mut shard_of: BTreeMap<String, String> = BTreeMap::new();
+    let mut ids_of: BTreeMap<String, Vec<u64>> = BTreeMap::new();
+    for row in &back {
+        let key = row["_partition_key"].as_str().unwrap().to_string();
+        assert_eq!(
+            row["customer"],
+            key.as_str(),
+            "the key is the column's value"
+        );
+        let shard = row["_shard"].as_str().unwrap().to_string();
+        assert_eq!(
+            shard_of.entry(key.clone()).or_insert_with(|| shard.clone()),
+            &shard,
+            "one key, one shard"
+        );
+        ids_of
+            .entry(key)
+            .or_default()
+            .push(row["id"].as_u64().unwrap());
+    }
+    for (key, ids) in ids_of {
+        assert!(
+            ids.windows(2).all(|pair| pair[0] < pair[1]),
+            "{key}: {ids:?}"
+        );
+    }
+}
+
+#[test]
+fn rows_without_a_key_column_spread_across_shards() {
+    let Some(endpoint) = server() else { return };
+    let stream = create(&endpoint, "sink-spread", 2);
+
+    let mut reader = crate::fixture::records(orders(40));
+    let summary = KinesisSink
+        .write(
+            &properties(&endpoint, &stream),
+            &mut reader,
+            &Context::default(),
+        )
+        .expect("writes");
+    assert!(
+        summary.detail.contains("landing on 2 shard(s)"),
+        "{}",
+        summary.detail
+    );
+
+    let back = read_all(&endpoint, &stream);
+    let keys: BTreeSet<String> = back
+        .iter()
+        .map(|row| row["_partition_key"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(keys, (1..=40).map(|n| n.to_string()).collect());
+    let shards: BTreeSet<&str> = back
+        .iter()
+        .map(|row| row["_shard"].as_str().unwrap())
+        .collect();
+    assert_eq!(shards.len(), 2, "both shards take rows");
+}
+
+#[test]
+fn putting_into_a_stream_that_does_not_exist_is_named() {
+    let Some(endpoint) = server() else { return };
+    let mut reader = crate::fixture::records(orders(2));
+    let error = KinesisSink
+        .write(
+            &properties(&endpoint, "etl-no-such-stream"),
+            &mut reader,
+            &Context::default(),
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("Kinesis PutRecords"), "{error}");
+    assert!(error.contains("ResourceNotFoundException"), "{error}");
+    assert!(error.contains("0 record(s) had been put"), "{error}");
+}

@@ -1641,6 +1641,19 @@ with what landed; the sample extended to write back to a second stream. **66 com
 
 **Done.** Both Kinesis components, verified against the container, semantics documented.
 
+**As built (2026-09-24).** Done as planned, with these differences:
+
+- **Partial failures are tested against the local fixture server**, which refuses exactly
+  the records a test names, rather than provoked from `kinesis-mock`'s limits. Only
+  `ProvisionedThroughputExceededException`, `InternalFailure` and `KMSThrottlingException`
+  are sent again; any other refusal fails at once.
+- **Size limits are checked before sending** (1 MiB per record with its key, keys of 1 to
+  256 characters), so an oversized row fails naming itself instead of failing its call.
+- **"Keys landing on the shard their hash says"** is checked as each key landing on one
+  shard, with the key exactly the column's value. The hash is Kinesis's work, not the sink's.
+- A resent record lands after later records of its call, so per-key order holds only when
+  nothing is resent. `connectors.md` says so.
+
 **Later families**, planned one at a time when reached: the rest of the streaming brokers,
 then NoSQL, warehouses over their own protocols, vector DBs.
 

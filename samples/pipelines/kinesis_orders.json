@@ -64,6 +64,26 @@
           "mode": "overwrite"
         }
       }
+    },
+    {
+      "id": "put_large",
+      "type": "sink",
+      "position": {
+        "x": 560.0,
+        "y": 160.0
+      },
+      "data": {
+        "label": "Large orders stream",
+        "componentId": "snk.stream.kinesis",
+        "properties": {
+          "stream": "${large_stream}",
+          "region": "${aws_region}",
+          "endpoint": "${kinesis_endpoint}",
+          "access_key_id": "${aws_access_key_id}",
+          "secret_access_key": "${aws_secret_access_key}",
+          "partition_key_column": "customer_id"
+        }
+      }
     }
   ],
   "edges": [
@@ -80,6 +100,13 @@
       "target": "write_large",
       "sourceHandle": "main",
       "targetHandle": "in"
+    },
+    {
+      "id": "e3",
+      "source": "large_only",
+      "target": "put_large",
+      "sourceHandle": "main",
+      "targetHandle": "in"
     }
   ],
   "parameters": {
@@ -88,6 +115,12 @@
       "required": true,
       "default": "etl-sample-orders",
       "description": "The Kinesis data stream to read. Each run reads what arrived since the last successful one."
+    },
+    "large_stream": {
+      "type": "string",
+      "required": true,
+      "default": "etl-sample-large-orders",
+      "description": "Where the large orders are put, keyed by customer_id so one customer's orders stay in order. It must already exist."
     },
     "aws_region": {
       "type": "string",

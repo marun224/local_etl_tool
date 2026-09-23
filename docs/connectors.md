@@ -476,9 +476,9 @@ so a batch costs one round trip's wait, not one per message.
 - **Like every native sink, it publishes only after a run that fully succeeded**, and never in
   `preview`.
 
-## `src.stream.kinesis`
+## `src.stream.kinesis` and `snk.stream.kinesis`
 
-Added in Phase 10h (2026-09-24); the sink is Phase 10i. Kinesis is a JSON-over-HTTPS API, so
+The source was added in Phase 10h, the sink in 10i (both 2026-09-24). Kinesis is a JSON-over-HTTPS API, so
 it goes through the same blocking `ureq` layer as REST and GraphQL: no `tokio`.
 **Verified against `kinesis-mock` 0.4.13, not against real AWS** (Settled decision 56): no AWS
 account has been used. The request signing is this project's own and is proved by AWS's
@@ -541,3 +541,26 @@ pipeline that runs less often than the retention period, on a quiet stream, is t
 
 At-least-once into the pipeline, as for Kafka and NATS: the position is saved only after a
 fully successful run, so a failed run reads the same records again.
+
+### Writing: `snk.stream.kinesis`
+
+Each row is put as **one JSON record**, up to `batch_size` (default and most 500) to a
+`PutRecords` call, and each call is also kept under Kinesis's 5 MiB. The stream must exist.
+
+- **`partition_key_column`** makes each row's key its value in that column (numbers as text),
+  so one key's records go to one shard, in order. A null or missing key fails the run, naming
+  the row: Kinesis needs a key for every record. **Unset, the key is the row number**, which
+  spreads rows across shards.
+- **A record over 1 MiB** (the row as JSON plus its key), or a key outside 1 to 256
+  characters, fails the run before it is sent, naming the row.
+- **A call can put some records and refuse others.** Those refused for throughput
+  (`ProvisionedThroughputExceededException`, `InternalFailure`, `KMSThrottlingException`) are
+  sent again on their own, with backoff, up to `retries` times; the report counts them.
+  Because only they are sent again, **a resent record lands after later records of the same
+  call**, and so may come after a later record with the same key. Any other refusal fails at
+  once.
+- **A failure says how many records were put before it**; they stay in the stream. Delivery
+  is at-least-once, as for the other brokers: a re-run puts everything again, and Kinesis has
+  no duplicate window like NATS's.
+- **Like every native sink, it puts only after a run that fully succeeded**, and never in
+  `preview`.

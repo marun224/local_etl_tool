@@ -48,6 +48,7 @@ fn the_registry_holds_exactly_these_components() {
             "snk.saas.graphql",
             "snk.saas.rest",
             "snk.stream.kafka",
+            "snk.stream.kinesis",
             "snk.stream.nats",
             "src.cloud.http",
             "src.cloud.s3",

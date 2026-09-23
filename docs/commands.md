@@ -2114,3 +2114,42 @@ git add -A     # 10h only: the tree held nothing else
 git -c user.name="Arun M" -c user.email=marun.mahadevu@gmail.com commit -F <message file>   # "[skip ci]"
 git push origin main
 ```
+
+```bash
+# After the push: git warned LF would become CRLF. Reproduced the Windows checkout:
+find crates/connectors/tests/fixtures/sigv4 -name '*.txt' -exec sed -i 's/$/\r/' {} +   # 38 cases differ
+git checkout -- crates/connectors/tests/fixtures/sigv4
+# .gitattributes: crates/connectors/tests/fixtures/sigv4/** -text
+# scratch repo (scratchpad), git -c core.autocrlf=true checkout: 0 files with CR; scratch repo deleted
+rm -rf crates/connectors/tests/fixtures/sigv4 && git checkout -- crates/connectors/tests/fixtures/sigv4
+cargo test -p etl-connectors --lib aws::tests   # 7 passed
+```
+
+## 2026-09-24 — Phase 10i: the Kinesis sink
+
+```powershell
+./scripts/test-services.ps1                                   # all services again
+cargo test -p etl-connectors --lib kinesis::tests             # with ETL_TEST_KINESIS: 26 passed
+# mutations, each reverted (scratchpad script): no 5 MiB split; every code resendable;
+#   resending the whole call; each fails its test
+cargo test -p etl-duckdb-engine --test verified kinesis       # 3 passed
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace                                        # every ETL_TEST_* set, twice: 942 and 942, none skipped
+cargo build -p etl-cli; ./target/debug/etl components | tail -1   # 66 component(s)
+cd frontend; npm test; npm run typecheck; npm run build       # 134 passed
+./scripts/test-services.ps1 -Stop
+# git diff showed all of commands.md changed: two docs held a lone CR byte (a "\r" written
+#   through a shell heredoc), so git took them for binary. Replaced with the two characters
+#   by a scratchpad script (python fix_cr.py); the diffs are the real edits again.
+```
+
+Not committed.
+
+## 2026-09-24 — Phase 10i committed and pushed, at the user's request, without CI
+
+```powershell
+git add -A     # 10i and .gitattributes: the tree held nothing else
+git -c user.name="Arun M" -c user.email=marun.mahadevu@gmail.com commit -F <message file>   # "[skip ci]"
+git push origin main
+```

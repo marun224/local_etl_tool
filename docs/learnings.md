@@ -554,3 +554,24 @@ the fuller record. From Phase 10 on, a section is added at the end of each phase
   50 shards. *Delete what a test creates, in a guard that runs on failure too.*
 - **Seconds are too coarse for "from now".** *Keep time to the unit the server keeps it in.*
 - **One exception name, two meanings.** *Read the message before retrying.*
+
+## Phase 10i — the Kinesis sink (2026-09-24)
+
+**Concepts**
+- **A batch call can half-succeed.** `PutRecords` answers 200 with some records refused;
+  success is per record, and the answer's order matches the request's.
+- **Resending changes order.** Sending again only the refused records is cheaper and avoids
+  duplicates of the ones that landed, at the price of those records landing later.
+- **A partition key is hashed by the service.** The producer chooses the key, not the shard.
+
+**Decisions and why**
+- **Refuse before sending what the service would refuse**: one row's size should not fail
+  499 others' call, and the message can name the row.
+- **A fixture for failure modes, the container for the happy path.** A mock's limits are
+  neither the real service's nor deterministic; a fixture's answers are both known.
+
+**Mistakes worth not repeating**
+- **Git's line-ending warnings are worth reading.** `LF will be replaced by CRLF` on a
+  byte-exact fixture meant the Windows gate would fail. *Mark such fixtures `-text`.*
+- **A text anchor for an edit script must be unique in the file**, and three samples share
+  one test shape. *Anchor on the function that follows, or check the count first.*

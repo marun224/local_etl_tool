@@ -144,7 +144,7 @@ jobs:
         run: |
           count=$(${{ matrix.etl }} components | tail -1 | grep -oE '^[0-9]+')
           echo "components: $count"
-          test "$count" = "65"
+          test "$count" = "66"
 
       - name: The samples still print what they printed
         shell: bash

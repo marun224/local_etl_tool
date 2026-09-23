@@ -45,6 +45,7 @@ pub fn all() -> &'static [(String, Connector)] {
             Connector::Source(&nats::NatsSource),
             Connector::Sink(&nats::NatsSink),
             Connector::Source(&kinesis::KinesisSource),
+            Connector::Sink(&kinesis::KinesisSink),
         ]
         .into_iter()
         .map(|connector| (connector.spec().id, connector))

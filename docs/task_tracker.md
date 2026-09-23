@@ -3,14 +3,24 @@
 **State only.** Design lives in [PLAN_duckle_parity.md](PLAN_duckle_parity.md). Read this file
 first when picking the project back up.
 
-> ## ✅ Phase 10h (Kinesis: signing, credentials, the source) — built 2026-09-24, green locally, **pushed with `[skip ci]`**
+> ## ✅ Phase 10i (the Kinesis sink) — built 2026-09-24, green locally, **pushed with `[skip ci]`**
+>
+> **What 10i built:** `snk.stream.kinesis`: each row one JSON record, up to 500 to a
+> `PutRecords` call and under 5 MiB; `partition_key_column` (unset, the row number spreads
+> rows across shards); records Kinesis refuses for throughput sent again on their own, with
+> backoff, and any other refusal failing at once, saying how many records were put before
+> it. The sample now also puts its large orders into a second stream. **66 components, 942
+> Rust tests** (932 on Linux) with every server up, twice, **134 frontend**. Not checked
+> against real AWS, like the source.
+>
+> ## ✅ Phase 10h (Kinesis: signing, credentials, the source) — `ce2db9c`, pushed with `[skip ci]`
 >
 > **What 10h built:** `src.stream.kinesis`, through the `ureq` layer (no `tokio`): SigV4
 > signing of our own (`aws.rs`), **proved by all 38 cases of AWS's published SigV4 suite**,
 > vendored with its licence; credentials from properties, `AWS_*` variables or named
 > profiles; shard lineage followed across splits and merges; expiry refused by default with
-> `on_expired: continue`; a `kinesis-mock` container in the test services. **65 components,
-> 931 Rust tests** (921 on Linux) with every server up, twice, **134 frontend**. **Not checked
+> `on_expired: continue`; a `kinesis-mock` container in the test services. 65 components,
+> 931 Rust tests with every server up. **Not checked
 > against real AWS** (Settled decision 56). What it found, including a data-loss bug caught by
 > a rerun, is under *From Phase 10h*.
 >
@@ -33,12 +43,16 @@ first when picking the project back up.
 >
 > **State of the tree:** everything through `a659edc` (10f and 10g, one commit, since the
 > user had staged both together; 10e is `fc143d4`) is committed, pushed and green in CI.
-> **10h is committed and pushed with `[skip ci]`** at the user's request, so CI has not run
-> on it. Its first CI run will pull the 1.6 GB `kinesis-mock` image in the
-> Ubuntu gate.
+> **10h is `ce2db9c`**, committed and pushed with `[skip ci]` at the user's request, so CI
+> has not run on it. **On its own it would fail the Windows gate**: Windows runners check out
+> with `autocrlf`, which turns the SigV4 fixtures' LF into CRLF and all 38 cases differ
+> (reproduced locally). The fix, a `.gitattributes` marking them `-text`, is in the 10i
+> commit, also pushed with `[skip ci]` at the user's request. **CI has run on neither 10h
+> nor 10i**; the first run on or after the 10i commit covers both, and pulls the 1.6 GB
+> `kinesis-mock` image in the Ubuntu gate.
 >
-> **Next:** **10i, the Kinesis sink**, as planned. Then the acknowledgement-based brokers'
-> design or NoSQL; the user chooses. Still open on the website: GraphQL, Kafka and now NATS can be marked working
+> **Next:** Phase 10's next family, chosen by the user: a design for the
+> acknowledgement-based brokers (RabbitMQ, SQS, Pub/Sub), or NoSQL. Still open on the website: GraphQL, Kafka and now NATS can be marked working
 > there, naming `the_graphql_sample_reads_two_relay_pages_filters_and_mutates_in_batches`,
 > `the_kafka_sample_carries_on_between_runs_on_the_one_script_path` and
 > `the_nats_sample_carries_on_between_runs_on_the_one_script_path` in its `CLAIMS.md`.
@@ -74,14 +88,14 @@ first when picking the project back up.
 >
 > | Job | Checked locally by |
 > |---|---|
-> | `gate (windows)` — fmt, clippy, 931 tests (servers skip), samples | running it, repeatedly |
-> | `gate (ubuntu)` — fmt, clippy, **921 tests** with Postgres, MySQL, MinIO, Kafka (four listeners), NATS (five servers) and kinesis-mock, samples | `cargo test` in `rust:1.96-slim-bookworm` |
+> | `gate (windows)` — fmt, clippy, 942 tests (servers skip), samples | running it, repeatedly |
+> | `gate (ubuntu)` — fmt, clippy, **932 tests** with Postgres, MySQL, MinIO, Kafka (four listeners), NATS (five servers) and kinesis-mock, samples | `cargo test` in `rust:1.96-slim-bookworm` |
 > | `artifact (both)` — bake, run from elsewhere, run in a bare container | Phase 9b and 9c |
 > | `cross-build-script` — `build-runner.ps1`, ELF check, unbaked contract, no-op rerun | each assertion run by hand |
 > | `frontend` — 134 tests, typecheck, build | running it |
 >
 > **The Linux job excludes `apps/desktop`** (Tauri needs WebKitGTK and GTK to compile), so
-> **921 + 10 desktop = 931** is the arithmetic to check if either number moves. **CI fetches
+> **932 + 10 desktop = 942** is the arithmetic to check if either number moves. **CI fetches
 > only the extensions the tests load** (`DUCKDB_TEST_EXTENSIONS`, hyphen-separated because
 > `actions/cache` refuses a comma in a key). **CI cannot do the Windows-to-Linux cross-build**
 > (GitHub's Windows runners run no Linux containers), so it proves the output instead: a Linux
@@ -91,12 +105,12 @@ first when picking the project back up.
 >
 > ```powershell
 > ./scripts/test-services.ps1                                       # Postgres, MySQL, MinIO, Kafka, NATS, Kinesis in Docker
-> cargo test --workspace                                            # expect 931 passing
+> cargo test --workspace                                            # expect 942 passing
 > ./scripts/test-services.ps1 -Stop                                 # tidy up afterwards
 > npm --prefix frontend run test                                    # expect 134 passing
 > npm --prefix frontend run typecheck                               # expect clean
 > npm --prefix frontend run build                                   # expect clean
-> .\target\debug\etl.exe components                                 # expect 65
+> .\target\debug\etl.exe components                                 # expect 66
 > .\target\debug\etl.exe run samples\pipelines\orders_enriched.json # expect 12/5/7/6/6
 > .\target\debug\etl.exe run samples\pipelines\orders_checked.json  # expect 12/10+2/9+1/9/2/1
 > .\target\debug\etl.exe run samples\pipelines\orders_guarded.json  # expect 12 through, branch taken
@@ -119,10 +133,11 @@ first when picking the project back up.
 
 ## Where things stand
 
-- **Next phase:** **10i, the Kinesis sink**, planned in
-  [PLAN_duckle_parity.md](PLAN_duckle_parity.md) under *Phase 10h and 10i*.
-- **In progress:** nothing. **Phases 0–9 and 10a–10h are done** (10a–10f on 2026-09-23,
-  10g and 10h on 2026-09-24; CI green through 10g on run 35904782091; 10h pushed with `[skip ci]`).
+- **Next phase:** Phase 10's next family, the user's choice: the acknowledgement-based
+  brokers' design, or NoSQL. Questions first, as for every family.
+- **In progress:** nothing. **Phases 0–9 and 10a–10i are done** (10a–10f on 2026-09-23,
+  10g–10i on 2026-09-24; CI green through 10g on run 35904782091; 10h and 10i, with the
+  `.gitattributes` fix, pushed with `[skip ci]`, so not yet run in CI).
 - **Blocked on:** nothing.
 
 Phase 9 was split into 9a–9d on 2026-09-17 before starting, the same way 6 and 8 were:
@@ -145,7 +160,7 @@ pass), `ctl.throttle` (nothing to throttle until Phase 10 has a row cursor).
 **a scheduler that runs them**, and **a console to watch it from**. From the repo root:
 
 ```powershell
-cargo test --workspace        # 931 tests: 317 engine, 172 connectors, 113 scheduler, 65 console, 51 e2e, 50 cli, 48 state, 26 runner, 23 secrets, 19 verified, 17 native e2e, 15 metadata, 10 desktop, 5 plugin-sdk
+cargo test --workspace        # 942 tests: 317 engine, 183 connectors, 113 scheduler, 65 console, 51 e2e, 50 cli, 48 state, 26 runner, 23 secrets, 19 verified, 17 native e2e, 15 metadata, 10 desktop, 5 plugin-sdk
 .\target\debug\etl.exe run samples\pipelines\orders_enriched.json
 .\target\debug\etl.exe validate samples\pipelines\orders_enriched.json
 .\target\debug\etl.exe plan samples\pipelines\orders_enriched.json --script
@@ -197,7 +212,7 @@ exists — writing the report only if one does. `plan.needs_session()` decides t
 because they read something that never got created, and the failures. The exit code is 3 either
 way. Getting the report back is the entire point of asking a run to continue.
 
-**Sixty-five components exist.** Sources: `src.cloud.http`, `src.cloud.s3`, `src.db.mysql`,
+**Sixty-six components exist.** Sources: `src.cloud.http`, `src.cloud.s3`, `src.db.mysql`,
 `src.db.postgres`, `src.db.sqlite`, `src.file.csv`, `src.file.excel`, `src.file.json`,
 `src.file.jsonl`, `src.file.parquet`, `src.file.xml`, `src.lake.delta`, `src.lake.iceberg`,
 `src.saas.graphql`, `src.saas.rest`, `src.stream.kafka`, `src.stream.kinesis`, `src.stream.nats`. Transforms:
@@ -206,14 +221,14 @@ way. Getting the report back is the entire point of asking a run to continue.
 `xf.pivot`, `xf.rename`, `xf.sample`, `xf.select`, `xf.sort`, `xf.sql`, `xf.union`,
 `xf.unpivot`, `xf.window`. Sinks: `snk.cloud.s3`, `snk.db.mysql`, `snk.db.postgres`,
 `snk.db.sqlite`, `snk.file.csv`, `snk.file.excel`, `snk.file.json`, `snk.file.jsonl`,
-`snk.file.parquet`, `snk.file.xml`, `snk.saas.graphql`, `snk.saas.rest`, `snk.stream.kafka`, `snk.stream.nats`. Quality: `qa.accepted_values`, `qa.expression`, `qa.not_null`, `qa.range`,
+`snk.file.parquet`, `snk.file.xml`, `snk.saas.graphql`, `snk.saas.rest`, `snk.stream.kafka`, `snk.stream.kinesis`, `snk.stream.nats`. Quality: `qa.accepted_values`, `qa.expression`, `qa.not_null`, `qa.range`,
 `qa.referential`, `qa.regex`, `qa.unique`. Quality assertions, which fail the run rather than
 partitioning rows and so have no reject port: `qa.row_count`, `qa.schema_match`. Control:
 `ctl.branch`, `ctl.fail`, `ctl.log`, `ctl.sequence`, `ctl.wait`. Everything else in the six
 namespaces compiles to `UnsupportedComponent`, by design.
 
-**Eleven of them are written in Rust, not lowered to DuckDB alone** (the list below, and
-`src.stream.kinesis` from 10h). `src.file.xml` and
+**Twelve of them are written in Rust, not lowered to DuckDB alone** (the list below, and
+`src.stream.kinesis` and `snk.stream.kinesis` from 10h and 10i). `src.file.xml` and
 `snk.file.xml` (Phase 10a), `src.saas.rest` and `snk.saas.rest` (Phase 10b),
 `src.saas.graphql` and `snk.saas.graphql` (Phase 10d), `src.stream.kafka` (10e),
 `snk.stream.kafka` (10f), and `src.stream.nats` and `snk.stream.nats` (10g) are the *native*
@@ -584,7 +599,7 @@ fail the run. That is `ctl.fail`'s shape and it needs 6b's execution-model decis
 | 9b | — the engine and its extensions inside the file | **done** | 2026-09-17 |
 | 9c | — cross-building (Linux from Windows) | **done** | 2026-09-17 |
 | 9d | — the CI matrix | **done** (green on the third run) | 2026-09-23 |
-| 10 | Rust-native connectors | **in progress** (10a–10h done; 10i next) | |
+| 10 | Rust-native connectors | **in progress** (10a–10i done; the next family open) | |
 | 10a | — plugin SDK, staging bridge, XML | **done** | 2026-09-23 |
 | 10b | — SaaS REST, source and sink | **done** | 2026-09-23 |
 | 10c | — verify Phase 4's database and lake connectors | **done** | 2026-09-23 |
@@ -593,7 +608,7 @@ fail the run. That is `ctl.fail`'s shape and it needs 6b's execution-model decis
 | 10f | — the Kafka sink, TLS and SASL | **done** (green in CI, run 35904782091) | 2026-09-23 |
 | 10g | — NATS JetStream, source and sink | **done** (green in CI, run 35904782091) | 2026-09-24 |
 | 10h | — Kinesis: SigV4, AWS credentials, the source | **done** (pushed with `[skip ci]`; not checked against real AWS) | 2026-09-24 |
-| 10i | — the Kinesis sink | planned | |
+| 10i | — the Kinesis sink | **done** (pushed with `[skip ci]`; not checked against real AWS) | 2026-09-24 |
 | 11 | AI assistant + MCP server | not started | |
 | 12 | Benchmarks + parity audit | not started | |
 
@@ -1463,9 +1478,31 @@ ran*. Earlier ones were resolved 2026-09-16 (Settled decisions 5–8).
   test server's limit is raised.
 - **A `latest` start saved to the second read records from earlier in that second.** It is
   kept to the millisecond now.
+- **Byte-for-byte fixtures need `-text` in `.gitattributes`.** Found after the push: a
+  Windows checkout with `autocrlf` adds `\r` to every line, and the SigV4 suite then fails all
+  38 cases. Reproduced by converting the files to CRLF; fixed with `.gitattributes`, and a
+  scratch checkout with `autocrlf=true` shows them left as LF.
 - **Kinesis's LocalStack is `kinesis-mock` inside**, which is why the lighter of the two was
   used. Neither checks SigV4 signatures, so the vendored AWS suite is the signing proof, and
   real AWS remains unchecked (Settled decision 56).
+
+### From Phase 10i
+
+- **Kinesis's `PutRecords` succeeds while refusing records.** HTTP 200, `FailedRecordCount`
+  above 0, and an `ErrorCode` beside each refused record. A sink that checked only the
+  status would lose them silently. Only those records are sent again, which means **a
+  resent record lands after later ones of its call**, even with the same key: documented,
+  not hidden.
+- **Partial failures were tested against the local fixture, not `kinesis-mock`.** The plan
+  suggested provoking them from the container's limits; the fixture refuses exactly the
+  records a test names, every time. Three mutations (no 5 MiB split, every code resendable,
+  resending the whole call) each break the test meant to catch them.
+- **"Keys land on the shard their hash says" became "each key on one shard".** Which shard
+  an MD5 falls in is Kinesis's work, not ours, and the tree has no MD5; what the sink controls
+  is that the key sent is the column's value, which the round trip checks, and that
+  unkeyed rows spread over both shards.
+- **Size limits are checked before sending**: a record over 1 MiB, or a key outside 1 to 256
+  characters, fails naming the row, rather than failing a whole call of 500.
 
 ## Session log
 
@@ -2459,3 +2496,23 @@ decisions 47–56), CI for 10e–10g running meanwhile and passing.
 
 **931 Rust tests with every server up, twice, none skipped; 134 frontend.** Committed and
 pushed at the user's request with `[skip ci]`: CI has not run on 10h.
+
+### 2026-09-24 — Phase 10h committed; Phase 10i: the Kinesis sink
+
+At the user's request ("commit and push, dont run git CI. after that pls start 10i"), 10h was
+committed as `ce2db9c` with `[skip ci]` and pushed. Git's LF-to-CRLF warnings then led to the
+finding that a Windows checkout would break the SigV4 fixtures; `.gitattributes` fixes it,
+uncommitted.
+
+- `crates/connectors/src/kinesis.rs` — `snk.stream.kinesis`; `check_connection` shared by
+  both components. `kinesis/tests.rs` — 11 tests, 8 against the local fixture, 3 against
+  `kinesis-mock` (keys, spreading, a missing stream).
+- `samples/pipelines/kinesis_orders.json` — a `put_large` node and a `large_stream`
+  parameter; `verified.rs` checks the second stream holds 5, then 5, then 5 more than the new
+  large orders.
+- Inventory and `gate.yml`: 66 components. Docs: `connectors.md` (the sink), the plan's
+  as-built notes, `learnings.md`, `assignments.md` (A49–A50).
+
+**942 Rust tests with every server up, twice, none skipped; 134 frontend.** Committed and
+pushed with `.gitattributes` at the user's request, with `[skip ci]`: CI has not run on 10h
+or 10i.
