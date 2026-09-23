@@ -242,6 +242,14 @@ pub struct RunReport {
     /// window. Saving these anyway would skip whatever was in flight, and
     /// nothing afterwards could tell you it happened.
     pub watermarks: Vec<Watermark>,
+    /// Where each native source that keeps a position got to.
+    ///
+    /// **Only ever from a run that fully succeeded:** the engine leaves this
+    /// empty when [`RunReport::failed`] is true, rather than trusting every
+    /// caller to check, because saving one from a failed run would skip the
+    /// records that run never finished with. Callers should still save it in
+    /// the same write as the watermarks.
+    pub checkpoints: Vec<Checkpoint>,
     /// Stages that failed while `continue_on_failure` kept the run going.
     ///
     /// **A report holding any of these is a failed run.** Every other way a
@@ -314,6 +322,7 @@ pub fn preview(
     // view over it to hold anything. Sinks are already gone from `stages`, so
     // nothing is delivered: a preview stays a read.
     let mut staging = Staging::default();
+    // Where it read to is not saved: a preview is a look, not a run.
     native::stage_sources(stages.iter().copied(), options, &mut staging)?;
 
     let mut script = String::new();
@@ -437,7 +446,8 @@ fn run_one_script(
     // every path out of this function.
     let mut staging = Staging::default();
     native::prepare_sinks(&plan.stages, options, &mut staging)?;
-    let mut notes = native::stage_sources(&plan.stages, options, &mut staging)?;
+    let staged = native::stage_sources(&plan.stages, options, &mut staging)?;
+    let mut notes = staged.notes;
 
     let mut command = Command::new(&binary);
     command.arg("-json").arg("-c").arg(&script);
@@ -494,6 +504,8 @@ fn run_one_script(
     Ok(RunReport {
         stages: outcomes(plan, options.counts, &counts),
         watermarks: read_watermarks(plan, &parse_watermarks(&stdout)),
+        // Every failure on this path returned early, so this run succeeded.
+        checkpoints: staged.checkpoints,
         elapsed: started.elapsed(),
         duckdb_bin: binary,
         // The report is read by people and written to logs, so it carries the
@@ -894,6 +906,15 @@ pub struct Watermark {
     pub value: Option<String>,
 }
 
+/// Where one native source got to in this run, in its connector's own terms.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Checkpoint {
+    pub node_id: String,
+    pub component_id: String,
+    /// Opaque: handed back to the connector next run, never read here.
+    pub value: JsonValue,
+}
+
 /// A stage that failed while the run was told to carry on past it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StageFailure {
@@ -932,7 +953,7 @@ fn run_driven(plan: &Plan, options: &RunOptions, binary: PathBuf) -> Result<RunR
     // Stages downstream of a branch that went the other way. Separate from
     // `unusable` because this is the pipeline working, not failing.
     let mut untaken: HashSet<String> = HashSet::new();
-    let mut notes: Vec<String> = staged;
+    let mut notes: Vec<String> = staged.notes;
     let mut watermarks: Vec<Watermark> = Vec::new();
     let mut script = String::new();
 
@@ -1064,11 +1085,15 @@ fn run_driven(plan: &Plan, options: &RunOptions, binary: PathBuf) -> Result<RunR
     // Deliver only what a fully successful run produced, which is the rule
     // watermarks follow too. A run that carried on past a failure still failed,
     // and delivering half of it would be the one outcome nobody could undo.
-    if failures.is_empty() {
+    let checkpoints = if failures.is_empty() {
         notes.extend(native::deliver_sinks(&plan.stages, &untaken, options)?);
+        staged.checkpoints
     } else {
         notes.extend(native::withheld(&plan.stages));
-    }
+        // The same rule, for where the sources got to: a failed run saves no
+        // position, so the next run re-reads what this one never finished.
+        Vec::new()
+    };
 
     let elapsed = started.elapsed();
     let spilled = clear_spills(plan, options);
@@ -1089,6 +1114,7 @@ fn run_driven(plan: &Plan, options: &RunOptions, binary: PathBuf) -> Result<RunR
     Ok(RunReport {
         stages: outcomes,
         watermarks,
+        checkpoints,
         elapsed,
         duckdb_bin: binary,
         script: redact(&script, &options.redact),

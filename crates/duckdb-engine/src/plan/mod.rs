@@ -174,6 +174,11 @@ pub struct NativeStep {
     pub properties: JsonValue,
     /// The staging file, relative to the working directory, like a spill path.
     pub staging: String,
+    /// For a source: where the last fully successful run got to, handed to the
+    /// connector as its `Context::checkpoint`. Carried on the plan, like a
+    /// watermark's literal, so that `compile` stays pure. Always `None` for a
+    /// sink.
+    pub checkpoint: Option<JsonValue>,
 }
 
 /// One upstream connection into a stage.
@@ -705,6 +710,9 @@ impl Plan {
 pub struct CompileOptions {
     /// Node id → the high-water mark already loaded from it.
     pub watermarks: BTreeMap<String, String>,
+    /// Node id → where its native source got to, as the connector returned it.
+    /// Opaque here; see `etl_plugin_sdk::Summary::checkpoint`.
+    pub checkpoints: BTreeMap<String, JsonValue>,
 }
 
 /// Validate a document and order it for execution.
@@ -1069,13 +1077,20 @@ fn build_stages(
                 })?;
             }
 
-            let native = connector.map(|connector| NativeStep {
-                direction: match connector {
+            let native = connector.map(|connector| {
+                let direction = match connector {
                     etl_plugin_sdk::Connector::Source(_) => Direction::Ingest,
                     etl_plugin_sdk::Connector::Sink(_) => Direction::Egress,
-                },
-                properties: properties.clone(),
-                staging: format!("{NATIVE_DIR}/{}.jsonl", node.id),
+                };
+                NativeStep {
+                    checkpoint: match direction {
+                        Direction::Ingest => options.checkpoints.get(&node.id).cloned(),
+                        Direction::Egress => None,
+                    },
+                    direction,
+                    properties: properties.clone(),
+                    staging: format!("{NATIVE_DIR}/{}.jsonl", node.id),
+                }
             });
 
             let sql = (component.build)(&builders::Lowering {

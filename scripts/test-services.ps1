@@ -1,21 +1,24 @@
 <#
 .SYNOPSIS
-    Start the servers Phase 10c's verification tests run against: PostgreSQL,
-    MySQL and MinIO (S3), each in a throwaway container.
+    Start the servers the verification tests run against: PostgreSQL, MySQL
+    and MinIO (S3) from Phase 10c, and Kafka from 10e, each in a throwaway
+    container.
 
 .DESCRIPTION
-    `crates/duckdb-engine/tests/verified.rs` reads three environment variables
-    and skips each group of tests when its variable is unset:
+    The verification tests read four environment variables and skip each
+    group when its variable is unset:
 
       ETL_TEST_POSTGRES   a libpq connection string
       ETL_TEST_MYSQL      a MySQL connection string
       ETL_TEST_S3         http://host:port of an S3-compatible endpoint, with
                           the bucket `etl-test` already created and the
                           credentials etl-test / etl-test-secret
+      ETL_TEST_KAFKA      host:port of a Kafka broker (KRaft, one node) that
+                          does not create topics on its own; tests make theirs
 
-    This script starts the three containers on a private network, waits until
+    This script starts the four containers on a private network, waits until
     each one answers, creates the bucket with MinIO's own `mc` client, and then
-    prints the three variables -- or, in GitHub Actions, writes them to
+    prints the four variables -- or, in GitHub Actions, writes them to
     $GITHUB_ENV so later steps see them.
 
     Ports are high and fixed so they are unlikely to collide with a real server
@@ -37,7 +40,7 @@ param(
 $ErrorActionPreference = 'Continue'
 
 $network = 'etl-test'
-$containers = @('etl-test-postgres', 'etl-test-mysql', 'etl-test-minio')
+$containers = @('etl-test-postgres', 'etl-test-mysql', 'etl-test-minio', 'etl-test-kafka')
 
 function Invoke-Docker {
     $output = & docker @args 2>&1
@@ -70,7 +73,7 @@ if ($LASTEXITCODE -ne 0) {
 Remove-Everything
 Invoke-Docker network create $network
 
-Write-Host 'Starting PostgreSQL, MySQL and MinIO (the first run pulls the images)'
+Write-Host 'Starting PostgreSQL, MySQL, MinIO and Kafka (the first run pulls the images)'
 
 Invoke-Docker run -d --name etl-test-postgres --network $network -p 55432:5432 `
     -e POSTGRES_PASSWORD=etl postgres:16
@@ -85,6 +88,27 @@ Invoke-Docker run -d --name etl-test-mysql --network $network -p 53306:3306 `
 Invoke-Docker run -d --name etl-test-minio --network $network -p 59000:9000 `
     -e MINIO_ROOT_USER=etl-test -e MINIO_ROOT_PASSWORD=etl-test-secret `
     quay.io/minio/minio server /data
+
+# Kafka 4.1 in KRaft mode, one node doing both jobs. Two listeners, because a
+# broker hands clients the address it advertises: EXTERNAL is what the tests
+# reach from the host, as 127.0.0.1:59092, and INTERNAL is for the broker's own
+# tools inside the container, which could not reach the host's port. Topics
+# are not created on demand, so a test that names a missing one sees the error
+# a user would.
+Invoke-Docker run -d --name etl-test-kafka --network $network -p 59092:9092 `
+    -e KAFKA_NODE_ID=1 `
+    -e 'KAFKA_PROCESS_ROLES=broker,controller' `
+    -e 'KAFKA_LISTENERS=EXTERNAL://:9092,INTERNAL://:19092,CONTROLLER://:9093' `
+    -e 'KAFKA_ADVERTISED_LISTENERS=EXTERNAL://127.0.0.1:59092,INTERNAL://localhost:19092' `
+    -e 'KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=EXTERNAL:PLAINTEXT,INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT' `
+    -e KAFKA_INTER_BROKER_LISTENER_NAME=INTERNAL `
+    -e KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER `
+    -e KAFKA_CONTROLLER_QUORUM_VOTERS=1@localhost:9093 `
+    -e KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1 `
+    -e KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1 `
+    -e KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1 `
+    -e KAFKA_AUTO_CREATE_TOPICS_ENABLE=false `
+    apache/kafka:4.1.0
 
 function Wait-For([string] $what, [scriptblock] $probe, [int] $seconds = 180) {
     $deadline = (Get-Date).AddSeconds($seconds)
@@ -112,20 +136,25 @@ Wait-For 'MinIO' {
         'mc alias set m http://etl-test-minio:9000 etl-test etl-test-secret && mc mb --ignore-existing m/etl-test'
 }
 
+Wait-For 'Kafka' {
+    docker exec etl-test-kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:19092 --list
+}
+
 $variables = [ordered]@{
     ETL_TEST_POSTGRES = 'host=127.0.0.1 port=55432 user=postgres password=etl dbname=postgres'
     ETL_TEST_MYSQL    = 'host=127.0.0.1 port=53306 user=root passwd=etl database=etl'
     ETL_TEST_S3       = 'http://127.0.0.1:59000'
+    ETL_TEST_KAFKA    = '127.0.0.1:59092'
 }
 
 if ($env:GITHUB_ENV) {
     foreach ($name in $variables.Keys) {
         Add-Content -Path $env:GITHUB_ENV -Value "$name=$($variables[$name])"
     }
-    Write-Host 'Wrote ETL_TEST_POSTGRES, ETL_TEST_MYSQL and ETL_TEST_S3 to GITHUB_ENV.'
+    Write-Host 'Wrote ETL_TEST_POSTGRES, ETL_TEST_MYSQL, ETL_TEST_S3 and ETL_TEST_KAFKA to GITHUB_ENV.'
 } else {
     Write-Host ''
-    Write-Host 'Set these, then run: cargo test -p etl-duckdb-engine --test verified'
+    Write-Host 'Set these, then run: cargo test --workspace'
     Write-Host ''
     foreach ($name in $variables.Keys) {
         Write-Host "`$env:$name = '$($variables[$name])'"

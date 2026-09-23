@@ -419,3 +419,40 @@ the fuller record. From Phase 10 on, a section is added at the end of each phase
   compiler caught it, but *print the boundaries before cutting.*
 - **`Set-Content -Encoding utf8` wrote a BOM again**, this time into a scratch pipeline, and
   the pipeline parser refuses a BOM. Recorded in the tracker as a real, small gap.
+
+## Phase 10e — checkpoints, and the Kafka source (2026-09-23)
+
+**Concepts**
+- **A bounded micro-batch.** Record the end first (each partition's high watermark), read up
+  to it, save where you stopped. Freshness is then a scheduling question, and a run is
+  repeatable: the same saved position reads the same records.
+- **Offsets as state, saved after success.** The same rule as watermarks, for the same
+  reason: state that lags output is recoverable (read again), state that runs ahead of output
+  loses rows silently.
+- **An opaque checkpoint.** The engine stores and returns a connector's position without
+  reading it. Only the connector knows what "Kafka partition 1, offset 12" means; the engine
+  only has to keep it safe and hand it back.
+- **An async client inside a blocking program.** A single-threaded `tokio` runtime built in
+  `read` and dropped at its end keeps async out of every other crate.
+- **One code path for a rule four callers share**, in the engine rather than in any of the
+  callers.
+
+**Decisions and why**
+- **Gaps fail the run.** Records deleted before they were read are named and counted, and the
+  fix (`etl state forget`) is deliberate, because deciding what to lose is a person's call.
+- **The cap is not an error here**, unlike REST's `max_pages`: the saved position is exactly
+  where reading stopped, so nothing is lost by stopping.
+- **Partitions take turns**, so a backlog in one cannot starve the others under a cap.
+- **A test connector is injected, not registered**, so the registry stays what users see.
+
+**Mistakes worth not repeating**
+- **Framing a question on an unchecked premise.** Question 12 said artifacts "silently
+  re-read"; the build refused them, and the runner's doc comment said so. *Read the code the
+  question is about before writing the question.* Caught while building, and told to the user.
+- **Library defaults can hang.** `rskafka` retries for ever unless told otherwise. *Read a
+  client's retry and timeout defaults before trusting it on a network.*
+- **The shell is part of the data.** PowerShell 5.1 added a BOM when piping to `docker exec`,
+  and read `a,b` as an array in a command line. *Produce test data from a file, and quote
+  anything with a comma.*
+- **Mangled line continuations had happened before.** Four messages from earlier phases had
+  lost their `\`. *When a mistake is found, search for its siblings.*

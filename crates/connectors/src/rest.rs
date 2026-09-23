@@ -169,13 +169,13 @@ impl Source for RestSource {
             }
         }
 
-        Ok(Summary {
+        Ok(Summary::new(
             records,
-            detail: format!(
+            format!(
                 "{records} record(s) from {pages} page(s) of {}",
                 client.settings.url
             ),
-        })
+        ))
     }
 }
 
@@ -262,10 +262,7 @@ impl Sink for RestSink {
             format!("{sent_records} record(s) in {sent_batches} request(s) to {url}")
         };
 
-        Ok(Summary {
-            records: sent_records,
-            detail,
-        })
+        Ok(Summary::new(sent_records, detail))
     }
 }
 

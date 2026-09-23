@@ -12,13 +12,18 @@
 //! against. A flag that appeared to re-bind a parameter here would be a flag
 //! that silently did nothing.
 //!
-//! No run history and no watermark state either, which is why `etl build`
-//! refuses an incremental pipeline outright rather than shipping one that
-//! quietly re-reads everything on every run. Both are additions to a later
-//! phase, and both are recorded as gaps rather than discovered.
+//! No run history. **State, yes** (Settled decision 36, Phase 10e): watermarks
+//! and native sources' positions are loaded from `.etl/state/` under the
+//! directory it runs in (or `--workspace`) and saved there after a run that
+//! fully succeeded, by the same engine functions `etl run` uses. The file is the
+//! one `etl` writes, so `etl state list --workspace <dir>` reads it. Before
+//! that, `etl build` refused an incremental pipeline, because an artifact would
+//! have re-read everything on every run.
 
 use clap::Parser;
-use etl_duckdb_engine::{compile, params, report_lines, run, ExecError, Resolver, RunOptions};
+use etl_duckdb_engine::{
+    compile_with, params, remember, report_lines, run, ExecError, Resolver, RunOptions,
+};
 use etl_runner::{Blobs, Payload};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -167,7 +172,24 @@ fn execute(cli: &Cli, payload: &Payload, blobs: &Blobs) -> u8 {
         }
     };
 
-    let plan = match compile(document) {
+    // What earlier runs of this artifact, in this directory, got to. The key is
+    // the one `etl build` baked in, which is the key `etl` itself uses.
+    let store = etl_state::Store::at(&workspace);
+    let mut stored = match store.load(&payload.name) {
+        Ok(stored) => stored,
+        Err(error) => {
+            // Not "start from nothing": a state file that will not read is how
+            // a whole topic or table gets reloaded by accident.
+            eprintln!("error: {error}");
+            return exit::INVALID;
+        }
+    };
+    let remembering = remember::compile_options(document, &stored);
+    for warning in &remembering.warnings {
+        eprintln!("warning: {warning}");
+    }
+
+    let plan = match compile_with(document, &remembering.options) {
         Ok(plan) => plan,
         Err(error) => {
             // A baked pipeline compiled once already, at build time, so this is
@@ -211,10 +233,29 @@ fn execute(cli: &Cli, payload: &Payload, blobs: &Blobs) -> u8 {
             );
 
             if report.failed() {
-                exit::FAILED
-            } else {
-                exit::OK
+                return exit::FAILED;
             }
+
+            // Saved only now, after a run that fully succeeded: the same rule,
+            // and the same function, as `etl run`.
+            let remembered = remember::remember(&report, &mut stored);
+            for (node, value) in &remembered.advanced {
+                println!("  · {node} watermark now {value}");
+            }
+            for node in &remembered.positions {
+                println!("  · {node} position saved");
+            }
+            if remembered.changed() {
+                if let Err(error) = store.save(&payload.name, &stored) {
+                    eprintln!("error: the run succeeded but its state could not be saved: {error}");
+                    eprintln!(
+                        "       the next run will re-read from the previous watermark or position"
+                    );
+                    return exit::FAILED;
+                }
+            }
+
+            exit::OK
         }
 
         Err(error) => {

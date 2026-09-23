@@ -111,6 +111,17 @@ pub struct Context {
     /// Where relative paths resolve from: the workspace, as it does for every
     /// other component. `None` means the current directory.
     pub working_dir: Option<PathBuf>,
+
+    /// Where this node's source got to in the last run that fully succeeded,
+    /// exactly as it returned it in [`Summary::checkpoint`]. `None` for a node
+    /// that has never saved one, which means "start from the beginning", or
+    /// from wherever the connector's own `start` setting says.
+    ///
+    /// The value is the connector's own and nobody else reads it. It should
+    /// say enough about the configuration that made it to be recognised as
+    /// stale -- Kafka's names its topic -- because a node can be edited
+    /// between runs.
+    pub checkpoint: Option<JsonValue>,
 }
 
 impl Context {
@@ -131,6 +142,25 @@ pub struct Summary {
     /// One line for the report, in the connector's own words: where the records
     /// came from or went, and anything worth knowing about how it went.
     pub detail: String,
+
+    /// For a source that reads only what is new: where this read got to, to
+    /// be handed back as [`Context::checkpoint`] next time. The engine saves
+    /// it **only if the whole run succeeds**, so a failed run re-reads the same
+    /// records rather than skipping them. `None` leaves the saved position
+    /// where it was. Sinks, and sources that read everything, return `None`.
+    pub checkpoint: Option<JsonValue>,
+}
+
+impl Summary {
+    /// A summary with no checkpoint, which is every connector's but a
+    /// streaming source's.
+    pub fn new(records: u64, detail: impl Into<String>) -> Self {
+        Summary {
+            records,
+            detail: detail.into(),
+            checkpoint: None,
+        }
+    }
 }
 
 /// A component that reads records in from somewhere DuckDB cannot reach.

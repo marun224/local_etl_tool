@@ -9,8 +9,11 @@ rust-version.workspace = true
 [dependencies]
 etl-metadata.workspace = true
 etl-plugin-sdk.workspace = true
+etl-state.workspace = true
 quick-xml = "0.41.0"
+rskafka = "0.6"
 serde_json.workspace = true
+tokio = { version = "1", default-features = false, features = ["rt", "net", "time"] }
 ureq = "~3.2.1"
 
 [dev-dependencies]

@@ -30,6 +30,7 @@ fn report(stages: Vec<StageOutcome>) -> RunReport {
         spilled: 0,
         notes: Vec::new(),
         watermarks: Vec::new(),
+        checkpoints: Vec::new(),
         failures: Vec::new(),
     }
 }

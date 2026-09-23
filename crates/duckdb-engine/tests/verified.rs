@@ -480,3 +480,292 @@ fn s3_with_the_wrong_secret_is_refused_and_the_secret_is_masked() {
         .to_string();
     assert!(!error.contains("not-the-secret-42"), "{error}");
 }
+
+// ---------------------------------------------------------------------------
+// Kafka, as bounded micro-batches (Phase 10e)
+// ---------------------------------------------------------------------------
+//
+// The connector's own tests prove the reading. These prove the loop around it
+// that the engine owns: a run hands back where it got to, the next compile is
+// given that position, and a failed run hands back nothing to save.
+
+use etl_duckdb_engine::{compile_with, preview, resolve, CompileOptions, Resolver, RunReport};
+use rskafka::client::partition::{Compression, UnknownTopicHandling};
+use rskafka::client::ClientBuilder;
+use std::collections::BTreeMap;
+
+fn tokio() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+}
+
+/// A topic of its own for one test, with `orders` produced into it as JSON
+/// round-robin across three partitions.
+fn kafka_topic(broker: &str, test: &str, orders: &[serde_json::Value]) -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .subsec_nanos();
+    let topic = format!("etl-verified-{test}-{nanos}");
+    tokio().block_on(async {
+        let client = ClientBuilder::new(vec![broker.to_string()])
+            .build()
+            .await
+            .expect("the test broker answers");
+        client
+            .controller_client()
+            .unwrap()
+            .create_topic(topic.as_str(), 3, 1, 10_000)
+            .await
+            .expect("creates the topic");
+    });
+    produce(broker, &topic, orders, 0);
+    topic
+}
+
+/// Produce `orders` as JSON values; the n-th goes to partition (n + skip) % 3.
+fn produce(broker: &str, topic: &str, orders: &[serde_json::Value], skip: usize) {
+    tokio().block_on(async {
+        let client = ClientBuilder::new(vec![broker.to_string()])
+            .build()
+            .await
+            .unwrap();
+        for (n, order) in orders.iter().enumerate() {
+            let partition = ((n + skip) % 3) as i32;
+            client
+                .partition_client(topic, partition, UnknownTopicHandling::Retry)
+                .await
+                .unwrap()
+                .produce(
+                    vec![rskafka::record::Record {
+                        key: Some(order["order_id"].to_string().into_bytes()),
+                        value: Some(order.to_string().into_bytes()),
+                        headers: BTreeMap::new(),
+                        timestamp: {
+                            use rskafka::chrono::TimeZone;
+                            rskafka::chrono::Utc
+                                .timestamp_millis_opt(1_790_157_907_000)
+                                .unwrap()
+                        },
+                    }],
+                    Compression::NoCompression,
+                )
+                .await
+                .unwrap();
+        }
+    });
+}
+
+/// The twelve sample orders as JSON, the shape an orders service would emit.
+fn sample_orders() -> Vec<serde_json::Value> {
+    std::fs::read_to_string(repo_root().join("samples/data/orders.csv"))
+        .unwrap()
+        .lines()
+        .skip(1)
+        .map(|line| {
+            let f: Vec<&str> = line.split(',').collect();
+            serde_json::json!({
+                "order_id": f[0].parse::<i64>().unwrap(),
+                "customer_id": f[1],
+                "order_ts": f[2],
+                "amount": f[3].parse::<f64>().unwrap(),
+                "status": f[4],
+            })
+        })
+        .collect()
+}
+
+/// The committed `kafka_orders` sample against `topic`, compiled against the
+/// positions in `checkpoints`. `policy` goes on the filter, to take the plan
+/// onto the session path.
+fn kafka_orders(
+    workspace: &Path,
+    broker: &str,
+    topic: &str,
+    checkpoints: &BTreeMap<String, serde_json::Value>,
+    policy: Option<serde_json::Value>,
+) -> etl_duckdb_engine::Plan {
+    let text = std::fs::read_to_string(repo_root().join("samples/pipelines/kafka_orders.json"))
+        .expect("the sample is committed");
+    let mut json: serde_json::Value = serde_json::from_str(&text).unwrap();
+    if let Some(policy) = policy {
+        json["nodes"][1]["data"]["policy"] = policy;
+    }
+    let resolver = Resolver::new(workspace)
+        .bind("kafka_brokers", broker)
+        .bind("topic", topic);
+    let resolved = resolve(&document(&json.to_string()), &resolver).expect("resolves");
+    compile_with(
+        &resolved.document,
+        &CompileOptions {
+            checkpoints: checkpoints.clone(),
+            ..CompileOptions::default()
+        },
+    )
+    .expect("compiles")
+}
+
+/// Where each native source got to, keyed the way `CompileOptions` takes it:
+/// what `etl run` saves and hands to the next compile.
+fn positions(report: &RunReport) -> BTreeMap<String, serde_json::Value> {
+    report
+        .checkpoints
+        .iter()
+        .map(|checkpoint| (checkpoint.node_id.clone(), checkpoint.value.clone()))
+        .collect()
+}
+
+fn rows(report: &RunReport) -> Vec<Option<u64>> {
+    report.stages.iter().map(|stage| stage.rows).collect()
+}
+
+/// The sample, three runs: everything, nothing new, then only what arrived.
+fn the_sample_carries_on(name: &str, policy: Option<serde_json::Value>) {
+    let Some(broker) = server("ETL_TEST_KAFKA") else {
+        return;
+    };
+    let Some((workspace, binary)) = workspace(name, &[]) else {
+        return;
+    };
+    let orders = sample_orders();
+    let topic = kafka_topic(&broker, name, &orders[..10]);
+
+    let first = run(
+        &kafka_orders(
+            &workspace,
+            &broker,
+            &topic,
+            &BTreeMap::new(),
+            policy.clone(),
+        ),
+        &options(&workspace),
+    )
+    .expect("runs");
+    assert_eq!(rows(&first), [Some(10), Some(5), Some(5)]);
+    let saved = positions(&first);
+    assert_eq!(
+        saved["read_orders"]["offsets"]
+            .as_object()
+            .unwrap()
+            .values()
+            .map(|v| v.as_i64().unwrap())
+            .sum::<i64>(),
+        10,
+        "{saved:?}"
+    );
+    assert!(
+        first
+            .notes
+            .iter()
+            .any(|n| n.contains("10 record(s) from 3 partition(s)")),
+        "{:?}",
+        first.notes
+    );
+    assert_eq!(
+        query(
+            &binary,
+            &workspace,
+            "SELECT count(*) AS n, min(_offset) >= 0 AS offsets, typeof(any_value(_timestamp)) AS t \
+             FROM 'samples/out/kafka_large_orders.parquet';"
+        ),
+        r#"[{"n":5,"offsets":true,"t":"TIMESTAMP"}]"#
+    );
+
+    // Nothing new: the saved position is the end.
+    let second = run(
+        &kafka_orders(&workspace, &broker, &topic, &saved, policy.clone()),
+        &options(&workspace),
+    )
+    .expect("runs");
+    assert_eq!(rows(&second), [Some(0), Some(0), Some(0)]);
+
+    // Two more orders arrive: exactly those are read.
+    produce(&broker, &topic, &orders[10..], 10);
+    let third = run(
+        &kafka_orders(&workspace, &broker, &topic, &positions(&second), policy),
+        &options(&workspace),
+    )
+    .expect("runs");
+    assert_eq!(rows(&third)[0], Some(2));
+}
+
+#[test]
+fn the_kafka_sample_carries_on_between_runs_on_the_one_script_path() {
+    the_sample_carries_on("kafka_script", None);
+}
+
+#[test]
+fn the_kafka_sample_carries_on_between_runs_on_the_session_path() {
+    the_sample_carries_on(
+        "kafka_session",
+        Some(serde_json::json!({ "retryAttempts": 1 })),
+    );
+}
+
+#[test]
+fn a_failed_kafka_run_hands_back_no_position_to_save() {
+    let Some(broker) = server("ETL_TEST_KAFKA") else {
+        return;
+    };
+    let Some((workspace, _)) = workspace("kafka_failed", &[]) else {
+        return;
+    };
+    let topic = kafka_topic(&broker, "failed", &sample_orders()[..6]);
+
+    let broken = |policy: &str| {
+        document(&format!(
+            r#"{{ "formatVersion": 1, "nodes": [
+                {{ "id": "read", "position": {{"x":0,"y":0}}, "data": {{ "label": "Kafka",
+                   "componentId": "src.stream.kafka",
+                   "properties": {{ "brokers": "{broker}", "topic": "{topic}" }} }} }},
+                {{ "id": "broken", "position": {{"x":0,"y":0}}, "data": {{ "label": "Broken",
+                   "componentId": "xf.filter", "properties": {{ "predicate": "no_such_column > 1" }}
+                   {policy} }} }},
+                {{ "id": "out", "position": {{"x":0,"y":0}}, "data": {{ "label": "Out",
+                   "componentId": "snk.file.parquet", "properties": {{ "path": "out.parquet" }} }} }}
+              ],
+              "edges": [ {{ "id": "e1", "source": "read", "target": "broken" }},
+                         {{ "id": "e2", "source": "broken", "target": "out" }} ] }}"#
+        ))
+    };
+
+    // One script: the failure is an error, and there is no report to save.
+    let plan = compile_with(&broken(""), &CompileOptions::default()).unwrap();
+    assert!(run(&plan, &options(&workspace)).is_err());
+
+    // Carrying on past the failure: the report survives, its position does not.
+    let plan = compile_with(
+        &broken(r#", "policy": { "continueOnFailure": true }"#),
+        &CompileOptions::default(),
+    )
+    .unwrap();
+    let report = run(&plan, &options(&workspace)).expect("a report, not an error");
+    assert!(report.failed());
+    assert!(report.checkpoints.is_empty(), "{:?}", report.checkpoints);
+    assert_eq!(report.stages[0].rows, Some(6), "the source did read them");
+}
+
+#[test]
+fn previewing_a_kafka_source_reads_from_the_saved_position() {
+    let Some(broker) = server("ETL_TEST_KAFKA") else {
+        return;
+    };
+    let Some((workspace, _)) = workspace("kafka_preview", &[]) else {
+        return;
+    };
+    let topic = kafka_topic(&broker, "preview", &sample_orders()[..9]);
+
+    let fresh = kafka_orders(&workspace, &broker, &topic, &BTreeMap::new(), None);
+    let all = preview(&fresh, "read_orders", 50, &options(&workspace)).expect("previews");
+    assert_eq!(all.rows.len(), 9);
+
+    let report = run(&fresh, &options(&workspace)).expect("runs");
+    let caught_up = kafka_orders(&workspace, &broker, &topic, &positions(&report), None);
+    let nothing = preview(&caught_up, "read_orders", 50, &options(&workspace)).expect("previews");
+    assert!(
+        nothing.rows.is_empty(),
+        "a preview reads what the next run would"
+    );
+}

@@ -578,9 +578,13 @@ pub(crate) fn positive(
 /// Standard base64 with padding, for basic auth. Twenty lines rather than a
 /// dependency, the same call as the hex in `etl-secrets`.
 pub(crate) fn base64(input: &str) -> String {
+    base64_bytes(input.as_bytes())
+}
+
+/// [`base64`], for bytes that are not text: a Kafka value in `bytes` format.
+pub(crate) fn base64_bytes(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
-    let bytes = input.as_bytes();
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
 
     for chunk in bytes.chunks(3) {

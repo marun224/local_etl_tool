@@ -85,6 +85,60 @@ fn forgetting_a_node_reloads_it_from_the_start() {
 }
 
 #[test]
+fn a_checkpoint_survives_a_save_and_a_load_untouched() {
+    let (store, _root) = store("checkpoint-round-trip");
+
+    // Opaque to this crate: whatever shape the connector chose comes back.
+    let position = serde_json::json!({ "topic": "orders", "offsets": { "0": 12, "2": 7 } });
+    let mut state = PipelineState::default();
+    state.record_checkpoint("read_orders", "src.stream.kafka", position.clone());
+    store.save("stream", &state).expect("saves");
+
+    let read = store.load("stream").expect("loads");
+    let checkpoint = read
+        .checkpoint("read_orders")
+        .expect("the checkpoint is there");
+    assert_eq!(checkpoint.value, position);
+    assert_eq!(checkpoint.component, "src.stream.kafka");
+    assert!(checkpoint.at.ends_with('Z'));
+}
+
+#[test]
+fn a_file_from_before_checkpoints_reads_as_having_none() {
+    let (store, root) = store("checkpoint-old-file");
+    std::fs::create_dir_all(root.join(STATE_DIR)).unwrap();
+    std::fs::write(
+        root.join(STATE_DIR).join("old.json"),
+        r#"{ "formatVersion": 1, "watermarks": { "n": { "value": "5", "column": "id", "at": "2026-09-16T08:42:49Z" } } }"#,
+    )
+    .unwrap();
+
+    let read = store.load("old").expect("an older file still loads");
+    assert!(read.checkpoints.is_empty());
+    assert_eq!(read.watermark("n").map(|w| w.value.as_str()), Some("5"));
+
+    // And writing it back does not invent an empty `checkpoints` key.
+    store.save("old", &read).unwrap();
+    let text = std::fs::read_to_string(root.join(STATE_DIR).join("old.json")).unwrap();
+    assert!(!text.contains("checkpoints"), "{text}");
+}
+
+#[test]
+fn forgetting_a_node_clears_its_checkpoint_as_well_as_its_watermark() {
+    let mut state = PipelineState::default();
+    state.record_checkpoint("stream", "src.stream.kafka", serde_json::json!(1));
+    state.advance("table", "id", "9");
+
+    assert!(state.forget("stream"), "a checkpoint alone counts");
+    assert_eq!(state.checkpoint("stream"), None);
+    assert!(!state.is_empty(), "the other node is untouched");
+
+    state.record_checkpoint("stream", "src.stream.kafka", serde_json::json!(2));
+    state.forget_all();
+    assert!(state.is_empty());
+}
+
+#[test]
 fn a_write_leaves_no_temporary_file_behind() {
     let (store, root) = store("no-litter");
 

@@ -314,6 +314,7 @@ fn the_sink_writes_the_file_and_the_source_reads_it_back() {
     let directory = scratch("roundtrip");
     let context = Context {
         working_dir: Some(directory.clone()),
+        ..Context::default()
     };
 
     let rows = vec![record(json!({"id": 1, "city": "Oslo"}))];
@@ -367,6 +368,7 @@ fn a_write_that_fails_partway_leaves_the_old_file_untouched() {
 
     let context = Context {
         working_dir: Some(directory.clone()),
+        ..Context::default()
     };
     let rows = vec![record(json!({"ok": 1})), record(json!({"bad column": 2}))];
 

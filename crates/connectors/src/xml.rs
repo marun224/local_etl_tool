@@ -84,7 +84,7 @@ impl Source for XmlSource {
             format!("{records} record(s) read from {path}")
         };
 
-        Ok(Summary { records, detail })
+        Ok(Summary::new(records, detail))
     }
 }
 
@@ -129,10 +129,10 @@ impl Sink for XmlSink {
         let target = context.resolve(path);
         let records = write_atomically(&target, |out| write_records(out, root, record, input))?;
 
-        Ok(Summary {
+        Ok(Summary::new(
             records,
-            detail: format!("{records} record(s) written to {path}"),
-        })
+            format!("{records} record(s) written to {path}"),
+        ))
     }
 }
 

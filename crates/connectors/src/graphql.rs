@@ -183,10 +183,10 @@ impl Source for GraphqlSource {
             }
         }
 
-        Ok(Summary {
+        Ok(Summary::new(
             records,
-            detail: format!("{records} record(s) from {pages} page(s) of {url}"),
-        })
+            format!("{records} record(s) from {pages} page(s) of {url}"),
+        ))
     }
 }
 
@@ -289,10 +289,7 @@ impl Sink for GraphqlSink {
             format!("{sent_records} record(s) in {sent_batches} request(s) to {url}")
         };
 
-        Ok(Summary {
-            records: sent_records,
-            detail,
-        })
+        Ok(Summary::new(sent_records, detail))
     }
 }
 

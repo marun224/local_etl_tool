@@ -16,7 +16,7 @@
 //! Staging files are scratch. [`Staging`] deletes them when it goes out of
 //! scope, which covers every early return without each one remembering to.
 
-use crate::exec::{redact, resolve_against, ExecError, RunOptions};
+use crate::exec::{redact, resolve_against, Checkpoint, ExecError, RunOptions};
 use crate::plan::{Direction, NativeStep, Stage};
 use etl_plugin_sdk::{Connector, ConnectorError, Context, Record, RecordReader, RecordWriter};
 use std::collections::HashSet;
@@ -50,21 +50,40 @@ impl Drop for Staging {
     }
 }
 
+/// What staging the sources produced: a report line each, and where each
+/// source that keeps a position got to.
+#[derive(Debug, Default)]
+pub(crate) struct Staged {
+    pub(crate) notes: Vec<String>,
+    /// Advisory until the run succeeds, like a watermark: the caller keeps
+    /// these only for a run that fully succeeded.
+    pub(crate) checkpoints: Vec<Checkpoint>,
+}
+
 /// Run every native source among `stages`, writing each one's staging file.
-///
-/// Returns one report line per source, in the connector's words.
 pub(crate) fn stage_sources<'a>(
     stages: impl IntoIterator<Item = &'a Stage>,
     options: &RunOptions,
     staging: &mut Staging,
-) -> Result<Vec<String>, ExecError> {
-    let mut notes = Vec::new();
+) -> Result<Staged, ExecError> {
+    stage_sources_using(stages, options, staging, etl_connectors::find)
+}
+
+/// [`stage_sources`], with the registry lookup passed in, so the bridge can
+/// be tested with a connector that exists only in a test.
+pub(crate) fn stage_sources_using<'a>(
+    stages: impl IntoIterator<Item = &'a Stage>,
+    options: &RunOptions,
+    staging: &mut Staging,
+    find: impl Fn(&str) -> Option<Connector>,
+) -> Result<Staged, ExecError> {
+    let mut staged = Staged::default();
 
     for stage in stages {
         let Some(step) = native(stage, Direction::Ingest) else {
             continue;
         };
-        let Some(Connector::Source(source)) = etl_connectors::find(&stage.component_id) else {
+        let Some(Connector::Source(source)) = find(&stage.component_id) else {
             return Err(unregistered(stage));
         };
 
@@ -76,17 +95,32 @@ pub(crate) fn stage_sources<'a>(
             out: BufWriter::new(file),
         };
         let summary = source
-            .read(&step.properties, &mut writer, &context(options))
+            .read(
+                &step.properties,
+                &mut writer,
+                &context(options, step.checkpoint.clone()),
+            )
             .map_err(|error| failed(stage, error, options))?;
         writer
             .out
             .flush()
             .map_err(|error| failed(stage, ConnectorError::io(&path, error), options))?;
 
-        notes.push(format!("{}: {}", stage.label, summary.detail));
+        staged.notes.push(format!(
+            "{}: {}",
+            stage.label,
+            redact(&summary.detail, &options.redact)
+        ));
+        if let Some(value) = summary.checkpoint {
+            staged.checkpoints.push(Checkpoint {
+                node_id: stage.node_id.clone(),
+                component_id: stage.component_id.clone(),
+                value,
+            });
+        }
     }
 
-    Ok(notes)
+    Ok(staged)
 }
 
 /// Make room for the files DuckDB will write for native sinks, and track them
@@ -137,7 +171,7 @@ pub(crate) fn deliver_sinks<'a>(
             line: 0,
         };
         let summary = sink
-            .write(&step.properties, &mut reader, &context(options))
+            .write(&step.properties, &mut reader, &context(options, None))
             .map_err(|error| failed(stage, error, options))?;
 
         notes.push(format!("{}: {}", stage.label, summary.detail));
@@ -181,9 +215,10 @@ fn prepare(
     Ok(path)
 }
 
-fn context(options: &RunOptions) -> Context {
+fn context(options: &RunOptions, checkpoint: Option<serde_json::Value>) -> Context {
     Context {
         working_dir: options.working_dir.clone(),
+        checkpoint,
     }
 }
 

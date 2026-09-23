@@ -710,6 +710,7 @@ fn report_of(stages: Vec<StageOutcome>, failures: Vec<StageFailure>) -> RunRepor
         spilled: 0,
         notes: vec!["a note".to_string()],
         watermarks: Vec::new(),
+        checkpoints: Vec::new(),
         failures,
     }
 }
@@ -822,7 +823,7 @@ fn a_source_that_loaded_nothing_keeps_the_mark_it_had() {
         value: None,
     }];
 
-    save_watermarks(&settings, "orders", &report, true).expect("saves");
+    save_state(&settings, "orders", &report, true).expect("saves");
 
     let after = store.load("orders").expect("loads");
 
@@ -844,7 +845,7 @@ fn a_source_that_loaded_something_moves_its_mark() {
         value: Some("2026-06-01".to_string()),
     }];
 
-    save_watermarks(&settings, "orders", &report, true).expect("saves");
+    save_state(&settings, "orders", &report, true).expect("saves");
 
     let after = state::Store::at(&root).load("orders").expect("loads");
     let mark = after.watermark("read").expect("recorded");
@@ -858,7 +859,7 @@ fn a_pipeline_with_no_watermarks_writes_no_state_file() {
     let root = workspace("watermark-none");
     let settings = settings_for(&root);
 
-    save_watermarks(
+    save_state(
         &settings,
         "orders",
         &report_of(Vec::new(), Vec::new()),
@@ -883,7 +884,7 @@ fn a_document_with_no_incremental_source_has_nothing_to_refuse() {
 }
 
 #[test]
-fn every_incremental_node_is_named_so_the_refusal_can_say_which() {
+fn every_incremental_node_is_named_so_the_build_note_can_say_which() {
     let document = PipelineDoc::from_json(
         r#"{
   "nodes": [
@@ -907,6 +908,24 @@ fn every_incremental_node_is_named_so_the_refusal_can_say_which() {
         incremental_nodes(&document),
         vec!["read_orders", "read_events"]
     );
+}
+
+#[test]
+fn a_stream_source_is_named_so_the_build_note_can_say_which() {
+    let document = PipelineDoc::from_json(
+        r#"{
+  "nodes": [
+    { "id": "topic", "type": "source", "position": { "x": 0, "y": 0 },
+      "data": { "label": "Orders", "componentId": "src.stream.kafka" } },
+    { "id": "file", "type": "source", "position": { "x": 0, "y": 0 },
+      "data": { "label": "Customers", "componentId": "src.file.csv" } }
+  ],
+  "edges": []
+}"#,
+    )
+    .expect("a document");
+
+    assert_eq!(stream_nodes(&document), vec!["topic"]);
 }
 
 // ---------------------------------------------------------------------------

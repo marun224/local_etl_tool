@@ -280,3 +280,29 @@ Copy-Item samples\pipelines\orders_enriched.json samples\out\scratch\
   *Hint:* the sink's `judge` call is where a reply is accepted; it would need the pointer.
   *Check:* a fixture test for each of: empty array (success), non-empty (fails with the
   messages), pointer unset (unchanged). Update [connectors.md](connectors.md)'s *Not inspected*.
+
+## Phase 10e — Checkpoints and Kafka
+
+- [ ] **A36. Watch a position move.**
+  *Do:* start the servers, make the topic and produce the twelve orders as in the tracker's
+  session log, then run `samples/pipelines/kafka_orders.json` twice and `etl state list`.
+  *Check:* 12 then 0 rows, and the listing shows one offset per partition summing to 12. Run
+  `etl state forget kafka_orders --node read_orders` and explain what the next run reads.
+
+- [ ] **A37. A failed run reads again.**
+  *Do:* copy the sample, break its filter (`no_such_column > 1`), run it, fix it, run again.
+  *Check:* the broken run saves no position (`etl state list`), and the fixed run reads all
+  twelve. Which two pieces of code make sure of that, and why is there more than one?
+
+- [ ] **A38. Make a gap.**
+  *Do:* read part of a topic with `max_records`, then delete its first records with
+  `kafka-delete-records.sh` in the container, then run again.
+  *Check:* the run fails, names the offsets and counts them. Explain why failing is better
+  here than carrying on from what is left.
+
+- [ ] **A39. 🦀 Read the headers.**
+  *Do:* Kafka records carry headers, which the source ignores. Add them as a `_headers` column
+  (a JSON object of name to text, or base64 when not UTF-8).
+  *Hint:* `row` builds each record; `rskafka::record::Record::headers` is a `BTreeMap`. Keep
+  `METADATA_COLUMNS` and the clash check in step.
+  *Check:* a broker test producing a header and reading it back, and `connectors.md` updated.

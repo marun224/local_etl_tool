@@ -262,6 +262,17 @@ example, in [`crates/connectors/src/xml.rs`](../crates/connectors/src/xml.rs).
    `crates/duckdb-engine/tests/native.rs`. A web connector tests against the local HTTP
    server in `crates/connectors/src/fixture.rs`, which REST and GraphQL share.
 
+**A source that reads only what is new** (a stream, a change feed) keeps a position rather
+than re-reading everything. Read `context.checkpoint` for where the last successful run
+stopped (`None` on a first run), and return the new position as `Summary::checkpoint`. The
+value is yours, as JSON: nobody else reads it. Put enough of the configuration in it to
+recognise it as stale (Kafka's names its topic), and refuse, with the way out (`etl state
+forget`), a position you did not write. The engine saves it only after a run that fully
+succeeded, in the same file and write as watermarks, for `etl run`, the scheduler, the
+console and a built artifact alike (`etl_duckdb_engine::remember`). `src.stream.kafka` in
+[`crates/connectors/src/kafka.rs`](../crates/connectors/src/kafka.rs) is the worked example.
+A connector that needs an async client keeps its runtime inside `read`, as that one does.
+
 **A web connector** (anything over HTTP) builds on
 [`crates/connectors/src/http.rs`](../crates/connectors/src/http.rs) rather than on `ureq`
 directly: `connection_properties` for the spec, `Settings` and `Client` for the requests. That

@@ -31,6 +31,7 @@ fn records_are_read_back_in_order_and_then_end() {
 fn a_relative_path_resolves_against_the_workspace() {
     let context = Context {
         working_dir: Some(PathBuf::from("ws")),
+        ..Context::default()
     };
 
     assert_eq!(

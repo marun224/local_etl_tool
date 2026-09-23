@@ -20,6 +20,7 @@ use std::sync::OnceLock;
 mod fixture;
 pub mod graphql;
 mod http;
+pub mod kafka;
 pub mod rest;
 pub mod xml;
 
@@ -35,6 +36,7 @@ pub fn all() -> &'static [(String, Connector)] {
             Connector::Sink(&rest::RestSink),
             Connector::Source(&graphql::GraphqlSource),
             Connector::Sink(&graphql::GraphqlSink),
+            Connector::Source(&kafka::KafkaSource),
         ]
         .into_iter()
         .map(|connector| (connector.spec().id, connector))

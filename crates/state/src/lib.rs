@@ -129,6 +129,30 @@ impl Watermark {
     }
 }
 
+/// Where a native source got to, in the connector's own terms.
+///
+/// A watermark is a value the *engine* reads back from DuckDB. A checkpoint is
+/// the opposite: a value only the connector understands -- Kafka's is an offset
+/// per partition -- which this crate stores and hands back without looking
+/// inside. Same rules otherwise: written once, at the end of a run that fully
+/// succeeded, and atomically.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Checkpoint {
+    /// The component that wrote it, so a node whose component changed is not
+    /// handed a position in some other connector's terms.
+    pub component: String,
+
+    /// The position itself, opaque here.
+    pub value: serde_json::Value,
+
+    /// When it was recorded, UTC, `YYYY-MM-DDTHH:MM:SSZ`.
+    pub at: String,
+
+    /// Anything a newer version wrote, preserved across a load and save.
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, serde_json::Value>,
+}
+
 /// Everything one pipeline remembers.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PipelineState {
@@ -138,6 +162,12 @@ pub struct PipelineState {
     /// Watermarks by node id.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub watermarks: BTreeMap<String, Watermark>,
+
+    /// Checkpoints by node id. A file written before checkpoints existed has
+    /// none, which reads as "never run" for every native source -- correct,
+    /// since none of them could have saved one.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub checkpoints: BTreeMap<String, Checkpoint>,
 
     /// Anything a newer version wrote.
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -166,9 +196,41 @@ impl PipelineState {
         );
     }
 
-    /// Forget one node's watermark, so the next run reloads from the start.
+    /// Where this node's connector got to, if it has saved anything.
+    pub fn checkpoint(&self, node_id: &str) -> Option<&Checkpoint> {
+        self.checkpoints.get(node_id)
+    }
+
+    /// Record where a node's connector got to.
+    pub fn record_checkpoint(&mut self, node_id: &str, component: &str, value: serde_json::Value) {
+        self.checkpoints.insert(
+            node_id.to_string(),
+            Checkpoint {
+                component: component.to_string(),
+                value,
+                at: now_utc(),
+                extra: BTreeMap::new(),
+            },
+        );
+    }
+
+    /// Forget what one node remembers, watermark and checkpoint alike, so the
+    /// next run reads it from the start.
     pub fn forget(&mut self, node_id: &str) -> bool {
-        self.watermarks.remove(node_id).is_some()
+        let watermark = self.watermarks.remove(node_id).is_some();
+        let checkpoint = self.checkpoints.remove(node_id).is_some();
+        watermark || checkpoint
+    }
+
+    /// Forget everything this pipeline remembers.
+    pub fn forget_all(&mut self) {
+        self.watermarks.clear();
+        self.checkpoints.clear();
+    }
+
+    /// Whether there is nothing to remember.
+    pub fn is_empty(&self) -> bool {
+        self.watermarks.is_empty() && self.checkpoints.is_empty()
     }
 }
 

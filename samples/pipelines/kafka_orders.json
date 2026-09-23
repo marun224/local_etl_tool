@@ -1,0 +1,96 @@
+{
+  "formatVersion": 1,
+  "name": "kafka_orders",
+  "nodes": [
+    {
+      "id": "read_orders",
+      "type": "source",
+      "position": {
+        "x": 0.0,
+        "y": 0.0
+      },
+      "data": {
+        "label": "Orders topic",
+        "componentId": "src.stream.kafka",
+        "properties": {
+          "brokers": "${kafka_brokers}",
+          "topic": "${topic}",
+          "start": "earliest",
+          "max_records": 1000,
+          "columns": {
+            "order_id": "INTEGER",
+            "customer_id": "VARCHAR",
+            "order_ts": "TIMESTAMP",
+            "amount": "DECIMAL(10,2)",
+            "status": "VARCHAR",
+            "_partition": "INTEGER",
+            "_offset": "BIGINT",
+            "_timestamp": "TIMESTAMP"
+          }
+        },
+        "alias": "orders"
+      }
+    },
+    {
+      "id": "large_only",
+      "type": "transform",
+      "position": {
+        "x": 280.0,
+        "y": 0.0
+      },
+      "data": {
+        "label": "Over 100",
+        "componentId": "xf.filter",
+        "properties": {
+          "predicate": "amount > 100"
+        }
+      }
+    },
+    {
+      "id": "write_large",
+      "type": "sink",
+      "position": {
+        "x": 560.0,
+        "y": 0.0
+      },
+      "data": {
+        "label": "Large orders",
+        "componentId": "snk.file.parquet",
+        "properties": {
+          "path": "${workspace}/samples/out/kafka_large_orders.parquet",
+          "mode": "overwrite"
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "source": "read_orders",
+      "target": "large_only",
+      "sourceHandle": "main",
+      "targetHandle": "in"
+    },
+    {
+      "id": "e2",
+      "source": "large_only",
+      "target": "write_large",
+      "sourceHandle": "main",
+      "targetHandle": "in"
+    }
+  ],
+  "parameters": {
+    "kafka_brokers": {
+      "type": "string",
+      "required": true,
+      "default": "127.0.0.1:59092",
+      "description": "The brokers, host:port. The committed default is the test broker scripts/test-services.ps1 starts."
+    },
+    "topic": {
+      "type": "string",
+      "required": true,
+      "default": "etl-sample-orders",
+      "description": "The topic to read. Each run reads what arrived since the last successful one."
+    }
+  }
+}

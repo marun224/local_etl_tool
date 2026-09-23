@@ -16,6 +16,7 @@ pub mod lineage;
 mod native;
 pub mod params;
 pub mod plan;
+pub mod remember;
 pub mod report;
 pub mod session;
 pub mod sql;
@@ -24,7 +25,7 @@ use thiserror::Error;
 
 pub use context::{Context, ContextError, Contexts};
 pub use exec::{
-    preview, run, ExecError, Preview, RunOptions, RunReport, SkipReason, StageFailure,
+    preview, run, Checkpoint, ExecError, Preview, RunOptions, RunReport, SkipReason, StageFailure,
     StageOutcome, Watermark,
 };
 pub use lineage::{lineage, Lineage};

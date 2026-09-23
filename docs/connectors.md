@@ -12,13 +12,21 @@ is in [PLAN_duckle_parity.md](PLAN_duckle_parity.md) under *Phase 10: split and 
 
 These come from the bridge, not from any one connector, so they hold for all of them.
 
-**A source runs before DuckDB.** It reads everything, writes it to
-`.etl/tmp/native/<node_id>.jsonl`, and the node becomes an ordinary view over that file. So
-a native source reads its **whole input on every run**, including in `preview`. The
+**A source runs before DuckDB.** It reads, writes what it read to
+`.etl/tmp/native/<node_id>.jsonl`, and the node becomes an ordinary view over that file. Most
+native sources read their **whole input on every run**, including in `preview`; the
 `incremental` filter narrows what reaches the rest of the pipeline, but not what the
-connector reads. No connector pushes a watermark into its own query yet; one that does will
-say so in its section below. (For REST, a `query` parameter bound to `${since}` gets most of
-the way by hand.)
+connector reads. (For REST, a `query` parameter bound to `${since}` gets most of the way by
+hand.)
+
+**A streaming source keeps a position instead** (Phase 10e; Kafka is the first). It is handed
+where the last *successful* run stopped, reads on from there, and hands back where it got to.
+That **checkpoint** is saved in `.etl/state/<pipeline>.json` beside the watermarks, in the
+same atomic write, and **only when the whole run succeeds**: a failed run, including one that
+carried on under `continueOnFailure`, saves no position, so the next run reads the same
+records again. `etl state list` shows positions, and `etl state forget <pipeline> --node
+<id>` makes a node start over. A built artifact keeps the same file in the directory it runs
+in (or `--workspace`). `preview` reads from the saved position and saves nothing.
 
 **A sink delivers after DuckDB, and only after a run that succeeded.** DuckDB writes the rows
 to the staging file, and the connector delivers them once the whole run has finished without
@@ -245,3 +253,90 @@ the target API's convention before relying on it.
 Real TLS was checked by hand once, against the public countries API
 (`countries.trevorblades.com`): 27 Oceania countries through a `$continent` variable, and an
 unknown field reported as above. The suite itself never leaves 127.0.0.1.
+
+## `src.stream.kafka`
+
+Added in Phase 10e (2026-09-23). Client: `rskafka` 0.6, on a single-threaded `tokio` runtime
+that exists only for the length of one read (Settled decision 26). Verified against Apache
+Kafka 4.1 in KRaft mode. **Plaintext only for now**; TLS and SASL, and the sink, are Phase 10f.
+
+### What it is, and what it is not
+
+**It is not continuous streaming.** Each run is one **bounded micro-batch**:
+
+1. When the run starts, it records each partition's latest offset. That is the end of this
+   batch; anything that arrives while it reads belongs to the next run.
+2. It reads from the saved position (or from `start` for a partition with none) up to those
+   ends, or until `max_records` (default 100,000), whichever comes first. Partitions take
+   turns, one fetch each, so a backlog in one does not starve the rest.
+3. It saves where it got to, **only if the whole run succeeds**.
+
+So how fresh the data is depends on how often the pipeline runs: schedule it every minute
+and it is a minute behind. Reaching `max_records` is a normal stop, not an error, because
+nothing is lost: the position is saved exactly where reading stopped, and the report says
+roughly how many are left for the next run.
+
+**The position is not a Kafka consumer group** (Settled decision 27). It lives in this
+project's state file, so Kafka's own tools (`kafka-consumer-groups.sh`, lag dashboards) do not
+see this pipeline, and two workspaces reading one topic are independent readers.
+
+### Rows
+
+| `value_format` | Row |
+|---|---|
+| `json` (default) | the value's JSON object, one column per field |
+| `text` | a `value` column, the value as UTF-8 text |
+| `bytes` | a `value` column, the value base64-encoded |
+
+Every row also has `_topic`, `_partition`, `_offset`, `_timestamp` (UTC, milliseconds, as
+`YYYY-MM-DD HH:MM:SS.mmm`) and `_key` (text, or base64 if the key is not UTF-8, or null).
+Declare `columns` to type them; a declared `columns` map reads only the columns it names, so
+include the underscore ones you want.
+
+- **A value `json` cannot take fails the read**, naming the partition and offset: not JSON,
+  not an object, or an object with a field named like an underscore column. A value that
+  starts with a UTF-8 byte-order mark is not JSON either, and the error says so (Windows
+  tools add one). Use `text` to read such values and unpack them downstream.
+- **A tombstone** (a record with a key and no value) is a row with only the underscore
+  columns under `json`, and a null `value` under `text` and `bytes`. A deletion is
+  information, so it is kept.
+- **Headers are not read** yet.
+
+### Delivery semantics
+
+**At-least-once into the pipeline.** The position is saved after the sinks have written. If a
+run fails after its sinks wrote, or the save itself fails (the run then fails, saying so), the
+next run reads those records again. Downstream, deduplicate on `_partition` and `_offset`, or
+write to a target that upserts, if duplicates matter.
+
+**Gaps are errors, not skips.** If retention (or `delete_records`) removed records this
+pipeline never read, the next run **fails** and says which offsets and how many:
+`partition 1: offsets 20 to 24 were deleted before this pipeline read them (5 record(s)
+lost ...)`. Nothing is read. To carry on from what the topic still holds, run `etl state
+forget` for the node. That restarts **every** partition of it from `start`, so partitions that
+had no gap are read again too: deliberate, because choosing what to lose is a person's call.
+
+**Also refused:** a saved position past the end of a partition (the topic was probably
+deleted and made again), and a topic that does not exist; this connector never creates one.
+A saved position for a different topic (the node's `topic` was edited) is set aside with a
+note, and the new topic starts from `start`. A partition added since the last run starts
+from `start`, with a note.
+
+**Offsets that hold nothing readable** below the recorded end (transaction markers, records
+compacted away) are stepped over, with a note, rather than asked for again forever.
+
+**Two runs of one pipeline at once** read the same records, and the second to finish saves its
+position over the first's. The scheduler never does this; a hand-run `etl run` beside a
+running scheduler is the known unguarded case, as it is for watermarks.
+
+**Timeouts.** `timeout_ms` (default 30,000) bounds each step, retries included: connecting,
+listing the topic, and each fetch. `rskafka`'s own retries have no deadline, so without this a
+mistyped broker address would hang a run; with it, the run fails naming what it was doing.
+
+### A micro-batch into a file
+
+Each run writes its own batch, so a file sink with `mode: overwrite` holds **only the latest
+batch**, and a run that read nothing leaves an empty file. That is right for "the latest
+changes", and wrong for "everything so far". For the second, write to a database sink that
+appends, or put the date in the path (`${date}`). There is no per-run built-in for a file
+name yet.

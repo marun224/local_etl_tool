@@ -1913,3 +1913,82 @@ git -c user.name="Arun M" -c user.email=marun.mahadevu@gmail.com commit -F <mess
 ```
 
 Not pushed.
+
+## 2026-09-23 — Phase 10d's first CI run (pushed by the user)
+
+```powershell
+gh run list --limit 3                                  # 35888523818 in progress
+gh run watch 35888523818 --exit-status --interval 30   # green, all six jobs
+gh run view --job=<gate ubuntu> --log                  # 812 passed; components: 60
+gh run view --job=<gate windows> --log                 # 822 passed; components: 60
+gh run view 35863980720 --json jobs                    # per-job minutes, for the billing question
+```
+
+Tracker banner updated. Not committed.
+
+## 2026-09-23 — Phase 10e (streaming): orientation and questions
+
+```text
+# POSIX shell, read-only
+sed/grep crates/state/src/lib.rs, crates/duckdb-engine/src/report.rs, crates/cli/src/main.rs
+cat .etl/state/orders_incremental.json
+curl https://crates.io/api/v1/crates/<name>             # kafka rskafka rdkafka samsa kafka-protocol
+                                                        # async-nats nats lapin amiquip
+                                                        # rabbitmq-stream-client aws-sdk-kinesis
+                                                        # google-cloud-pubsub: version, date, downloads
+curl https://crates.io/api/v1/crates/<name>/<v>/dependencies   # rskafka, kafka, kafka-protocol
+```
+
+Public, read-only requests to crates.io. No files written except this log.
+
+```text
+# POSIX shell, read-only, while planning 10e/10f
+cat crates/duckdb-engine/src/native.rs; grep exec.rs, plan/mod.rs, cli/src/main.rs,
+  runner/src/{lib,main}.rs, state/src/lib.rs     # how watermarks load and save; runner is stateless
+curl https://crates.io/api/v1/crates/rskafka/0.6.0/dependencies     # rustls: ring, no defaults
+curl https://crates.io/api/v1/crates/tokio-rustls/0.26.0[/dependencies]
+# Edits: PLAN_duckle_parity.md (Phase 10e and 10f), task_tracker.md (decisions 25-35,
+#   open decision 12, status)
+```
+
+## 2026-09-23 — Phase 10e: checkpoints, and the Kafka source
+
+```powershell
+docker version --format "{{.Server.Version}}"             # 29.8.0, started by the user
+cargo test -p etl-state                                    # 48
+cargo check --workspace --all-targets                      # FAILED twice: "can't find crate" (stale .rmeta); cargo test fine
+cargo test --workspace --no-run                            # compiles
+cargo test -p etl-duckdb-engine --lib -p etl-cli -p etl-runner -p etl-state -p etl-plugin-sdk -p etl-connectors
+cargo add rskafka@0.6 -p etl-connectors
+cargo add tokio@1 -p etl-connectors --no-default-features --features rt,net,time
+cargo tree -p etl-connectors -e normal                     # no aws-lc, openssl, native-tls, cmake; one rustls, one ring
+docker pull apache/kafka:4.1.0
+./scripts/test-services.ps1                                # FAILED: -e KEY=a,b became System.Object[]; quoted, then ready
+cargo test -p etl-connectors kafka                         # 22 (5 skip) without, 22 with ETL_TEST_KAFKA
+cargo add rskafka@0.6 tokio@1 --dev -p etl-duckdb-engine
+cargo test -p etl-duckdb-engine --test verified kafka      # 3, then the failed-run test by name
+# mutation checks, each restored after: engine keeps a failed run's positions -> 1 failure;
+#   remember saves from a failed run -> 1 failure
+cargo build -p etl-cli -p etl-runner
+docker exec etl-test-kafka kafka-topics.sh --create --topic etl-sample-orders --partitions 3
+# produce from PowerShell: FAILED, a BOM on the first record; recreated the topic, produced from a file
+etl run samples\pipelines\kafka_orders.json --workspace <scratch>   # 12, 0, then 3 new, then forget and 15
+etl build samples\pipelines\kafka_orders.json -o <scratch>\kafka_orders.exe; run 3x   # 15, 0, 1
+etl state list --workspace <artifact dir>
+cargo fmt --all; cargo clippy --workspace --all-targets -- -D warnings   # one nonminimal_bool, fixed
+cargo test --workspace                                     # 859, every server up, none skipped
+npm --prefix frontend run test / typecheck / build         # 128, clean, clean
+./scripts/test-services.ps1 -Stop
+```
+
+The only network use: crates.io and Docker Hub downloads. Not committed.
+
+## 2026-09-23 — Phase 10e committed and pushed, at the user's request, without CI
+
+```powershell
+git add <10e's 41 paths>
+git -c user.name="Arun M" -c user.email=marun.mahadevu@gmail.com commit -F <message file>   # "[skip ci]" in the message
+git push origin main
+```
+
+The user asked not to run CI; `[skip ci]` in the message stops the push from starting `gate.yml`.

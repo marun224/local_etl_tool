@@ -118,8 +118,10 @@ jobs:
         run: cargo clippy ${{ matrix.scope }} --all-targets -- -D warnings
 
       # Phase 10c: PostgreSQL, MySQL and MinIO in containers, for
-      # tests/verified.rs. Linux only, because Windows runners cannot run Linux
-      # containers; on Windows those tests skip, and the lake ones still run.
+      # tests/verified.rs; since 10e, a Kafka broker too, for the Kafka
+      # connector's tests and the kafka_orders sample. Linux only, because
+      # Windows runners cannot run Linux containers; on Windows those tests
+      # skip, and the lake ones still run.
       - name: Start the servers the verification tests use
         if: matrix.os == 'ubuntu-latest'
         shell: pwsh
@@ -142,7 +144,7 @@ jobs:
         run: |
           count=$(${{ matrix.etl }} components | tail -1 | grep -oE '^[0-9]+')
           echo "components: $count"
-          test "$count" = "60"
+          test "$count" = "61"
 
       - name: The samples still print what they printed
         shell: bash

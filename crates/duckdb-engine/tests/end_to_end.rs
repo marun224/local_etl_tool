@@ -2084,7 +2084,14 @@ fn compiled_at(document: &PipelineDoc, mark: &str) -> etl_duckdb_engine::Plan {
     let mut watermarks = std::collections::BTreeMap::new();
     watermarks.insert("orders".to_string(), mark.to_string());
 
-    compile_with(document, &CompileOptions { watermarks }).expect("compiles with a watermark")
+    compile_with(
+        document,
+        &CompileOptions {
+            watermarks,
+            ..CompileOptions::default()
+        },
+    )
+    .expect("compiles with a watermark")
 }
 
 #[test]

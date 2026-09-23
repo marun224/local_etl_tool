@@ -62,6 +62,7 @@ fn the_registry_holds_exactly_these_components() {
             "src.lake.iceberg",
             "src.saas.graphql",
             "src.saas.rest",
+            "src.stream.kafka",
             "xf.aggregate",
             "xf.cast",
             "xf.dedup",

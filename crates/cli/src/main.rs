@@ -8,14 +8,15 @@
 use clap::{Args, Parser, Subcommand};
 use etl_console as console;
 use etl_duckdb_engine::{
-    compile_with, lineage, params, registry, run, CompileOptions, Contexts, EngineError, ExecError,
-    ParamWarning, Plan, Resolved, Resolver, RunOptions, RunReport, Warning,
+    compile_with, lineage, params, registry, remember, run, CompileOptions, Contexts, EngineError,
+    ExecError, ParamWarning, Plan, Resolved, Resolver, RunOptions, RunReport, Warning,
 };
 use etl_metadata::Namespace;
 use etl_metadata::PipelineDoc;
 use etl_scheduler as sched;
 use etl_secrets::SecretStore;
 use etl_state as state;
+#[cfg(test)]
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -609,7 +610,7 @@ fn command_run(
         return exit::FAILED;
     }
 
-    match save_watermarks(settings, &performed.state_key, report, json) {
+    match save_state(settings, &performed.state_key, report, json) {
         Ok(()) => exit::OK,
         Err(code) => code,
     }
@@ -918,7 +919,7 @@ impl console::Workspace for ConsoleWorkspace {
             if !report.failed() {
                 // The same rule every other path follows: state advances only
                 // on a run that fully succeeded.
-                let _ = save_watermarks(&self.settings, &performed.state_key, report, true);
+                let _ = save_state(&self.settings, &performed.state_key, report, true);
             }
         }
 
@@ -1014,9 +1015,9 @@ fn load_and_compile_quietly(pipeline: &Path, settings: &Settings) -> Result<Load
 
     let stored = store.load(&state_key).map_err(|error| error.to_string())?;
 
-    let options = CompileOptions {
-        watermarks: watermarks_for(&resolved.document, &stored),
-    };
+    // Quietly: a set-aside watermark is said by `etl run`, not on every page
+    // the console serves.
+    let options = remember::compile_options(&resolved.document, &stored).options;
 
     let plan = compile_with(&resolved.document, &options).map_err(|error| error.to_string())?;
 
@@ -1484,9 +1485,9 @@ fn run_scheduled(
 
     // Quiet: the scheduler prints one line per run, and a watermark note per
     // node would bury it.
-    if save_watermarks(&settings, &performed.state_key, report, true).is_err() {
+    if save_state(&settings, &performed.state_key, report, true).is_err() {
         // The run worked and its output is written; the state did not save.
-        // `save_watermarks` has already said so on stderr. Reported as a
+        // `save_state` has already said so on stderr. Reported as a
         // failure because the next run will now redo this window.
         return sched::Outcome::Failed;
     }
@@ -1551,29 +1552,19 @@ Resolved:"
     exit::OK
 }
 
-/// Record where each incremental source got to.
+/// Record where each incremental source got to: watermarks, and the
+/// checkpoints of native sources that keep a position (Kafka's offsets).
 ///
 /// Called only after a run that fully succeeded. It writes the whole state in
-/// one atomic replace, so a crash here leaves the previous watermarks intact
-/// rather than a mixture of old and new.
+/// one atomic replace, so a crash here leaves the previous watermarks and
+/// checkpoints intact rather than a mixture of old and new.
 ///
 /// A failure to save is a failure of the command even though the data landed:
 /// the run is not repeatable-from-here if nobody recorded where here is, and
 /// the next run would silently reload from the old mark. Saying so loudly is
 /// the only way that gets noticed.
-fn save_watermarks(
-    settings: &Settings,
-    key: &str,
-    report: &RunReport,
-    quiet: bool,
-) -> Result<(), u8> {
-    let advancing: Vec<&etl_duckdb_engine::Watermark> = report
-        .watermarks
-        .iter()
-        .filter(|watermark| watermark.value.is_some())
-        .collect();
-
-    if report.watermarks.is_empty() {
+fn save_state(settings: &Settings, key: &str, report: &RunReport, quiet: bool) -> Result<(), u8> {
+    if report.watermarks.is_empty() && report.checkpoints.is_empty() {
         return Ok(());
     }
 
@@ -1584,44 +1575,45 @@ fn save_watermarks(
         exit::FAILED
     })?;
 
-    for watermark in &advancing {
-        let value = watermark.value.as_deref().unwrap_or_default();
-        stored.advance(&watermark.node_id, &watermark.column, value);
-        if !quiet {
-            println!("  · {} watermark now {}", watermark.node_id, value);
-        }
-    }
+    // The rule itself is the engine's, shared with `etl-runner`.
+    let remembered = remember::remember(report, &mut stored);
 
-    // A source that loaded nothing keeps the mark it had; saying so is worth a
-    // line, because "nothing happened" is the normal outcome of an incremental
-    // pipeline and should not look like a broken one.
     if !quiet {
-        for watermark in report.watermarks.iter().filter(|w| w.value.is_none()) {
-            println!("  · {} had nothing new", watermark.node_id);
+        for (node, value) in &remembered.advanced {
+            println!("  · {node} watermark now {value}");
+        }
+        // A source that loaded nothing keeps the mark it had; saying so is
+        // worth a line, because "nothing happened" is the normal outcome of an
+        // incremental pipeline and should not look like a broken one.
+        for node in &remembered.nothing_new {
+            println!("  · {node} had nothing new");
+        }
+        for node in &remembered.positions {
+            println!("  · {node} position saved");
         }
     }
 
-    if advancing.is_empty() {
+    if !remembered.changed() {
         return Ok(());
     }
 
     store.save(key, &stored).map_err(|error| {
         eprintln!("error: the run succeeded but its state could not be saved: {error}");
-        eprintln!("       the next run will reload from the previous watermark");
+        eprintln!("       the next run will re-read from the previous watermark or position");
         exit::FAILED
     })
 }
 
 #[derive(Subcommand, Debug)]
 enum StateAction {
-    /// Show every watermark this workspace holds.
+    /// Show every watermark and saved position this workspace holds.
     List {
         /// Only this pipeline. Defaults to all of them.
         #[arg(long, value_name = "KEY")]
         key: Option<String>,
     },
 
-    /// Forget a watermark, so the next run reads that source from the start.
+    /// Forget a watermark or position, so the next run reads that source from the start.
     Forget {
         /// The pipeline's state key, as `state list` prints it.
         key: String,
@@ -1663,13 +1655,21 @@ fn command_state(action: StateAction, settings: &Settings) -> u8 {
                 };
 
                 println!("{key}");
-                if stored.watermarks.is_empty() {
+                if stored.is_empty() {
                     println!("  (nothing remembered)");
                 }
                 for (node, watermark) in &stored.watermarks {
                     println!(
                         "  {node}  {} = {}  (at {})",
                         watermark.column, watermark.value, watermark.at
+                    );
+                }
+                // A checkpoint is the connector's own, so it is shown as it was
+                // saved: compact JSON, which for Kafka reads as offsets.
+                for (node, checkpoint) in &stored.checkpoints {
+                    println!(
+                        "  {node}  {} position {}  (at {})",
+                        checkpoint.component, checkpoint.value, checkpoint.at
                     );
                 }
             }
@@ -1691,14 +1691,14 @@ fn command_state(action: StateAction, settings: &Settings) -> u8 {
                     if !stored.forget(&node) {
                         // Not an error: the state someone asked to clear is
                         // already clear, which is the outcome they wanted.
-                        println!("'{node}' had no watermark in '{key}'.");
+                        println!("'{node}' had no watermark or position in '{key}'.");
                         return exit::OK;
                     }
                     println!("Forgot '{node}' in '{key}'. Its next run reads from the start.");
                 }
                 None => {
-                    stored.watermarks.clear();
-                    println!("Forgot every watermark in '{key}'.");
+                    stored.forget_all();
+                    println!("Forgot every watermark and position in '{key}'.");
                 }
             }
 
@@ -2016,16 +2016,24 @@ fn command_build(
     // which is worse than refusing. Lifting this means giving the runner state.
     let incremental = incremental_nodes(&resolved.document);
 
+    // Until Phase 10e this was a refusal: an artifact had nowhere to keep a
+    // watermark and would have re-read everything on every run. It now keeps
+    // its state where it runs (Settled decision 36), which is worth saying at
+    // build time, because that directory is what has to persist between runs.
     if !incremental.is_empty() {
-        eprintln!(
-            "error: {} loads incrementally, and a standalone binary has nowhere to keep a watermark.",
+        println!(
+            "note: {} loads incrementally. The artifact keeps its watermarks in .etl/state/ \
+             under the directory it runs in (or --workspace); keep that directory between runs.",
             incremental.join(", ")
         );
-        eprintln!("       It would re-read everything on every run. Remove the incremental");
-        eprintln!(
-            "       setting, or run this pipeline with `etl run`, which has the state store."
+    }
+    let streams = stream_nodes(&resolved.document);
+    if !streams.is_empty() {
+        println!(
+            "note: {} keeps a read position. The artifact saves it in .etl/state/ under the \
+             directory it runs in (or --workspace); a run from a fresh directory starts over.",
+            streams.join(", ")
         );
-        return exit::INVALID;
     }
 
     if resolved.uses_secrets() && !allow_secrets {
@@ -2296,7 +2304,8 @@ fn gather_embedded(
             })
             .ok_or_else(|| {
                 format!(
-                    "no vendored extension directory found under: {}.                      Run scripts/fetch-duckdb-extensions.ps1.",
+                    "no vendored extension directory found under: {}. \
+                     Run scripts/fetch-duckdb-extensions.ps1.",
                     roots
                         .iter()
                         .map(|root| root.display().to_string())
@@ -2412,14 +2421,29 @@ fn with_info_suffix(path: &Path) -> PathBuf {
 
 /// The nodes in a document that ask to load incrementally.
 ///
-/// Its own function so the refusal above can be tested rather than only
-/// demonstrated: it is a safety check, and a safety check nothing exercises is
-/// one that quietly stops working.
+/// Its own function so the build note can be tested rather than only
+/// demonstrated. Until Phase 10e this list was a refusal: an artifact had
+/// nowhere to keep a watermark.
 fn incremental_nodes(document: &PipelineDoc) -> Vec<&str> {
     document
         .nodes
         .iter()
         .filter(|node| node.data.incremental.is_some())
+        .map(|node| node.id.as_str())
+        .collect()
+}
+
+/// The nodes that read a stream, and so keep a position between runs.
+fn stream_nodes(document: &PipelineDoc) -> Vec<&str> {
+    document
+        .nodes
+        .iter()
+        .filter(|node| {
+            node.data
+                .component_id
+                .as_deref()
+                .is_some_and(|id| id.starts_with("src.stream."))
+        })
         .map(|node| node.id.as_str())
         .collect()
 }
@@ -2615,9 +2639,7 @@ fn load_and_compile(pipeline: &Path, settings: &Settings) -> Result<Loaded, u8> 
         exit::INVALID
     })?;
 
-    let options = CompileOptions {
-        watermarks: watermarks_for(&resolved.document, &stored),
-    };
+    let options = compile_options_for(&resolved.document, &stored);
 
     let plan = compile_with(&resolved.document, &options).map_err(|error: EngineError| {
         eprintln!("error: {error}");
@@ -2631,34 +2653,25 @@ fn load_and_compile(pipeline: &Path, settings: &Settings) -> Result<Loaded, u8> 
     })
 }
 
-/// The stored watermarks that still apply to this document.
-///
-/// A node whose watermark column has been changed since it was recorded starts
-/// over rather than comparing the new column against the old column's value.
-/// That reloads data, which is the safe direction: the alternative is a
-/// predicate that silently means something nobody wrote.
+/// What the workspace remembers, as compile options, with any stored value
+/// that no longer fits its node said out loud. The rules are the engine's
+/// (`etl_duckdb_engine::remember`), shared with `etl-runner`, so an artifact
+/// and `etl run` cannot disagree about what applies.
+fn compile_options_for(document: &PipelineDoc, stored: &state::PipelineState) -> CompileOptions {
+    let remembering = remember::compile_options(document, stored);
+    for warning in &remembering.warnings {
+        eprintln!("warning: {warning}");
+    }
+    remembering.options
+}
+
+/// The watermarks alone, for the tests that pin how they apply.
+#[cfg(test)]
 fn watermarks_for(
     document: &PipelineDoc,
     stored: &state::PipelineState,
 ) -> BTreeMap<String, String> {
-    document
-        .nodes
-        .iter()
-        .filter_map(|node| {
-            let declared = node.data.incremental.as_ref()?;
-            let watermark = stored.watermark(&node.id)?;
-
-            if !watermark.matches_column(&declared.column) {
-                eprintln!(
-                    "warning: '{}' now watches '{}' but its watermark was taken from '{}';                      reading from the start",
-                    node.id, declared.column, watermark.column
-                );
-                return None;
-            }
-
-            Some((node.id.clone(), watermark.value.clone()))
-        })
-        .collect()
+    compile_options_for(document, stored).watermarks
 }
 
 fn report_param_warnings(warnings: &[ParamWarning]) {
@@ -2685,13 +2698,15 @@ fn report_warnings(plan: &Plan) {
             }
             Warning::Orphan { id } => format!("'{id}' is not wired to anything"),
             Warning::IncrementalIgnored { id, component_id } => format!(
-                "'{id}' asks to load incrementally, but '{component_id}' is not a source, so                  the whole of it is read"
+                "'{id}' asks to load incrementally, but '{component_id}' is not a source, so \
+                 the whole of it is read"
             ),
             Warning::UnknownProperty { id, property } => {
                 format!("'{id}' sets '{property}', which its component does not define")
             }
             Warning::UnknownMaterialize { id, value } => format!(
-                "'{id}' asks to materialize as '{value}', which this engine does not know;                  using auto"
+                "'{id}' asks to materialize as '{value}', which this engine does not know; \
+                 using auto"
             ),
             Warning::NoSink => {
                 "this pipeline has no sink, so it will read data and write nothing".to_string()

@@ -1207,8 +1207,190 @@ updated.
 - 29 connector tests and 5 end-to-end. Beyond the *Verify* list: the checks above, and the
   shared `max_pages` message pinned whole.
 
-**Later families**, planned one at a time when reached, in the plan's order: streaming as
-bounded micro-batches, NoSQL, warehouses over their own protocols, vector DBs.
+##### Phase 10e and 10f — Kafka, as bounded micro-batches
+
+**Questions answered 2026-09-23, all as recommended** (Settled decisions 25–35 in the tracker).
+One more question arose while planning; it is at the end of this section, and the plan
+assumes its recommended answer.
+
+**Why two sub-phases.** The answers fit together but are more than a day's work: the first
+native source that *remembers where it stopped*, which touches the SDK, the engine, the state
+store, the CLI and the runner, and then a Kafka connector in both directions with four ways to
+authenticate. **10e** builds the checkpoint machinery and the Kafka *source* on plaintext;
+**10f** adds the *sink*, TLS and SASL. Each ends green on its own.
+
+**The shape of a streaming read.** Kafka is not polled forever. Each run is a **bounded
+micro-batch**: when it starts, it records each partition's latest offset (the high
+watermark), reads from where the last *successful* run stopped up to those offsets or
+`max_records`, and stops. The offsets it reached are saved **only if the whole run succeeds**,
+exactly as watermarks are. `docs/connectors.md` says this in its first line: this is not
+continuous streaming, and nothing is implied to be.
+
+###### The checkpoint: how a source remembers
+
+Today a native source reads everything on every run. A **checkpoint** is a connector's own
+record of where it got to, as a JSON value the engine stores and hands back without reading.
+
+- **SDK.** `Context` gains `checkpoint: Option<JsonValue>`, the position the last successful
+  run saved for this node. `Summary` gains `checkpoint: Option<JsonValue>`, the position this
+  read reached; `None` means "leave it where it was". Existing connectors return `None`.
+- **Engine.** `CompileOptions` gains `checkpoints` (node id to JSON), which the builder puts on
+  the stage's `NativeStep`, so `compile` stays pure and the plan carries it the way it carries
+  a watermark literal. `stage_sources` passes it in and collects what comes back.
+  `RunReport` gains `checkpoints`, **dropped when the run fails**, including under
+  `continueOnFailure`, the same line watermarks follow.
+- **State store.** The state file gains a `checkpoints` map beside `watermarks`: node id to
+  `{component, value, at}`. `formatVersion` stays 1 and an old file reads as having none, so
+  nothing existing needs migrating. `etl state list` shows them; `etl state forget --node`
+  forgets either kind.
+- **CLI.** `save_watermarks` becomes `save_state` and saves both, in the one atomic write it
+  already does. The scheduler and the console already go through it.
+- **Preview** reads from the stored position and saves nothing, as it saves no watermark.
+- **Question 12 (below):** the runner inside a built artifact gets the same load and save.
+
+A checkpoint is only valid for the configuration that made it. Kafka's records its topic; a
+node whose `topic` changed starts from `start` and the report says so, the way a changed
+watermark column starts over today.
+
+###### Crates and `tokio`
+
+`rskafka` 0.6 (Settled decision 26), with its compression features (decision 31). It needs
+`tokio`, the first use of Settled decision 10's clause for a family that cannot avoid it.
+**The runtime stays inside the connector:** each `read` or `write` builds a single-threaded
+runtime, `block_on`s the work, and drops it. The SDK, the engine and every other crate stay
+blocking and never see it. TLS is `rustls` with `ring` and default features off, which is what
+`rskafka` asks for and what `ureq` already uses, so there is still one TLS stack and one
+cryptography provider (Settled decision 16). **Checked at the start of 10e with `cargo tree`:**
+no `aws-lc-rs`, no `openssl`, no system library. If that is wrong, the phase stops and asks.
+
+###### Phase 10e — checkpoints, and the Kafka source
+
+**Goal.** A pipeline reads a Kafka topic in bounded batches, picking up each run exactly where
+the last successful run stopped, from `etl run`, the scheduler and a built artifact.
+
+**Files.** `crates/plugin-sdk/src/lib.rs`; `crates/duckdb-engine/src/{native.rs, exec.rs,
+plan/mod.rs, plan/builders.rs}`; `crates/state/src/lib.rs`; `crates/cli/src/main.rs`;
+`crates/runner/src/{main.rs, lib.rs}`; `crates/connectors/src/{kafka.rs, kafka/tests.rs,
+lib.rs}`, `Cargo.toml`s; `scripts/test-services.ps1`; `.github/workflows/gate.yml`;
+`crates/duckdb-engine/tests/verified.rs`; `samples/pipelines/kafka_orders.json`;
+`docs/connectors.md`, `docs/adding_a_component.md`.
+
+**Do.**
+1. **The checkpoint machinery**, as above, with no Kafka in it yet: SDK, engine, report, state
+   store, CLI, runner. Proved by a test-only connector in the engine's tests that counts up
+   from its checkpoint: run twice and it continues; fail the run and it does not; forget it
+   and it restarts.
+2. **Dependencies:** `rskafka`, `tokio` (`rt`, `net`, `time`), and the `cargo tree` check.
+3. **`src.stream.kafka`.** Properties:
+   - `brokers` (required, `host:port`, comma-separated) and `topic` (required).
+   - `start`: `earliest` (default) or `latest`, for a partition with no checkpoint.
+   - `max_records` (default 100,000): reaching it **stops normally** and checkpoints there. The
+     report says how many were left behind, per the recorded high watermarks.
+   - `value_format`: `json` (default) makes each value's object fields into columns; `text`
+     gives a `value` column; `bytes` gives `value` as base64. Every row also has `_topic`,
+     `_partition`, `_offset`, `_timestamp` (UTC) and `_key` (text, or null).
+   - `security` (`plaintext` only in 10e; 10f adds the rest), `timeout_ms`, `columns`.
+   - **A value that is not a JSON object under `json` fails the read**, naming the partition
+     and offset, rather than being skipped. A tombstone (a null value) becomes a row with only
+     the underscore columns.
+4. **Gaps are errors.** If a checkpointed offset is older than the partition's oldest
+   surviving offset, retention deleted messages this pipeline never read. The read **fails**,
+   naming the partition and how many offsets were lost. The fix is deliberate: `etl state
+   forget` restarts the node from `start`. A new partition (the topic grew) starts from `start`
+   with a note in the report.
+5. **Test services.** An `apache/kafka` container (KRaft, one node) in
+   `scripts/test-services.ps1`, with `ETL_TEST_KAFKA` set, and in CI's Ubuntu gate. **Needs
+   Docker running on this machine**, which the user starts.
+6. **The sample**, `samples/pipelines/kafka_orders.json`: topic to filter to Parquet, run by a
+   verification test against the container.
+
+**Verify.**
+- Checkpoint machinery, with the test connector and no Kafka: continues; a failed run saves
+  nothing; `continueOnFailure` saves nothing; `forget` restarts; an old state file with no
+  `checkpoints` still loads; preview saves nothing; the runner saves and reloads beside
+  itself.
+- Unit, no broker: value formats, the underscore columns, a tombstone, a non-object refused,
+  the checkpoint's shape, a changed topic ignoring the checkpoint, the gap arithmetic.
+- Against the container (skipped without `ETL_TEST_KAFKA`): produce 25 records to 3 partitions
+  with a test helper; `max_records` 10 reads 10, then 10, then 5, then 0, each continuing
+  exactly; a failed downstream stage means the next run re-reads the same records; `latest`
+  on a first run reads nothing and checkpoints the ends; deleting records makes the next read
+  fail with the gap message; both transports; a built artifact reads, stops, and continues
+  on its second run.
+- A mutation check on "saved only after success".
+- The gate: fmt, clippy, all tests (locally with the container up, and without it, when those
+  tests skip), frontend, samples; **61 components**.
+
+**Done.** The Kafka source registered and verified against a real broker; checkpoints on every
+path that runs a pipeline; its delivery semantics in `docs/connectors.md`.
+
+**Amended 2026-09-23, on completion.** Built as designed, with these changes:
+
+- **The state rules moved into the engine**, as `etl_duckdb_engine::remember`
+  (`compile_options` and `remember`), because `etl run`, the scheduler, the console and the
+  runner all need them and copying them four times is how they would drift. The engine now
+  depends on `etl-state`.
+- **`etl build` notes instead of refusing.** Question 12's premise was wrong: the build already
+  refused incremental pipelines, so option (a) replaced a refusal rather than fixing a silent
+  re-read. The note names the nodes and says the directory the artifact runs in holds its
+  state.
+- **The "test-only connector" is injected, not registered.** `native::stage_sources_using`
+  takes the registry lookup as an argument, so a counting source in the engine's unit tests
+  proves the checkpoint's path without adding a component anyone could see.
+- **The runner check was done by hand, not in CI:** a built artifact ran 15, 0, then 1 against
+  the broker, and `etl state list` read its state. CI's artifact jobs have no broker.
+- **`rskafka`'s backoff has no deadline by default**, so the connector sets one and times out
+  every call. **Its `chrono` cannot format**, so timestamps use `etl_state::time`.
+- **Found by running the sample:** a micro-batch into an `overwrite` file sink keeps only the
+  latest batch. Documented, not changed.
+- **The frontend gained an icon** (`radio`); the canvas otherwise needed nothing.
+
+###### Phase 10f — the Kafka sink, TLS and SASL
+
+**Goal.** Write to Kafka, and reach a real hosted cluster, which always means SASL over TLS.
+
+**Do.**
+1. **`snk.stream.kafka`.** `brokers`, `topic`, the security set, `key_column` (optional),
+   `batch_size` (default 500), `compression` (`none`, `gzip`, `snappy`, `lz4`, `zstd`;
+   default `none`). Each row goes as one JSON object, the key column included. **Partition by
+   key the way Java clients do** (murmur2 of the key bytes, positive, modulo the partition
+   count), so a key lands where other producers put it; rows with no key go round-robin by
+   batch. Every produce waits for all in-sync replicas. At-least-once per batch, with the
+   delivered count in the error on a partial failure, as REST and GraphQL.
+2. **Security for both directions:** `security` = `plaintext`, `ssl`, `sasl_plaintext`,
+   `sasl_ssl`; `sasl_mechanism` = `plain`, `scram-sha-256`, `scram-sha-512`; `username`,
+   `password` (`${SECRET:...}`, masked); `ca_cert` (a PEM file, for a private CA; unset uses the
+   bundled roots). `check` refuses a combination that cannot work, such as SASL without a
+   username.
+3. **The container gains listeners** for SASL (PLAIN and SCRAM users made at start) and TLS
+   (a certificate made by the script, in a throwaway container, so the machine needs no
+   `openssl`).
+
+**Verify.** Murmur2 against Java's published values; key placement across partitions;
+round-robin without a key; compression each way (produce with each codec, read back through
+the source); a batch failing partway reports what landed; each security mode connects, and a
+wrong password fails naming the mechanism, not the password; the sample extended to write
+back to a second topic. **62 components.**
+
+**Done.** Both Kafka components, every security mode, verified against a real broker.
+
+###### Question 12 (new, raised while planning)
+
+**Should a built artifact remember state?** The runner calls `compile` with no state, so an
+artifact already re-reads every incremental source from its `start` on every run. Nothing
+documents that, and nothing has tripped on it, because no one has scheduled an incremental
+artifact yet. For Kafka it would mean re-reading the whole topic every run.
+- (a) **The runner loads and saves `.etl/state/` in its working directory** (or
+  `--workspace`), in the same format, so `etl state list` can read it. Watermarks and
+  checkpoints both. **Recommended**, and assumed above: it fixes the watermark gap too, and an
+  artifact on a server run by cron is exactly how a micro-batch reader gets deployed.
+- (b) Artifacts stay stateless, and `etl build` refuses a pipeline with an incremental or
+  checkpointing source.
+- (c) Artifacts stay stateless, documented.
+
+**Later families**, planned one at a time when reached: the other streaming brokers (NATS
+JetStream and Kinesis fit the checkpoint model; Pub/Sub and RabbitMQ acknowledge instead and
+need their own design), then NoSQL, warehouses over their own protocols, vector DBs.
 
 ### Phase 11 — AI assistant + MCP server
 
