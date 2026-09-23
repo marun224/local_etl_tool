@@ -3,7 +3,16 @@
 **State only.** Design lives in [PLAN_duckle_parity.md](PLAN_duckle_parity.md). Read this file
 first when picking the project back up.
 
-> ## ⏸ Paused 2026-09-23 by the user — **Phases 10a, 10b and 10c are done**, uncommitted, CI not yet run on any
+> ## ⏸ Paused 2026-09-23 — **Phases 10a, 10b and 10c are done, pushed, and green in CI**
+>
+> **Phase 10's CI, 2026-09-23.** Committed as `3237f6c` and pushed. The first run failed both
+> gates at the cache step, before any test ran: `actions/cache` refuses a key with a comma in
+> it, and the engine's key carried `DUCKDB_TEST_EXTENSIONS`. Fixed in `9694099` (the list is
+> hyphen-separated). [Run 35862990581](https://github.com/marun224/local_etl_tool/actions/runs/35862990581)
+> is **green on all six jobs**: Ubuntu 778 tests with PostgreSQL, MySQL and MinIO started and
+> the `ETL_TEST_*` variables set, Windows 788, both artifact jobs, `build-runner.ps1`, and
+> frontend. Resume step 1 below is done. The website's 8 questions were answered (all as
+> recommended) and its `PLAN_site_product_sync.md` waits for approval in the WebApp repo.
 >
 > **Where it stopped.** After 10c the user chose the website's site-to-product sync next, which
 > lives in the other repo (`E:\workspace_09212026\ETL_Local_WebApp`). There, the site was
@@ -153,10 +162,10 @@ first when picking the project back up.
 ## Where things stand
 
 - **Next phase:** **paused by the user on 2026-09-23.** The website's site-to-product sync
-  was chosen and has 8 questions waiting in the WebApp repo; Phase 10's later families
-  (GraphQL first) remain the alternative. First, on resume: commit and push Phase 10.
+  was chosen; its questions are answered and its plan awaits approval in the WebApp repo.
+  Phase 10's later families (GraphQL first) remain the alternative.
 - **In progress:** nothing. **Phases 0–9 and 10a–10c are done** (all of 10 on 2026-09-23;
-  local gate green, CI to follow once committed).
+  CI green on run 35862990581).
 - **Blocked on:** nothing.
 
 Phase 9 was split into 9a–9d on 2026-09-17 before starting, the same way 6 and 8 were:
@@ -615,9 +624,9 @@ fail the run. That is `ctl.fail`'s shape and it needs 6b's execution-model decis
 | 9c | — cross-building (Linux from Windows) | **done** | 2026-09-17 |
 | 9d | — the CI matrix | **done** (green on the third run) | 2026-09-23 |
 | 10 | Rust-native connectors | **in progress** (10a–10c done; later families open) | |
-| 10a | — plugin SDK, staging bridge, XML | **done** (CI to follow) | 2026-09-23 |
-| 10b | — SaaS REST, source and sink | **done** (CI to follow) | 2026-09-23 |
-| 10c | — verify Phase 4's database and lake connectors | **done** (CI to follow) | 2026-09-23 |
+| 10a | — plugin SDK, staging bridge, XML | **done** | 2026-09-23 |
+| 10b | — SaaS REST, source and sink | **done** | 2026-09-23 |
+| 10c | — verify Phase 4's database and lake connectors | **done** | 2026-09-23 |
 | 11 | AI assistant + MCP server | not started | |
 | 12 | Benchmarks + parity audit | not started | |
 
