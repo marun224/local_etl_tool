@@ -521,3 +521,36 @@ the fuller record. From Phase 10 on, a section is added at the end of each phase
   components. *Build `etl` before the frontend tests, every time.*
 - **Probing in the wrong place**: a throwaway project went into `%TEMP%` instead of the
   scratchpad. Harmless, deleted, recorded. *The scratchpad is for exactly this.*
+
+## Phase 10h — Kinesis: signing, credentials, the source (2026-09-24)
+
+**Concepts**
+- **SigV4 is a hash of a canonical request, not of the bytes sent.** Method, normalised
+  path, sorted query, lower-cased and trimmed headers, and the body's hash become one text;
+  a key derived from the secret, date, region and service signs it. Anything the server sees
+  differently from what was signed (a `Host` with `:443`, another `Content-Type`) fails.
+- **Every attempt is signed afresh**, because the date is part of the signature and a retry
+  may cross a second boundary.
+- **Shards split and merge.** A shard's records are ordered; a stream's are not. Reading a
+  child only after its parents is what keeps one partition key's records in order.
+- **Kinesis keeps records for a retention period**, and its sequence numbers leave gaps, so
+  "records were lost" can be suspected but never counted.
+- **"Nothing read" has three meanings**: caught up, not started, not reached. Only the first
+  may move a position forward.
+
+**Decisions and why**
+- **Our own signing rather than the AWS SDK**: the SDK needs a newer Rust than we declare
+  and brings its own async stack; about 300 lines plus AWS's own 38 test cases prove
+  ours.
+- **A published test suite over a hand-written one.** The vendored cases found nothing, which
+  is the point: a mutation showed they would have.
+- **Fail on possible expiry by default.** A false alarm on a quiet stream costs a command;
+  silent loss costs the data.
+
+**Mistakes worth not repeating**
+- **A test that passes once is not a passing test.** The data-loss bug hid behind which shard
+  went first. *Run new stateful tests several times, and in parallel, before believing them.*
+- **A mock keeps some of the real service's limits.** Tests that never cleaned up used up its
+  50 shards. *Delete what a test creates, in a guard that runs on failure too.*
+- **Seconds are too coarse for "from now".** *Keep time to the unit the server keeps it in.*
+- **One exception name, two meanings.** *Read the message before retrying.*

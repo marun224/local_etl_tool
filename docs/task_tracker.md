@@ -3,17 +3,25 @@
 **State only.** Design lives in [PLAN_duckle_parity.md](PLAN_duckle_parity.md). Read this file
 first when picking the project back up.
 
-> ## ✅ Phase 10g (NATS JetStream, both ways) — built 2026-09-24, green locally, **committed and pushed with 10f; first CI run pending**
+> ## ✅ Phase 10h (Kinesis: signing, credentials, the source) — built 2026-09-24, green locally, **pushed with `[skip ci]`**
 >
-> **What 10g built:** `src.stream.nats` (bounded micro-batches from a JetStream stream, an
-> ephemeral ordered consumer, a subject filter, gaps from stream limits refused with a count,
-> interior deletes tolerated) and `snk.stream.nats` (JSON to a subject, acknowledged per
-> batch, and **`msg_id_column` so JetStream drops a re-sent message**), with every sign-in:
-> user and password, token, `.creds` (operator mode) and TLS with `ca_cert`. TLS set-up moved
-> into a shared `tls.rs` and value decoding into shared helpers, Kafka's tests unchanged.
-> Five NATS containers join the test services. **64 components, 906 Rust tests** (896 on
-> Linux) with every server up, twice in a row, **131 frontend**. What it found is under *From
-> Phase 10g*.
+> **What 10h built:** `src.stream.kinesis`, through the `ureq` layer (no `tokio`): SigV4
+> signing of our own (`aws.rs`), **proved by all 38 cases of AWS's published SigV4 suite**,
+> vendored with its licence; credentials from properties, `AWS_*` variables or named
+> profiles; shard lineage followed across splits and merges; expiry refused by default with
+> `on_expired: continue`; a `kinesis-mock` container in the test services. **65 components,
+> 931 Rust tests** (921 on Linux) with every server up, twice, **134 frontend**. **Not checked
+> against real AWS** (Settled decision 56). What it found, including a data-loss bug caught by
+> a rerun, is under *From Phase 10h*.
+>
+> **CI for 10e, 10f and 10g is green.** [Run 35904782091](https://github.com/marun224/local_etl_tool/actions/runs/35904782091)
+> (`a659edc`) passed all six jobs at its first attempt: Ubuntu 896 tests with Postgres,
+> MySQL, MinIO, Kafka and the five NATS servers up and nothing skipped, Windows 906, 64
+> components on both, both artifact jobs, `build-runner.ps1` and frontend. The Windows gate
+> took 13 minutes, a cold cache.
+>
+> **10g, for the record:** NATS JetStream both ways (`src.stream.nats`, `snk.stream.nats`,
+> `msg_id_column` for duplicate-free re-runs), every sign-in method, the shared `tls.rs`.
 >
 > **10f, for the record:** `snk.stream.kafka` (Java-identical partitioning, four codecs,
 > `acks=all`), and TLS and SASL for both Kafka directions.
@@ -23,21 +31,18 @@ first when picking the project back up.
 > keep state (Settled decision 36; open question 12's premise was wrong, since `etl build`
 > already *refused* incremental pipelines), and `src.stream.kafka`.
 >
-> **State of the tree:** everything through `c291142` (10d) is committed, pushed and green in
-> CI ([run 35888523818](https://github.com/marun224/local_etl_tool/actions/runs/35888523818)).
-> **10e is `fc143d4`**, committed and pushed at the user's request **with `[skip ci]`**, so
-> CI has never run on it. **10f and 10g are one commit**, "Phase 10f and 10g: the Kafka
-> sink with TLS and SASL, and NATS JetStream", committed and pushed at the user's request on
-> 2026-09-24 (the user had staged both together, so they could not be split). That push starts
-> **the first CI run for 10e, 10f and 10g**: it pulls the Kafka and NATS images and makes
-> certificates and an NATS operator in the Ubuntu gate. Its result is not yet known.
+> **State of the tree:** everything through `a659edc` (10f and 10g, one commit, since the
+> user had staged both together; 10e is `fc143d4`) is committed, pushed and green in CI.
+> **10h is committed and pushed with `[skip ci]`** at the user's request, so CI has not run
+> on it. Its first CI run will pull the 1.6 GB `kinesis-mock` image in the
+> Ubuntu gate.
 >
-> **Next:** read the first CI run's result. Then what follows NATS,
-> decided then (Settled decision 46): Kinesis, a design for the acknowledgement-based brokers,
-> or NoSQL. Still open on the website: GraphQL, Kafka and now NATS can be marked working
+> **Next:** **10i, the Kinesis sink**, as planned. Then the acknowledgement-based brokers'
+> design or NoSQL; the user chooses. Still open on the website: GraphQL, Kafka and now NATS can be marked working
 > there, naming `the_graphql_sample_reads_two_relay_pages_filters_and_mutates_in_batches`,
 > `the_kafka_sample_carries_on_between_runs_on_the_one_script_path` and
 > `the_nats_sample_carries_on_between_runs_on_the_one_script_path` in its `CLAIMS.md`.
+> Kinesis should not be marked working there until it has been read against real AWS.
 >
 > **10d, for the record:** `src.saas.graphql` and `snk.saas.graphql`, the shared `http.rs`,
 > the `code` property kind. CI warnings seen on its run, neither failing anything: the `@v4`
@@ -69,14 +74,14 @@ first when picking the project back up.
 >
 > | Job | Checked locally by |
 > |---|---|
-> | `gate (windows)` — fmt, clippy, 906 tests (servers skip), samples | running it, repeatedly |
-> | `gate (ubuntu)` — fmt, clippy, **896 tests** with Postgres, MySQL, MinIO, Kafka (four listeners) and NATS (five servers), samples | `cargo test` in `rust:1.96-slim-bookworm` |
+> | `gate (windows)` — fmt, clippy, 931 tests (servers skip), samples | running it, repeatedly |
+> | `gate (ubuntu)` — fmt, clippy, **921 tests** with Postgres, MySQL, MinIO, Kafka (four listeners), NATS (five servers) and kinesis-mock, samples | `cargo test` in `rust:1.96-slim-bookworm` |
 > | `artifact (both)` — bake, run from elsewhere, run in a bare container | Phase 9b and 9c |
 > | `cross-build-script` — `build-runner.ps1`, ELF check, unbaked contract, no-op rerun | each assertion run by hand |
-> | `frontend` — 131 tests, typecheck, build | running it |
+> | `frontend` — 134 tests, typecheck, build | running it |
 >
 > **The Linux job excludes `apps/desktop`** (Tauri needs WebKitGTK and GTK to compile), so
-> **896 + 10 desktop = 906** is the arithmetic to check if either number moves. **CI fetches
+> **921 + 10 desktop = 931** is the arithmetic to check if either number moves. **CI fetches
 > only the extensions the tests load** (`DUCKDB_TEST_EXTENSIONS`, hyphen-separated because
 > `actions/cache` refuses a comma in a key). **CI cannot do the Windows-to-Linux cross-build**
 > (GitHub's Windows runners run no Linux containers), so it proves the output instead: a Linux
@@ -85,13 +90,13 @@ first when picking the project back up.
 > **To check everything, from the repo root:**
 >
 > ```powershell
-> ./scripts/test-services.ps1                                       # Postgres, MySQL, MinIO, Kafka, NATS in Docker
-> cargo test --workspace                                            # expect 906 passing
+> ./scripts/test-services.ps1                                       # Postgres, MySQL, MinIO, Kafka, NATS, Kinesis in Docker
+> cargo test --workspace                                            # expect 931 passing
 > ./scripts/test-services.ps1 -Stop                                 # tidy up afterwards
-> npm --prefix frontend run test                                    # expect 131 passing
+> npm --prefix frontend run test                                    # expect 134 passing
 > npm --prefix frontend run typecheck                               # expect clean
 > npm --prefix frontend run build                                   # expect clean
-> .\target\debug\etl.exe components                                 # expect 64
+> .\target\debug\etl.exe components                                 # expect 65
 > .\target\debug\etl.exe run samples\pipelines\orders_enriched.json # expect 12/5/7/6/6
 > .\target\debug\etl.exe run samples\pipelines\orders_checked.json  # expect 12/10+2/9+1/9/2/1
 > .\target\debug\etl.exe run samples\pipelines\orders_guarded.json  # expect 12 through, branch taken
@@ -114,11 +119,10 @@ first when picking the project back up.
 
 ## Where things stand
 
-- **Next phase:** what follows NATS, decided when the user chooses (Settled decision 46):
-  Kinesis, a design for the acknowledgement-based brokers (Pub/Sub, RabbitMQ), or NoSQL.
-- **In progress:** nothing. **Phases 0–9 and 10a–10g are done** (10a–10f on 2026-09-23, 10g
-  on 2026-09-24; CI green through 10d; 10e pushed with `[skip ci]`; 10f and 10g pushed
-  together, their first CI run pending).
+- **Next phase:** **10i, the Kinesis sink**, planned in
+  [PLAN_duckle_parity.md](PLAN_duckle_parity.md) under *Phase 10h and 10i*.
+- **In progress:** nothing. **Phases 0–9 and 10a–10h are done** (10a–10f on 2026-09-23,
+  10g and 10h on 2026-09-24; CI green through 10g on run 35904782091; 10h pushed with `[skip ci]`).
 - **Blocked on:** nothing.
 
 Phase 9 was split into 9a–9d on 2026-09-17 before starting, the same way 6 and 8 were:
@@ -141,7 +145,7 @@ pass), `ctl.throttle` (nothing to throttle until Phase 10 has a row cursor).
 **a scheduler that runs them**, and **a console to watch it from**. From the repo root:
 
 ```powershell
-cargo test --workspace        # 906 tests: 317 engine, 150 connectors, 113 scheduler, 65 console, 51 e2e, 50 cli, 48 state, 26 runner, 23 secrets, 17 native e2e, 16 verified, 15 metadata, 10 desktop, 5 plugin-sdk
+cargo test --workspace        # 931 tests: 317 engine, 172 connectors, 113 scheduler, 65 console, 51 e2e, 50 cli, 48 state, 26 runner, 23 secrets, 19 verified, 17 native e2e, 15 metadata, 10 desktop, 5 plugin-sdk
 .\target\debug\etl.exe run samples\pipelines\orders_enriched.json
 .\target\debug\etl.exe validate samples\pipelines\orders_enriched.json
 .\target\debug\etl.exe plan samples\pipelines\orders_enriched.json --script
@@ -193,10 +197,10 @@ exists — writing the report only if one does. `plan.needs_session()` decides t
 because they read something that never got created, and the failures. The exit code is 3 either
 way. Getting the report back is the entire point of asking a run to continue.
 
-**Sixty-four components exist.** Sources: `src.cloud.http`, `src.cloud.s3`, `src.db.mysql`,
+**Sixty-five components exist.** Sources: `src.cloud.http`, `src.cloud.s3`, `src.db.mysql`,
 `src.db.postgres`, `src.db.sqlite`, `src.file.csv`, `src.file.excel`, `src.file.json`,
 `src.file.jsonl`, `src.file.parquet`, `src.file.xml`, `src.lake.delta`, `src.lake.iceberg`,
-`src.saas.graphql`, `src.saas.rest`, `src.stream.kafka`, `src.stream.nats`. Transforms:
+`src.saas.graphql`, `src.saas.rest`, `src.stream.kafka`, `src.stream.kinesis`, `src.stream.nats`. Transforms:
 `xf.aggregate`, `xf.cast`, `xf.dedup`, `xf.derive`, `xf.distinct`, `xf.except`,
 `xf.filter`, `xf.intersect`, `xf.join`, `xf.limit`,
 `xf.pivot`, `xf.rename`, `xf.sample`, `xf.select`, `xf.sort`, `xf.sql`, `xf.union`,
@@ -208,7 +212,8 @@ partitioning rows and so have no reject port: `qa.row_count`, `qa.schema_match`.
 `ctl.branch`, `ctl.fail`, `ctl.log`, `ctl.sequence`, `ctl.wait`. Everything else in the six
 namespaces compiles to `UnsupportedComponent`, by design.
 
-**Ten of them are written in Rust, not lowered to DuckDB alone.** `src.file.xml` and
+**Eleven of them are written in Rust, not lowered to DuckDB alone** (the list below, and
+`src.stream.kinesis` from 10h). `src.file.xml` and
 `snk.file.xml` (Phase 10a), `src.saas.rest` and `snk.saas.rest` (Phase 10b),
 `src.saas.graphql` and `snk.saas.graphql` (Phase 10d), `src.stream.kafka` (10e),
 `snk.stream.kafka` (10f), and `src.stream.nats` and `snk.stream.nats` (10g) are the *native*
@@ -579,14 +584,16 @@ fail the run. That is `ctl.fail`'s shape and it needs 6b's execution-model decis
 | 9b | — the engine and its extensions inside the file | **done** | 2026-09-17 |
 | 9c | — cross-building (Linux from Windows) | **done** | 2026-09-17 |
 | 9d | — the CI matrix | **done** (green on the third run) | 2026-09-23 |
-| 10 | Rust-native connectors | **in progress** (10a–10g done; later families open) | |
+| 10 | Rust-native connectors | **in progress** (10a–10h done; 10i next) | |
 | 10a | — plugin SDK, staging bridge, XML | **done** | 2026-09-23 |
 | 10b | — SaaS REST, source and sink | **done** | 2026-09-23 |
 | 10c | — verify Phase 4's database and lake connectors | **done** | 2026-09-23 |
 | 10d | — SaaS GraphQL, source and sink | **done** (green in CI, run 35888523818) | 2026-09-23 |
 | 10e | — checkpoints, and the Kafka source | **done** (pushed with `[skip ci]`; CI not run) | 2026-09-23 |
-| 10f | — the Kafka sink, TLS and SASL | **done** (pushed with 10g; CI pending) | 2026-09-23 |
-| 10g | — NATS JetStream, source and sink | **done** (pushed with 10f; CI pending) | 2026-09-24 |
+| 10f | — the Kafka sink, TLS and SASL | **done** (green in CI, run 35904782091) | 2026-09-23 |
+| 10g | — NATS JetStream, source and sink | **done** (green in CI, run 35904782091) | 2026-09-24 |
+| 10h | — Kinesis: SigV4, AWS credentials, the source | **done** (pushed with `[skip ci]`; not checked against real AWS) | 2026-09-24 |
+| 10i | — the Kinesis sink | planned | |
 | 11 | AI assistant + MCP server | not started | |
 | 12 | Benchmarks + parity audit | not started | |
 
@@ -762,6 +769,32 @@ Decisions 37–46 are Phase 10g's (NATS JetStream), all agreed 2026-09-23 as rec
     CI's Ubuntu gate; the tests skip without them.
 46. **What follows NATS is decided when NATS is done**: Kinesis, a design for the
     acknowledgement-based brokers, or NoSQL.
+
+Decisions 47–56 are Phases 10h and 10i's (Amazon Kinesis), all agreed 2026-09-24 as
+recommended:
+
+47. **Our own SigV4 signing over `ureq`**, with `ring`'s HMAC-SHA256, proved by AWS's
+    published SigV4 test suite. No `tokio`, no new dependency, and the declared Rust stays
+    1.88. `aws-sigv4` and `aws-sdk-kinesis` declare Rust 1.94.1, and the SDK brings `tokio`.
+48. **Credentials from properties, then `AWS_*` variables, then named profiles**
+    (`~/.aws/credentials`, `~/.aws/config`). Instance roles (EC2, EKS IRSA, ECS) are a
+    follow-up, not 10h.
+49. **Kinesis is the third streaming broker**, after Kafka and NATS, and the last that fits
+    the saved-position model (decision 46's choice).
+50. **A batch reads each shard until it is caught up or `max_records`**, shards taking turns:
+    "up to now", not a snapshot at the start, and documented as such.
+51. **Shard lineage is followed**: a child is read only after its parents are finished, so a
+    partition key keeps its order across a split or a merge.
+52. **Possible expiry fails by default, with `on_expired: continue` as the deliberate way
+    out.** The count cannot be known; the message says so and names the false-alarm case.
+53. **A sink too**: `snk.stream.kinesis`, `PutRecords` in batches of up to 500, partial
+    failures retried entry by entry, at-least-once per batch.
+54. **Rows as the other brokers'** plus `_stream`, `_shard`, `_sequence` (text: 128-bit),
+    `_timestamp` and `_partition_key`.
+55. **Tested against `kinesis-mock`** in a container, locally and in CI's Ubuntu gate, with
+    AWS's SigV4 vectors as unit tests.
+56. **No check against real AWS** (question 9, answer (b)): no account is used, so Kinesis
+    stays "not yet checked against real AWS" until someone runs one.
 
 ## Open decisions
 
@@ -1407,6 +1440,32 @@ ran*. Earlier ones were resolved 2026-09-16 (Settled decisions 5–8).
   now go in files.
 - **The probe for `async-nats` went into `%TEMP%`** rather than the session scratchpad, while
   planning; deleted, and recorded here and in the command log.
+
+### From Phase 10h
+
+- **A data-loss bug, caught only by running a test twice.** A draft saved "read from now on"
+  for every shard a run read nothing from, meant for a `latest` first run. But a shard that
+  `max_records` stopped the run before reaching also read nothing, got "now", and **its
+  existing records were skipped** the next run. The batches test passed once and failed on
+  the rerun, depending on which shard went first. Fixed by recording how each shard was
+  opened, and pinned by a deterministic test (`ExplicitHashKey` puts records on known
+  shards) that fails when the old behaviour is put back.
+- **All 38 SigV4 cases passed at the first attempt**, so the suite was mutation-checked:
+  dropping the space-collapsing breaks `get-header-value-trim`, the one case that uses it.
+- **`kinesis-mock` and AWS differ on an unknown sequence number**: AWS answers
+  `InvalidArgumentException`, `kinesis-mock` `ResourceNotFoundException` naming the sequence.
+  Both mean "not held", and both are read that way.
+- **`LimitExceededException` means two things**: a call rate ("Rate exceeded"), which passes,
+  and an account's shard limit, which does not. Only the first is retried now; a draft
+  retried both six times.
+- **The test server keeps AWS's 50-shard account limit**, so tests that never deleted their
+  streams used it up after a few runs. Streams are now deleted when each test ends, and the
+  test server's limit is raised.
+- **A `latest` start saved to the second read records from earlier in that second.** It is
+  kept to the millisecond now.
+- **Kinesis's LocalStack is `kinesis-mock` inside**, which is why the lighter of the two was
+  used. Neither checks SigV4 signatures, so the vendored AWS suite is the signing proof, and
+  real AWS remains unchecked (Settled decision 56).
 
 ## Session log
 
@@ -2378,3 +2437,25 @@ Started by the user ("pls start 10g"), after ten questions answered all as recom
 artifact of the NATS sample read 12, then 0, then the 1 new message, and published 7 large
 orders to the second subject; `etl state list` read its position. Committed and pushed with
 10f at the user's request, as one commit because the user had staged both together.
+
+### 2026-09-24 — Phase 10h: Kinesis signing, credentials and source
+
+Started by the user ("start 10h") after ten questions answered all as recommended (Settled
+decisions 47–56), CI for 10e–10g running meanwhile and passing.
+
+- `crates/connectors/src/aws.rs` and `aws/tests.rs` — SigV4 and the credential and region
+  sources; 7 tests, one of which runs AWS's 38 SigV4 cases (`tests/fixtures/sigv4/`, from
+  `awslabs/aws-c-auth` at `c4bc791`, Apache-2.0, with its README and licence).
+- `crates/connectors/src/kinesis.rs` and `kinesis/tests.rs` — the source; 15 tests (7 need
+  `kinesis-mock`), including a real split and a real merge. Every attempt's signature is
+  recomputed from what a local server received, and throttled `400`s are told from final ones.
+- `crates/connectors/src/http.rs` — `Extra` (per-attempt headers, a content type, throttled
+  errors), `Settings::signed_post`, `base64_decode`; REST's and GraphQL's tests unchanged.
+  `ring` made a direct dependency (it already was one underneath).
+- `scripts/test-services.ps1` — `kinesis-mock` 0.4.13. `samples/pipelines/kinesis_orders.json`;
+  `verified.rs` — 3 tests; the engine takes `ureq` as a dev-dependency to set streams up.
+- `gate.yml` — 65 components. Docs: `connectors.md`, `learnings.md`, `assignments.md`
+  (A46–A48).
+
+**931 Rust tests with every server up, twice, none skipped; 134 frontend.** Committed and
+pushed at the user's request with `[skip ci]`: CI has not run on 10h.

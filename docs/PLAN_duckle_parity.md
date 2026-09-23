@@ -1514,6 +1514,132 @@ their semantics in `docs/connectors.md`.
 
 **After NATS** (decision 46): decided then, among Kinesis, a design for the
 acknowledgement-based brokers (Pub/Sub, RabbitMQ), and the plan's next family, NoSQL.
+**Chosen 2026-09-24: Kinesis.**
+
+##### Phase 10h and 10i — Amazon Kinesis Data Streams
+
+**Questions answered 2026-09-24, all as recommended** (Settled decisions 47–56). Question 9
+(a hand check against real AWS) was answered (b): no AWS account is used, so signing is
+proven by AWS's published test suite and Kinesis is recorded as **not yet checked against
+real AWS** until someone does.
+
+**Why two sub-phases.** Kinesis needs three things no connector has had: AWS request signing,
+AWS's credential sources, and shards that split and merge. **10h** builds those and the
+source; **10i** the sink. Each ends green on its own.
+
+**No new runtime, no new cryptography.** Kinesis is a JSON-over-HTTPS API, so it goes through
+the `ureq` layer REST and GraphQL use (`http.rs`): blocking, no `tokio`. Signing is
+HMAC-SHA256 from `ring`, already in the tree. The AWS crates were rejected because they
+declare Rust 1.94.1 against our 1.88 (Settled decision 17), and the SDK brings `tokio` and a
+large tree (decision 47).
+
+###### Phase 10h — signing, credentials, and the Kinesis source
+
+**Files.** `crates/connectors/src/{aws.rs, aws/tests.rs, kinesis.rs, kinesis/tests.rs, http.rs,
+lib.rs}`; `crates/connectors/tests/fixtures/sigv4/` (AWS's test vectors, with their licence
+and where they came from); `scripts/test-services.ps1`; `gate.yml`;
+`crates/duckdb-engine/tests/verified.rs`; `samples/pipelines/kinesis_orders.json`;
+`docs/connectors.md`.
+
+**Do.**
+
+1. **SigV4** (decision 47) in `aws.rs`: canonical request, string to sign, derived signing key,
+   `Authorization` header, `x-amz-date`, and `x-amz-security-token` for temporary
+   credentials. Proved against **AWS's own SigV4 test suite** (the `aws-sig-v4-test-suite`
+   vectors, Apache-2.0, copied under `tests/fixtures/sigv4/` with attribution): each case's
+   canonical request, string to sign and signature must match byte for byte. Only the cases a
+   JSON `POST` exercises matter for Kinesis, but every applicable one is run.
+2. **Credentials and region** (decision 48), in this order, the first that answers winning:
+   properties (`access_key_id`, `secret_access_key`, `session_token`, as secrets); then
+   `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`; then a named profile
+   (`profile` property, else `AWS_PROFILE`, else `default`) from `~/.aws/credentials` and
+   `~/.aws/config` (or `AWS_SHARED_CREDENTIALS_FILE`, `AWS_CONFIG_FILE`). Region: `region`,
+   else `AWS_REGION`/`AWS_DEFAULT_REGION`, else the profile's. **Instance roles (EC2, EKS
+   IRSA, ECS) are not in 10h**; a missing credential says so and names the sources it tried.
+   Credentials are read when the connector runs, never baked into an artifact unless a
+   property holds them.
+3. **The HTTP layer learns two things**: a per-request header set (the signature changes with
+   every request), and a judgement on an **error** response as well as a success, so a `400`
+   whose body says `ProvisionedThroughputExceededException` or `LimitExceededException` is
+   retried with the ordinary backoff, as 10d did for GraphQL's throttling in a `200`. REST's
+   and GraphQL's tests must pass unchanged.
+4. **`src.stream.kinesis`.** Properties: `stream` (required), the AWS set (`region`,
+   `profile`, the keys, `endpoint` for a VPC endpoint or a test server), `start`
+   (`earliest`/`latest`), `max_records` (100,000), `value_format`, `timeout_ms`,
+   `on_expired` (`fail`/`continue`), `columns`.
+   - **Shards** from `ListShards`, following `NextToken`. **Lineage** (decision 51): a shard is
+     read only after its parents (`ParentShardId`, `AdjacentParentShardId`) are finished, so a
+     partition key's records stay in order across a split or a merge. A parent that has aged
+     out of the stream's retention counts as finished. A closed shard read to its end is
+     recorded as done, and its children become readable in the same run.
+   - **A batch** (decision 50): each readable shard is read from its saved position
+     (`AFTER_SEQUENCE_NUMBER`) or from `start`, shards taking turns, until Kinesis reports it
+     caught up (`MillisBehindLatest` 0), the shard ends, or `max_records` is reached. So it is
+     "up to now", not a snapshot taken at the start; `connectors.md` says how that differs
+     from Kafka. `GetRecords` is paced to Kinesis's five calls a second per shard.
+   - **The checkpoint** is `{stream, shards: {id: {"after": seq} | {"done": true}}}`, sequence
+     numbers kept as text: they are 128-bit integers.
+   - **Expiry** (decision 52): the saved record is looked up with `AT_SEQUENCE_NUMBER`. If it
+     is no longer held, records after it **may** have expired unread; Kinesis's sequence
+     numbers leave gaps, so the count cannot be known. With `on_expired: fail` (the default)
+     the read fails, saying exactly that, and naming the fix (`etl state forget`, or
+     `on_expired: continue`) and the false-alarm case: a stream quiet for longer than its
+     retention loses nothing but still trips this.
+   - **Rows** (decision 54): the value as Kafka's (`json`/`text`/`bytes`), plus `_stream`,
+     `_shard`, `_sequence` (text), `_timestamp` (arrival, UTC, milliseconds) and
+     `_partition_key`. `Data` arrives base64-encoded; a decoder sits beside the encoder in
+     `http.rs`.
+5. **Test services** (decision 55): `kinesis-mock` 0.4.13 in `scripts/test-services.ps1`, its
+   plain-HTTP port as `ETL_TEST_KINESIS`; the tests create their streams and reshard them
+   with `SplitShard`/`MergeShards` against it. It does not check signatures, so every
+   request's signature is also checked in a unit test against a recomputation, and the SigV4
+   vectors carry the real proof.
+6. **The sample**, `samples/pipelines/kinesis_orders.json`, orders to a filter to Parquet, in
+   `verified.rs` on both transports.
+
+**Verify.** SigV4 vectors, byte for byte; each credential source and its order, with
+temporary files for the profile cases; a missing credential naming what was tried; REST's and
+GraphQL's tests unchanged after the HTTP change; a throttled `400` retried and a real `400`
+not. Against the container: batches of 10/10/5/0 continuing exactly across two shards;
+`latest`; a split mid-way, the parent read to its end before its children, and a key's
+records in order across it; a merge likewise; expiry, which cannot be waited for (Kinesis keeps
+records at least 24 hours), so exercised with a checkpoint naming a sequence number the shard
+does not hold, the same thing `AT_SEQUENCE_NUMBER` sees once a record has expired: failing
+with `fail`, continuing from the oldest record with `continue`; a missing stream named. The sample through both transports and preview. The gate;
+**65 components**.
+
+**Done.** The source against a Kinesis-compatible server, signing proven by AWS's vectors,
+semantics in `connectors.md`, and "not yet checked against real AWS" recorded in the tracker.
+
+**As built (2026-09-24).** Done as planned, with these differences:
+
+- **The checkpoint has two more shard states** than planned: `{"since": ms}` (a `latest`
+  first run, read from that moment next time) and `{"start": true}` (a shard `max_records`
+  never reached, read from `start` next time). Without the second, a shard left unread got
+  "from now" and its records were skipped: a data-loss bug a rerun found.
+- **`LimitExceededException` is retried only when its message says "rate exceeded"**; the
+  same exception for an account's shard limit fails at once.
+- **"Not held"** is AWS's `InvalidArgumentException` or `kinesis-mock`'s
+  `ResourceNotFoundException` naming the sequence number; both are accepted.
+- **The signature check against a recomputation** runs against the local fixture server,
+  not the container: each attempt's `Authorization` is recomputed from the host, headers and
+  body the server received. A mutation (signing a different `Content-Type`) fails it.
+- `retries` (default 5) is a property, as the HTTP connectors have it.
+
+###### Phase 10i — the Kinesis sink
+
+**Do.** `snk.stream.kinesis` (decision 53): the AWS set, `stream`, `partition_key_column`
+(unset: keys spread evenly by row number), `batch_size` (default and maximum 500, Kinesis's
+limit per `PutRecords`; also kept under its 5 MB per call). Each row as one JSON record.
+**Partial failures**: `PutRecords` can refuse some entries of a call (usually throttling);
+those entries alone are retried with backoff, up to `retries`, and if some still fail the
+error says how many records were delivered. At-least-once per batch, as the others.
+
+**Verify.** Round trip through the source; keys landing on the shard their hash says; a
+partial failure (from `kinesis-mock`'s limits, or a deliberately oversized record) reported
+with what landed; the sample extended to write back to a second stream. **66 components.**
+
+**Done.** Both Kinesis components, verified against the container, semantics documented.
 
 **Later families**, planned one at a time when reached: the rest of the streaming brokers,
 then NoSQL, warehouses over their own protocols, vector DBs.

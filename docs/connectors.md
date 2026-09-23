@@ -475,3 +475,69 @@ so a batch costs one round trip's wait, not one per message.
   batch may have landed, as for Kafka.
 - **Like every native sink, it publishes only after a run that fully succeeded**, and never in
   `preview`.
+
+## `src.stream.kinesis`
+
+Added in Phase 10h (2026-09-24); the sink is Phase 10i. Kinesis is a JSON-over-HTTPS API, so
+it goes through the same blocking `ureq` layer as REST and GraphQL: no `tokio`.
+**Verified against `kinesis-mock` 0.4.13, not against real AWS** (Settled decision 56): no AWS
+account has been used. The request signing is this project's own and is proved by AWS's
+published SigV4 test suite (all 38 cases, byte for byte); the test server does not check
+signatures. Until someone reads a real stream with it, treat real-AWS use as unverified.
+
+### Credentials and region
+
+The first source that has them wins (Settled decision 48):
+
+1. The node's `access_key_id` and `secret_access_key` (and `session_token` for temporary
+   credentials). Put them in secrets, or better, leave them out.
+2. `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN`.
+3. A named profile (`profile`, else `AWS_PROFILE`, else `default`) in `~/.aws/credentials` or
+   `~/.aws/config`, or the files `AWS_SHARED_CREDENTIALS_FILE` and `AWS_CONFIG_FILE` name.
+
+**Not yet:** roles on EC2 (instance metadata), EKS (IRSA) and ECS, and `credential_process`
+or SSO profiles. A missing credential says which of the sources above were tried. The region
+comes from `region`, else `AWS_REGION` or `AWS_DEFAULT_REGION`, else the profile's.
+Credentials are looked up when the connector runs, so an artifact takes them from the machine
+it runs on and bakes in nothing unless a property holds them. The report says where they
+came from, never what they are. `endpoint` overrides
+`https://kinesis.<region>.amazonaws.com`, for a VPC endpoint or a test server.
+
+### Reading
+
+- **Each run reads each shard until Kinesis reports it caught up** (`MillisBehindLatest` 0),
+  or the shard ends, or `max_records` is reached, shards taking turns. So a batch is "up to
+  now" rather than, as for Kafka and NATS, "up to the end recorded when the run started":
+  Kinesis has no cheap way to ask a shard for its newest sequence number. Records arriving
+  during a run may be read by it or by the next; never twice, never skipped.
+- **Resharding keeps order.** A child shard is read only after its parents are finished, so a
+  partition key's records come out in the order they went in, across a split or a merge.
+  A parent that has aged out of the stream counts as finished.
+- **The position** is one entry per shard: the last sequence number read (as text: they are
+  128-bit), "done" for a closed shard read to its end, "start" for a shard not yet reached,
+  or, after a `latest` first run that read nothing, the time that run started, so the next
+  run reads from then. `GetRecords` is paced to Kinesis's five calls a second per shard, and
+  throttling (`ProvisionedThroughputExceededException`, a call rate exceeded) is retried
+  with backoff; a real limit, such as an account's shard limit, fails at once.
+- **Rows** are the other brokers' `value_format` (`json`, `text`, `bytes`) plus `_stream`,
+  `_shard`, `_sequence`, `_timestamp` (arrival, UTC) and `_partition_key`.
+- **Nothing is registered with Kinesis**: no consumer, no enhanced fan-out. The position lives
+  in this project's state file; `etl state forget` replays.
+
+### Expiry
+
+Kinesis keeps records for the stream's retention (24 hours by default). When a run finds the
+last record it read **no longer held**, records after it may have expired unread, and
+**Kinesis's sequence numbers leave gaps, so the count cannot be known**. With `on_expired:
+fail` (the default) the run fails, saying exactly that; nothing is read. With `on_expired:
+continue` it carries on from the oldest record held and notes that some may have been lost.
+
+One false alarm is known: a stream that received **nothing** for longer than its retention
+loses nothing, but its last record has expired all the same, so the default still fails. A
+pipeline that runs less often than the retention period, on a quiet stream, is the case for
+`continue`.
+
+### Delivery
+
+At-least-once into the pipeline, as for Kafka and NATS: the position is saved only after a
+fully successful run, so a failed run reads the same records again.

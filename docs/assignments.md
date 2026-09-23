@@ -352,3 +352,28 @@ Copy-Item samples\pipelines\orders_enriched.json samples\out\scratch\
   succeeded; today `read` returns before DuckDB starts. What would the SDK need?
   *Check:* a written answer to "what does the engine have to call, and when", compared with
   Settled decision 38.
+
+## Phase 10h — Kinesis
+
+- [ ] **A46. Sign one request by hand.**
+  *Do:* take `get-vanilla` from `crates/connectors/tests/fixtures/sigv4/`, and with nothing
+  but `openssl dgst -sha256 -hmac` (or Python's `hmac`) derive the signing key and compute
+  the signature.
+  *Check:* your signature equals `header-signature.txt`. Then change one header's value by a
+  space in the middle and explain why the signature changes, but not when the space is at
+  the end.
+
+- [ ] **A47. A split, watched.**
+  *Do:* with the services up, create a one-shard stream, put ten records with one partition
+  key, run `samples/pipelines/kinesis_orders.json` against it, split the shard, put ten more,
+  run again.
+  *Check:* `etl state list` shows the parent `done` and two children; the second run's
+  records are in order. What would have happened if the children had been read first?
+
+- [ ] **A48. 🦀 Instance credentials.**
+  *Do:* sketch how `aws::credentials` would add EC2's instance metadata service (IMDSv2: a
+  `PUT` for a token, then a `GET` for the role's credentials) as the last source.
+  *Hint:* those credentials expire; where would a refresh go, given `Api` holds one
+  `Credentials` for the whole run?
+  *Check:* a written answer naming the two requests, their headers, and what a local run
+  (no instance) must do quickly rather than wait for a timeout.

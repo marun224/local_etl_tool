@@ -1,8 +1,8 @@
 <#
 .SYNOPSIS
     Start the servers the verification tests run against: PostgreSQL, MySQL
-    and MinIO (S3) from Phase 10c, Kafka from 10e and NATS from 10g, each in a
-    throwaway container.
+    and MinIO (S3) from Phase 10c, Kafka from 10e, NATS from 10g and a Kinesis
+    stand-in from 10h, each in a throwaway container.
 
 .DESCRIPTION
     The verification tests read these environment variables and skip each
@@ -28,6 +28,9 @@
                           operator mode for a .creds file
       ETL_TEST_NATS_CREDS_FILE
                           that .creds file, under target/test-services/
+      ETL_TEST_KINESIS    http://host:port of kinesis-mock, a Kinesis stand-in
+                          that does not check signatures (the SigV4 unit tests
+                          do); any credentials and region are accepted
 
     This script starts the containers on a private network, waits until each
     one answers, creates the bucket with MinIO's own `mc` client, and then
@@ -57,7 +60,7 @@ $kafkaSecrets = 'etl-test-kafka-secrets'
 $natsCreds = 'etl-test-nats-creds'
 $containers = @('etl-test-postgres', 'etl-test-mysql', 'etl-test-minio', 'etl-test-kafka',
     'etl-test-nats', 'etl-test-nats-users', 'etl-test-nats-token', 'etl-test-nats-tls',
-    'etl-test-nats-creds')
+    'etl-test-nats-creds', 'etl-test-kinesis')
 
 function Invoke-Docker {
     $output = & docker @args 2>&1
@@ -92,7 +95,7 @@ if ($LASTEXITCODE -ne 0) {
 Remove-Everything
 Invoke-Docker network create $network
 
-Write-Host 'Starting PostgreSQL, MySQL, MinIO, Kafka and NATS (the first run pulls the images)'
+Write-Host 'Starting PostgreSQL, MySQL, MinIO, Kafka, NATS and Kinesis (the first run pulls the images)'
 
 Invoke-Docker run -d --name etl-test-postgres --network $network -p 55432:5432 `
     -e POSTGRES_PASSWORD=etl postgres:16
@@ -170,6 +173,17 @@ Invoke-Docker run --rm --user root -v "${natsCreds}:/creds" -v "${PSScriptRoot}:
 Invoke-Docker run -d --name etl-test-nats-creds --network $network -p 54226:4222 `
     -v "${natsCreds}:/creds:ro" $nats -c /creds/server.conf -m 8222
 
+# kinesis-mock, the Kinesis implementation LocalStack itself runs inside, on
+# its own. Plain HTTP on 4568 (it serves TLS on 4567, with a certificate of its
+# own that the tests do not need). Streams are created by the tests; a
+# create, split or merge takes half a second to settle, as on AWS it takes
+# longer.
+Invoke-Docker run -d --name etl-test-kinesis --network $network -p 54568:4568 `
+    -e KINESIS_MOCK_PLAIN_PORT=4568 -e KINESIS_MOCK_TLS_PORT=4567 `
+    -e CREATE_STREAM_DURATION=200ms -e SPLIT_SHARD_DURATION=200ms `
+    -e MERGE_SHARDS_DURATION=200ms -e SHARD_LIMIT=1000 -e LOG_LEVEL=WARN `
+    ghcr.io/etspaceman/kinesis-mock:0.4.13
+
 function Wait-For([string] $what, [scriptblock] $probe, [int] $seconds = 180) {
     $deadline = (Get-Date).AddSeconds($seconds)
     while ((Get-Date) -lt $deadline) {
@@ -217,6 +231,18 @@ foreach ($name in 'etl-test-nats', 'etl-test-nats-users', 'etl-test-nats-token',
     }
 }
 
+# A request with any signature is answered; a stream list means it is up.
+Wait-For 'Kinesis' {
+    $request = @{
+        Uri = 'http://127.0.0.1:54568/'; Method = 'Post'; UseBasicParsing = $true
+        ContentType = 'application/x-amz-json-1.1'; Body = '{}'; TimeoutSec = 5
+        Headers = @{ 'X-Amz-Target' = 'Kinesis_20131202.ListStreams'
+                     'Authorization' = 'AWS4-HMAC-SHA256 Credential=test/20260101/us-east-1/kinesis/aws4_request, SignedHeaders=host, Signature=0'
+                     'X-Amz-Date' = '20260101T000000Z' }
+    }
+    try { Invoke-WebRequest @request | Out-Null; $global:LASTEXITCODE = 0 } catch { $global:LASTEXITCODE = 1 }
+}
+
 # The CA certificate, for the tests' `ca_cert`. Under target/, which git ignores.
 $caDirectory = Join-Path $PSScriptRoot '../target/test-services'
 New-Item -ItemType Directory -Force $caDirectory | Out-Null
@@ -240,6 +266,7 @@ $variables = [ordered]@{
     ETL_TEST_NATS_TLS       = 'nats://127.0.0.1:54225'
     ETL_TEST_NATS_CREDS     = 'nats://127.0.0.1:54226'
     ETL_TEST_NATS_CREDS_FILE = $natsCredsFile
+    ETL_TEST_KINESIS        = 'http://127.0.0.1:54568'
 }
 
 if ($env:GITHUB_ENV) {

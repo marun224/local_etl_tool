@@ -143,6 +143,21 @@ impl Settings {
         Self::with_method(properties, Method::Post)
     }
 
+    /// A POST to `url` with no headers or auth of its own, for a protocol whose
+    /// every request carries its own signature in [`Extra`] (AWS).
+    pub(crate) fn signed_post(url: String, timeout: Duration, retries: u32) -> Self {
+        Settings {
+            url,
+            method: Method::Post,
+            headers: Vec::new(),
+            auth: Auth::None,
+            timeout,
+            retries,
+            backoff: Duration::from_millis(200),
+            min_interval: Duration::ZERO,
+        }
+    }
+
     fn with_method(properties: &JsonValue, method: Method) -> Result<Self, ConnectorError> {
         let url = text(properties, "url")
             .ok_or_else(|| ConnectorError::property("url", "is required"))?
@@ -247,6 +262,21 @@ pub(crate) enum Judged<T> {
     Fail(ConnectorError),
 }
 
+/// What a request carries beyond the connection's settings, for a protocol
+/// that needs more than REST's and GraphQL's fixed headers. Kinesis is the
+/// first: its signature changes with every request.
+pub(crate) struct Extra<'a> {
+    /// Headers for one attempt, made just before it is sent, so a retried
+    /// request is signed afresh with the time it is actually sent.
+    pub(crate) headers: &'a dyn Fn() -> Vec<(String, String)>,
+    /// Replaces `application/json`, e.g. AWS's `application/x-amz-json-1.1`.
+    pub(crate) content_type: &'a str,
+    /// Whether an error response is really a "slow down": AWS says so with a
+    /// `400` whose body names `ProvisionedThroughputExceededException`. Such a
+    /// response is retried as a 429 is.
+    pub(crate) throttled: &'a dyn Fn(u16, &str) -> bool,
+}
+
 /// Whether a failed attempt is worth another.
 enum Attempt {
     /// A 429, a 5xx, or the network: try again, after this long if the server
@@ -296,6 +326,18 @@ impl Client {
         url: &str,
         query: &[(String, String)],
         body: Option<&[u8]>,
+        judge: impl FnMut(Reply) -> Judged<T>,
+    ) -> Result<T, ConnectorError> {
+        self.send_with(url, query, body, None, judge)
+    }
+
+    /// [`send_judged`](Self::send_judged), with [`Extra`] for the request.
+    pub(crate) fn send_with<T>(
+        &mut self,
+        url: &str,
+        query: &[(String, String)],
+        body: Option<&[u8]>,
+        extra: Option<&Extra>,
         mut judge: impl FnMut(Reply) -> Judged<T>,
     ) -> Result<T, ConnectorError> {
         let mut wait = self.settings.backoff;
@@ -304,7 +346,7 @@ impl Client {
         loop {
             self.pace();
 
-            let outcome = self.once(url, query, body).and_then(|reply| {
+            let outcome = self.once(url, query, body, extra).and_then(|reply| {
                 let after = reply.retry_after;
                 match judge(reply) {
                     Judged::Accept(value) => Ok(value),
@@ -361,8 +403,11 @@ impl Client {
         url: &str,
         query: &[(String, String)],
         body: Option<&[u8]>,
+        extra: Option<&Extra>,
     ) -> Result<Reply, Attempt> {
         let settings = &self.settings;
+        let per_request = extra.map(|extra| (extra.headers)()).unwrap_or_default();
+        let content_type = extra.map_or("application/json", |extra| extra.content_type);
 
         macro_rules! prepared {
             ($builder:expr) => {{
@@ -371,6 +416,9 @@ impl Client {
                     builder = builder.header(name.as_str(), value.as_str());
                 }
                 if let Auth::Header(name, value) = &settings.auth {
+                    builder = builder.header(name.as_str(), value.as_str());
+                }
+                for (name, value) in &per_request {
                     builder = builder.header(name.as_str(), value.as_str());
                 }
                 for (name, value) in query {
@@ -388,7 +436,7 @@ impl Client {
                     Method::Put => self.agent.put(url),
                     _ => self.agent.patch(url),
                 };
-                let builder = prepared!(builder).header("Content-Type", "application/json");
+                let builder = prepared!(builder).header("Content-Type", content_type);
                 match body {
                     Some(bytes) => builder.send(bytes),
                     None => builder.send_empty(),
@@ -434,6 +482,12 @@ impl Client {
                 reason: format!("HTTP {status} from {url}: {}", snippet(&text)),
                 after: retry_after,
             }),
+            _ if extra.is_some_and(|extra| (extra.throttled)(status, &text)) => {
+                Err(Attempt::Retry {
+                    reason: format!("throttled: HTTP {status} from {url}: {}", snippet(&text)),
+                    after: retry_after,
+                })
+            }
             _ => Err(Attempt::Fatal(ConnectorError::Data(format!(
                 "HTTP {status} from {url}: {}",
                 snippet(&text)
@@ -579,6 +633,46 @@ pub(crate) fn positive(
 /// dependency, the same call as the hex in `etl-secrets`.
 pub(crate) fn base64(input: &str) -> String {
     base64_bytes(input.as_bytes())
+}
+
+/// Standard base64 back into bytes: Kinesis delivers every record's data this
+/// way. `None` for anything that is not valid base64, padding included.
+pub(crate) fn base64_decode(text: &str) -> Option<Vec<u8>> {
+    fn value(c: u8) -> Option<u32> {
+        match c {
+            b'A'..=b'Z' => Some(u32::from(c - b'A')),
+            b'a'..=b'z' => Some(u32::from(c - b'a') + 26),
+            b'0'..=b'9' => Some(u32::from(c - b'0') + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let bytes = text.trim().as_bytes();
+    if !bytes.len().is_multiple_of(4) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
+    for (index, chunk) in bytes.chunks(4).enumerate() {
+        let last = index == bytes.len() / 4 - 1;
+        let pad = chunk.iter().rev().take_while(|&&c| c == b'=').count();
+        if pad > 2 || (pad > 0 && !last) {
+            return None;
+        }
+        let mut n = 0u32;
+        for &c in &chunk[..4 - pad] {
+            n = (n << 6) | value(c)?;
+        }
+        n <<= 6 * pad as u32;
+        out.push((n >> 16) as u8);
+        if pad < 2 {
+            out.push((n >> 8) as u8);
+        }
+        if pad < 1 {
+            out.push(n as u8);
+        }
+    }
+    Some(out)
 }
 
 /// [`base64`], for bytes that are not text: a Kafka value in `bytes` format.

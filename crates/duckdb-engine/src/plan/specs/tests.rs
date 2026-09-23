@@ -65,6 +65,7 @@ fn the_registry_holds_exactly_these_components() {
             "src.saas.graphql",
             "src.saas.rest",
             "src.stream.kafka",
+            "src.stream.kinesis",
             "src.stream.nats",
             "xf.aggregate",
             "xf.cast",

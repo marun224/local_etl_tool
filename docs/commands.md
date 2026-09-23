@@ -2061,3 +2061,56 @@ git add docs/task_tracker.md docs/commands.md
 git -c user.name="Arun M" -c user.email=marun.mahadevu@gmail.com commit -F <message file>
 git push origin main            # starts gate.yml: the first CI run for 10e, 10f and 10g
 ```
+
+## 2026-09-24 — Kinesis: research and questions (CI for a659edc running meanwhile)
+
+```powershell
+curl https://crates.io/api/v1/crates/{aws-sigv4,aws-sdk-kinesis,aws-smithy-http-client}   # MSRV 1.94.1
+docker pull ghcr.io/etspaceman/kinesis-mock:0.4.13   # 1.58 GB
+docker pull localstack/localstack:4.9                # 1.75 GB; runs kinesis-mock inside for Kinesis
+docker run etl-probe-km / etl-probe-ls; Invoke-WebRequest ... X-Amz-Target: Kinesis_20131202.ListStreams
+#   both answer {"HasMoreStreams":false,"StreamNames":[]} with no account or token, and a fake signature
+docker rm -f etl-probe-km etl-probe-ls
+```
+
+Both images stay pulled locally. No files written except this log.
+
+```text
+# Edits: PLAN (Phase 10h and 10i), tracker (decisions 47-56, status). Question 9 answered (b):
+#   no AWS account; Kinesis to be recorded "not yet checked against real AWS".
+```
+
+## 2026-09-24 — Phase 10h: Kinesis signing, credentials and source
+
+```bash
+# AWS's SigV4 suite, vendored (38 cases), from awslabs/aws-c-auth at c4bc791
+curl -sL https://api.github.com/repos/awslabs/aws-c-auth/contents/tests/aws-signing-test-suite/v4?ref=c4bc791...
+curl -sL <each case's context.json, request.txt, header-*.txt> -o crates/connectors/tests/fixtures/sigv4/<case>/...
+curl -sL https://raw.githubusercontent.com/awslabs/aws-c-auth/c4bc791.../LICENSE -o crates/connectors/tests/fixtures/sigv4/LICENSE
+```
+
+```powershell
+./scripts/test-services.ps1                 # now also etl-test-kinesis (kinesis-mock 0.4.13, port 54568)
+docker rm -f etl-test-kinesis; ./scripts/test-services.ps1   # after raising SHARD_LIMIT to 1000
+cargo test -p etl-connectors --lib aws::tests
+cargo test -p etl-connectors --lib kinesis::tests            # with ETL_TEST_KINESIS set; 5 runs, then 5 in parallel
+cargo test -p etl-duckdb-engine --test verified kinesis
+# mutation checks, each reverted: whitespace collapsing removed (aws.rs); "from now" for every
+#   unread shard (kinesis.rs); a different Content-Type signed (kinesis.rs)
+cargo fmt --all -- --check                  # failed on the two newest tests' layout
+cargo fmt --all                             # then clean
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace                      # every ETL_TEST_* set, twice: 931 and 931, none skipped
+./target/debug/etl components | tail -1     # 65 component(s)
+cargo build -p etl-cli
+cd frontend; npm test; npm run typecheck; npm run build
+./scripts/test-services.ps1 -Stop
+```
+
+## 2026-09-24 — Phase 10h committed and pushed, at the user's request, without CI
+
+```powershell
+git add -A     # 10h only: the tree held nothing else
+git -c user.name="Arun M" -c user.email=marun.mahadevu@gmail.com commit -F <message file>   # "[skip ci]"
+git push origin main
+```

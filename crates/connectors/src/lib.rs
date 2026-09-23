@@ -16,11 +16,13 @@
 use etl_plugin_sdk::Connector;
 use std::sync::OnceLock;
 
+mod aws;
 #[cfg(test)]
 mod fixture;
 pub mod graphql;
 mod http;
 pub mod kafka;
+pub mod kinesis;
 pub mod nats;
 pub mod rest;
 mod tls;
@@ -42,6 +44,7 @@ pub fn all() -> &'static [(String, Connector)] {
             Connector::Sink(&kafka::KafkaSink),
             Connector::Source(&nats::NatsSource),
             Connector::Sink(&nats::NatsSink),
+            Connector::Source(&kinesis::KinesisSource),
         ]
         .into_iter()
         .map(|connector| (connector.spec().id, connector))

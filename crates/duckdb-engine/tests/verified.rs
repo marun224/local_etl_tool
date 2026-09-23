@@ -1008,3 +1008,226 @@ fn previewing_a_nats_source_reads_and_publishes_nothing() {
         "a preview publishes nothing"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Amazon Kinesis, as bounded micro-batches (Phase 10h), against kinesis-mock
+// ---------------------------------------------------------------------------
+
+/// One Kinesis call to the test server, which accepts any signature: this is
+/// set-up for the test, and the connector's own signing is proved elsewhere.
+fn kinesis_call(endpoint: &str, target: &str, body: serde_json::Value) -> serde_json::Value {
+    let mut response = ureq::post(format!("{endpoint}/"))
+        .header("Content-Type", "application/x-amz-json-1.1")
+        .header("X-Amz-Target", format!("Kinesis_20131202.{target}"))
+        .header("X-Amz-Date", "20260101T000000Z")
+        .header(
+            "Authorization",
+            "AWS4-HMAC-SHA256 Credential=test/20260101/us-east-1/kinesis/aws4_request, \
+             SignedHeaders=host, Signature=0",
+        )
+        .send(body.to_string().as_bytes())
+        .unwrap_or_else(|error| panic!("{target}: {error}"));
+    let text = response.body_mut().read_to_string().unwrap();
+    if text.trim().is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_str(&text).unwrap()
+    }
+}
+
+/// A two-shard stream for one test, holding `orders`, deleted when dropped.
+struct KinesisStream {
+    endpoint: String,
+    name: String,
+}
+
+impl Drop for KinesisStream {
+    fn drop(&mut self) {
+        let _ = std::panic::catch_unwind(|| {
+            kinesis_call(
+                &self.endpoint,
+                "DeleteStream",
+                serde_json::json!({ "StreamName": self.name, "EnforceConsumerDeletion": true }),
+            )
+        });
+    }
+}
+
+fn kinesis_stream(endpoint: &str, test: &str, orders: &[serde_json::Value]) -> KinesisStream {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .subsec_nanos();
+    let name = format!("etl-verified-{test}-{nanos}");
+    kinesis_call(
+        endpoint,
+        "CreateStream",
+        serde_json::json!({ "StreamName": name, "ShardCount": 2 }),
+    );
+    for _ in 0..100 {
+        let summary = kinesis_call(
+            endpoint,
+            "DescribeStreamSummary",
+            serde_json::json!({ "StreamName": name }),
+        );
+        if summary["StreamDescriptionSummary"]["StreamStatus"] == "ACTIVE" {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    kinesis_put(endpoint, &name, orders);
+    KinesisStream {
+        endpoint: endpoint.to_string(),
+        name,
+    }
+}
+
+fn kinesis_put(endpoint: &str, stream: &str, orders: &[serde_json::Value]) {
+    for order in orders {
+        let data = base64_standard(order.to_string().as_bytes());
+        kinesis_call(
+            endpoint,
+            "PutRecord",
+            serde_json::json!({
+                "StreamName": stream, "Data": data,
+                "PartitionKey": order["customer_id"].as_str().unwrap_or("none"),
+            }),
+        );
+    }
+}
+
+/// Standard base64, for the test's own records.
+fn base64_standard(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        for (i, shift) in [18, 12, 6, 0].into_iter().enumerate() {
+            if i <= chunk.len() {
+                out.push(ALPHABET[(n >> shift) as usize & 63] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+fn kinesis_orders(
+    workspace: &Path,
+    endpoint: &str,
+    stream: &str,
+    checkpoints: &BTreeMap<String, serde_json::Value>,
+    policy: Option<serde_json::Value>,
+) -> etl_duckdb_engine::Plan {
+    let text = std::fs::read_to_string(repo_root().join("samples/pipelines/kinesis_orders.json"))
+        .expect("the sample is committed");
+    let mut json: serde_json::Value = serde_json::from_str(&text).unwrap();
+    if let Some(policy) = policy {
+        json["nodes"][1]["data"]["policy"] = policy;
+    }
+    let resolver = Resolver::new(workspace)
+        .bind("kinesis_endpoint", endpoint)
+        .bind("stream", stream);
+    let resolved = resolve(&document(&json.to_string()), &resolver).expect("resolves");
+    compile_with(
+        &resolved.document,
+        &CompileOptions {
+            checkpoints: checkpoints.clone(),
+            ..CompileOptions::default()
+        },
+    )
+    .expect("compiles")
+}
+
+fn the_kinesis_sample_carries_on(name: &str, policy: Option<serde_json::Value>) {
+    let Some(endpoint) = server("ETL_TEST_KINESIS") else {
+        return;
+    };
+    let Some((workspace, binary)) = workspace(name, &[]) else {
+        return;
+    };
+    let orders = sample_orders();
+    let stream = kinesis_stream(&endpoint, name, &orders[..10]);
+
+    let first = run(
+        &kinesis_orders(
+            &workspace,
+            &endpoint,
+            &stream.name,
+            &BTreeMap::new(),
+            policy.clone(),
+        ),
+        &options(&workspace),
+    )
+    .expect("runs");
+    assert_eq!(rows(&first), [Some(10), Some(5), Some(5)]);
+    assert_eq!(
+        query(
+            &binary,
+            &workspace,
+            "SELECT count(*) AS n, count(DISTINCT _shard) <= 2 AS shards, \
+             typeof(any_value(_timestamp)) AS t FROM 'samples/out/kinesis_large_orders.parquet';"
+        ),
+        r#"[{"n":5,"shards":true,"t":"TIMESTAMP"}]"#
+    );
+
+    let second = run(
+        &kinesis_orders(
+            &workspace,
+            &endpoint,
+            &stream.name,
+            &positions(&first),
+            policy.clone(),
+        ),
+        &options(&workspace),
+    )
+    .expect("runs");
+    assert_eq!(rows(&second), [Some(0), Some(0), Some(0)]);
+
+    kinesis_put(&endpoint, &stream.name, &orders[10..]);
+    let third = run(
+        &kinesis_orders(
+            &workspace,
+            &endpoint,
+            &stream.name,
+            &positions(&second),
+            policy,
+        ),
+        &options(&workspace),
+    )
+    .expect("runs");
+    assert_eq!(rows(&third)[0], Some(2));
+}
+
+#[test]
+fn the_kinesis_sample_carries_on_between_runs_on_the_one_script_path() {
+    the_kinesis_sample_carries_on("kinesis_script", None);
+}
+
+#[test]
+fn the_kinesis_sample_carries_on_between_runs_on_the_session_path() {
+    the_kinesis_sample_carries_on(
+        "kinesis_session",
+        Some(serde_json::json!({ "retryAttempts": 1 })),
+    );
+}
+
+#[test]
+fn previewing_a_kinesis_source_reads_it() {
+    let Some(endpoint) = server("ETL_TEST_KINESIS") else {
+        return;
+    };
+    let Some((workspace, _)) = workspace("kinesis_preview", &[]) else {
+        return;
+    };
+    let stream = kinesis_stream(&endpoint, "preview", &sample_orders()[..9]);
+    let plan = kinesis_orders(&workspace, &endpoint, &stream.name, &BTreeMap::new(), None);
+    let rows = preview(&plan, "read_orders", 50, &options(&workspace)).expect("previews");
+    assert_eq!(rows.rows.len(), 9);
+}

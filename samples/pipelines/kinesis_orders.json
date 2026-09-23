@@ -1,0 +1,117 @@
+{
+  "formatVersion": 1,
+  "name": "kinesis_orders",
+  "nodes": [
+    {
+      "id": "read_orders",
+      "type": "source",
+      "position": {
+        "x": 0.0,
+        "y": 0.0
+      },
+      "data": {
+        "label": "Orders stream",
+        "componentId": "src.stream.kinesis",
+        "properties": {
+          "stream": "${stream}",
+          "region": "${aws_region}",
+          "endpoint": "${kinesis_endpoint}",
+          "access_key_id": "${aws_access_key_id}",
+          "secret_access_key": "${aws_secret_access_key}",
+          "start": "earliest",
+          "max_records": 1000,
+          "columns": {
+            "order_id": "INTEGER",
+            "customer_id": "VARCHAR",
+            "order_ts": "TIMESTAMP",
+            "amount": "DECIMAL(10,2)",
+            "status": "VARCHAR",
+            "_shard": "VARCHAR",
+            "_sequence": "VARCHAR",
+            "_timestamp": "TIMESTAMP"
+          }
+        },
+        "alias": "orders"
+      }
+    },
+    {
+      "id": "large_only",
+      "type": "transform",
+      "position": {
+        "x": 280.0,
+        "y": 0.0
+      },
+      "data": {
+        "label": "Over 100",
+        "componentId": "xf.filter",
+        "properties": {
+          "predicate": "amount > 100"
+        }
+      }
+    },
+    {
+      "id": "write_large",
+      "type": "sink",
+      "position": {
+        "x": 560.0,
+        "y": 0.0
+      },
+      "data": {
+        "label": "Large orders",
+        "componentId": "snk.file.parquet",
+        "properties": {
+          "path": "${workspace}/samples/out/kinesis_large_orders.parquet",
+          "mode": "overwrite"
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "source": "read_orders",
+      "target": "large_only",
+      "sourceHandle": "main",
+      "targetHandle": "in"
+    },
+    {
+      "id": "e2",
+      "source": "large_only",
+      "target": "write_large",
+      "sourceHandle": "main",
+      "targetHandle": "in"
+    }
+  ],
+  "parameters": {
+    "stream": {
+      "type": "string",
+      "required": true,
+      "default": "etl-sample-orders",
+      "description": "The Kinesis data stream to read. Each run reads what arrived since the last successful one."
+    },
+    "aws_region": {
+      "type": "string",
+      "required": true,
+      "default": "us-east-1",
+      "description": "The AWS region."
+    },
+    "kinesis_endpoint": {
+      "type": "string",
+      "required": false,
+      "default": "http://127.0.0.1:54568",
+      "description": "The committed default is the kinesis-mock test server scripts/test-services.ps1 starts. Set it empty for real AWS."
+    },
+    "aws_access_key_id": {
+      "type": "string",
+      "required": false,
+      "default": "test",
+      "description": "Test-only: kinesis-mock accepts any key. For real AWS set this and aws_secret_access_key empty, and the environment or ~/.aws is used."
+    },
+    "aws_secret_access_key": {
+      "type": "string",
+      "required": false,
+      "default": "test",
+      "description": "Test-only, as aws_access_key_id."
+    }
+  }
+}
