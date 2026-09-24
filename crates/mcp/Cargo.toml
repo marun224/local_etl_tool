@@ -1,0 +1,18 @@
+[package]
+name = "etl-mcp"
+description = "An MCP server over a workspace: agents find components, write, check, run and build pipelines."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+rmcp = { version = "3.4", default-features = false, features = ["server", "macros", "transport-io"] }
+schemars = "1"
+serde.workspace = true
+serde_json.workspace = true
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "io-std"] }
+
+[dev-dependencies]
+rmcp = { version = "3.4", default-features = false, features = ["server", "macros", "client"] }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "io-util", "macros"] }

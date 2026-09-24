@@ -2450,3 +2450,18 @@ $env:ETL_TEST_S3='http://127.0.0.1:57901'; cargo test -p etl-duckdb-engine --tes
 ./scripts/test-services.ps1 -Stop; ./scripts/test-services.ps1   # SeaweedFS (S3) is ready
 cargo test --workspace                        # with the services' variables
 ```
+
+## 2026-09-24 — Phase 11a: the MCP server
+
+```bash
+cargo info rmcp                               # 3.4.1, Rust 1.88; server, macros, transport-io
+# rmcp's source and tests read from ~/.cargo/registry: #[tool_router], stdio(), TokioChildProcess
+cargo test -p etl-metadata schema             # 4: the pipeline JSON Schema
+cargo test -p etl-mcp                         # 9: the tools, against a fake workspace
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize",...}' ... | ./target/debug/etl mcp --workspace .
+cargo test -p etl-cli --test mcp              # 4: etl mcp as a subprocess
+./target/debug/etl build samples/pipelines/orders_checked.json --out target/test-out/checked.exe   # as before
+target/test-out/mcp_round_trip/dist/latest.exe                           # 12, 6, 6 rows
+cargo fmt --all; cargo clippy --workspace --all-targets -- -D warnings   # clean
+cargo test --workspace                        # with the services' variables
+```

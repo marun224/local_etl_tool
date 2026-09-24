@@ -16,7 +16,13 @@ etl-metadata.workspace = true
 etl-secrets.workspace = true
 etl-state.workspace = true
 etl-console.workspace = true
+etl-mcp.workspace = true
 etl-scheduler.workspace = true
 etl-runner.workspace = true
 clap.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+rmcp = { version = "3.4", default-features = false, features = ["client", "transport-child-process"] }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "process"] }

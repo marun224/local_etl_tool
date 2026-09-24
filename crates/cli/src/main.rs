@@ -116,13 +116,20 @@ impl Settings {
     /// Build the resolver: explicit bindings first, then the workspace's
     /// contexts, then whichever one is active.
     fn resolver(&self) -> Result<Resolver, u8> {
+        self.try_resolver().map_err(|message| {
+            eprintln!("error: {message}");
+            exit::USAGE
+        })
+    }
+
+    /// `resolver`, with the reason it failed returned rather than printed.
+    fn try_resolver(&self) -> Result<Resolver, String> {
         let root = self.workspace_root();
         let mut resolver = Resolver::new(&root);
 
         for binding in &self.params {
             let Some((name, value)) = binding.split_once('=') else {
-                eprintln!("error: --param expects NAME=VALUE, but got '{binding}'");
-                return Err(exit::USAGE);
+                return Err(format!("--param expects NAME=VALUE, but got '{binding}'"));
             };
 
             resolver = resolver.bind(name.trim(), value);
@@ -137,25 +144,32 @@ impl Settings {
         // `${SECRET:...}` in it must not need one to run, and a run never mints
         // a key it was not given.
         if SecretStore::has_key(&root) {
-            let store = SecretStore::open_existing(&root).map_err(|error| {
-                eprintln!("error: {error}");
-                exit::USAGE
-            })?;
+            let store = SecretStore::open_existing(&root).map_err(|error| error.to_string())?;
 
             resolver = resolver.secrets(store);
         }
 
-        let contexts = Contexts::load(&path).map_err(|error| {
-            eprintln!("error: {error}");
-            exit::USAGE
-        })?;
+        let contexts = Contexts::load(&path).map_err(|error| error.to_string())?;
 
         contexts
             .apply(resolver, self.context.as_deref())
-            .map_err(|error| {
-                eprintln!("error: {error}");
-                exit::USAGE
-            })
+            .map_err(|error| error.to_string())
+    }
+
+    /// These settings with one request's bindings on top: its parameters beat
+    /// the ones already here, and its context replaces the active one.
+    fn with(&self, bindings: &etl_mcp::Bindings) -> Settings {
+        let mut settings = self.clone();
+        settings.params.extend(
+            bindings
+                .params
+                .iter()
+                .map(|(name, value)| format!("{name}={value}")),
+        );
+        if bindings.context.is_some() {
+            settings.context = bindings.context.clone();
+        }
+        settings
     }
 }
 
@@ -380,6 +394,24 @@ enum Command {
         #[command(flatten)]
         settings: Settings,
     },
+
+    /// Serve this workspace to an agent over MCP, on stdin and stdout.
+    ///
+    /// Started by the agent, not by hand: Claude Code runs it from a
+    /// `.mcp.json` entry such as `{"command": "etl", "args": ["mcp",
+    /// "--workspace", "."]}`. Nothing listens on a port. See docs/mcp.md.
+    Mcp {
+        /// DuckDB binary to use, as `run` takes it.
+        #[arg(long, value_name = "PATH")]
+        duckdb: Option<PathBuf>,
+
+        /// Skip per-stage row counts on the runs it starts.
+        #[arg(long)]
+        no_counts: bool,
+
+        #[command(flatten)]
+        settings: Settings,
+    },
 }
 
 fn main() -> ExitCode {
@@ -450,6 +482,12 @@ fn main() -> ExitCode {
             target.as_deref(),
             &settings,
         ),
+
+        Command::Mcp {
+            duckdb,
+            no_counts,
+            settings,
+        } => command_mcp(duckdb, !no_counts, settings),
     };
 
     ExitCode::from(code)
@@ -930,6 +968,326 @@ impl console::Workspace for ConsoleWorkspace {
     }
 }
 
+// ---------------------------------------------------------------------------
+// MCP
+// ---------------------------------------------------------------------------
+
+/// `etl mcp` — serve this workspace to an agent over stdin and stdout.
+///
+/// Stdout is the protocol's from here on, so this says what it is doing on
+/// stderr and nowhere else.
+fn command_mcp(duckdb: Option<PathBuf>, counts: bool, settings: Settings) -> u8 {
+    let root = settings.workspace_root();
+    eprintln!(
+        "etl mcp: serving {} over stdin and stdout",
+        std::path::absolute(&root).unwrap_or(root).display()
+    );
+
+    let workspace = McpWorkspace {
+        console: ConsoleWorkspace {
+            settings,
+            duckdb,
+            counts,
+            running: std::sync::Mutex::new(()),
+        },
+    };
+
+    match etl_mcp::serve_stdio(workspace) {
+        Ok(()) => exit::OK,
+        Err(error) => {
+            eprintln!("error: {error}");
+            exit::USAGE
+        }
+    }
+}
+
+/// The seam `etl-mcp` is built around, as `ConsoleWorkspace` is the console's:
+/// the tools know MCP, this knows the engine. The console's listing, history
+/// and one-run-at-a-time lock are reused rather than written twice.
+struct McpWorkspace {
+    console: ConsoleWorkspace,
+}
+
+impl McpWorkspace {
+    fn settings(&self) -> &Settings {
+        &self.console.settings
+    }
+}
+
+fn mcp_json<T: serde::Serialize>(value: &T) -> Result<serde_json::Value, String> {
+    serde_json::to_value(value).map_err(|error| error.to_string())
+}
+
+impl etl_mcp::Workspace for McpWorkspace {
+    fn root(&self) -> PathBuf {
+        let root = self.settings().workspace_root();
+        std::path::absolute(&root).unwrap_or(root)
+    }
+
+    fn manifest(&self) -> serde_json::Value {
+        registry().manifest()
+    }
+
+    fn schema(&self) -> serde_json::Value {
+        etl_metadata::schema::pipeline_schema(registry().specs())
+    }
+
+    fn pipelines(&self) -> Result<serde_json::Value, String> {
+        let summaries = console::Workspace::pipelines(&self.console).map_err(|f| f.message)?;
+        mcp_json(&summaries)
+    }
+
+    fn validate(
+        &self,
+        document: &str,
+        bindings: &etl_mcp::Bindings,
+    ) -> Result<serde_json::Value, String> {
+        let invalid = |errors: Vec<String>, warnings: Vec<String>| serde_json::json!({ "valid": false, "errors": errors, "warnings": warnings });
+
+        let document = match PipelineDoc::from_json(document) {
+            Ok(document) => document,
+            Err(error) => {
+                return Ok(invalid(
+                    vec![format!("not a pipeline document: {error}")],
+                    Vec::new(),
+                ))
+            }
+        };
+        // A resolver that cannot be built is the workspace's problem, not the
+        // document's, so it is an error rather than an invalid result.
+        let resolver = self.settings().with(bindings).try_resolver()?;
+        let resolved = match params::resolve(&document, &resolver) {
+            Ok(resolved) => resolved,
+            Err(error) => return Ok(invalid(vec![error.to_string()], Vec::new())),
+        };
+
+        let mut warnings: Vec<String> = resolved.warnings.iter().map(param_warning_text).collect();
+        match compile_with(&resolved.document, &CompileOptions::default()) {
+            Err(error) => Ok(invalid(vec![resolved.redact(&error.to_string())], warnings)),
+            Ok(plan) => {
+                warnings.extend(plan.warnings.iter().map(warning_text));
+                Ok(serde_json::json!({
+                    "valid": true,
+                    "stages": plan.stages.len(),
+                    "sinks": plan.sinks().count(),
+                    "warnings": warnings
+                        .iter()
+                        .map(|warning| resolved.redact(warning))
+                        .collect::<Vec<_>>(),
+                    // A secret's entry reads [REDACTED] here, never its value.
+                    "resolved": resolved.used,
+                }))
+            }
+        }
+    }
+
+    fn plan(
+        &self,
+        pipeline: &Path,
+        bindings: &etl_mcp::Bindings,
+    ) -> Result<serde_json::Value, String> {
+        let settings = self.settings().with(bindings);
+        let Loaded { plan, resolved, .. } = load_and_compile_quietly(pipeline, &settings)?;
+
+        let stages: Vec<serde_json::Value> = plan
+            .stages
+            .iter()
+            .map(|stage| {
+                serde_json::json!({
+                    "node": stage.node_id,
+                    "label": stage.label,
+                    "component": stage.component_id,
+                    "kind": format!("{:?}", stage.kind),
+                    "sql": resolved.redact(&stage.sql),
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({
+            "stages": stages,
+            "warnings": plan.warnings.iter().map(warning_text).collect::<Vec<_>>(),
+        }))
+    }
+
+    fn lineage(
+        &self,
+        pipeline: &Path,
+        bindings: &etl_mcp::Bindings,
+    ) -> Result<serde_json::Value, String> {
+        let settings = self.settings().with(bindings);
+        let Loaded { plan, resolved, .. } = load_and_compile_quietly(pipeline, &settings)?;
+
+        // Redacted as `etl lineage --json` is: a resolved path can hold a secret.
+        let text = serde_json::to_string(&lineage(&plan)).map_err(|e| e.to_string())?;
+        serde_json::from_str(&resolved.redact(&text)).map_err(|error| error.to_string())
+    }
+
+    fn run(
+        &self,
+        pipeline: &Path,
+        bindings: &etl_mcp::Bindings,
+    ) -> Result<serde_json::Value, String> {
+        let settings = self.settings().with(bindings);
+
+        // Compiled quietly first, so a pipeline that will not start says why
+        // in the result rather than on a stderr the agent never reads.
+        load_and_compile_quietly(pipeline, &settings)?;
+
+        // One at a time, as the console does, for the same watermark reason.
+        let _one_at_a_time = self
+            .console
+            .running
+            .lock()
+            .unwrap_or_else(|held| held.into_inner());
+
+        let performed = perform(
+            pipeline,
+            self.console.duckdb.clone(),
+            self.console.counts,
+            false,
+            &settings,
+            true,
+        )
+        .map_err(|_| {
+            format!(
+                "{} could not be started: no DuckDB was found (tools/duckdb, ETL_DUCKDB_BIN or \
+                 PATH)",
+                pipeline.display()
+            )
+        })?;
+
+        if let Some(report) = &performed.report {
+            if !report.failed() {
+                // State advances only on a run that fully succeeded.
+                save_state(&settings, &performed.state_key, report, true).map_err(|_| {
+                    "the run succeeded but its watermarks were not saved".to_string()
+                })?;
+            }
+        }
+
+        let mut record = mcp_json(&performed.record)?;
+        record["outcome"] = serde_json::json!(performed.record.outcome.name());
+        Ok(record)
+    }
+
+    fn runs(&self, pipeline: Option<&str>, limit: usize) -> Result<serde_json::Value, String> {
+        let records =
+            console::Workspace::runs(&self.console, pipeline, limit).map_err(|f| f.message)?;
+        let listed: Vec<serde_json::Value> = records
+            .iter()
+            .map(|record| {
+                serde_json::json!({
+                    "id": record.id,
+                    "pipeline": record.pipeline,
+                    "outcome": record.outcome.name(),
+                    "started": record.started,
+                    "elapsedMs": record.elapsed_ms,
+                    "rowsWritten": record.rows_written(),
+                })
+            })
+            .collect();
+        Ok(serde_json::Value::Array(listed))
+    }
+
+    fn run_record(&self, id: &str) -> Result<serde_json::Value, String> {
+        let record = console::Workspace::run(&self.console, id).map_err(|f| f.message)?;
+        let mut value = mcp_json(&record)?;
+        value["outcome"] = serde_json::json!(record.outcome.name());
+        Ok(value)
+    }
+
+    fn build(
+        &self,
+        pipeline: &Path,
+        target: Option<&str>,
+        out: &Path,
+        bindings: &etl_mcp::Bindings,
+    ) -> Result<serde_json::Value, String> {
+        let settings = self.settings().with(bindings);
+
+        // An agent naming `dist/orders` should not need a second call to make
+        // `dist`; `inside` has already kept it in the workspace.
+        if let Some(parent) = out.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("{}: {error}", parent.display()))?;
+        }
+
+        // Never with the secret baked in: over MCP there is no one to read the
+        // warning `etl build --allow-secrets` exists to make someone read.
+        let built = build_artifact(
+            pipeline,
+            Some(out.to_path_buf()),
+            None,
+            false,
+            true,
+            target,
+            &settings,
+            true,
+        )
+        .map_err(|(_, message)| {
+            // The CLI's refusal names a flag this tool does not have.
+            message.replace(
+                "Pass --allow-secrets if that is what you want.",
+                "Build it with `etl build --allow-secrets` if that is what you want.",
+            )
+        })?;
+
+        Ok(serde_json::json!({
+            "built": built.destination.display().to_string(),
+            "pipeline": built.state_key,
+            "stages": built.stages,
+            "bytes": built.size,
+            "engine": built.engine,
+            "extensions": built.extensions,
+            "notes": built.notes,
+        }))
+    }
+
+    fn connections(&self) -> Result<serde_json::Value, String> {
+        let root = self.settings().workspace_root();
+        let path = self
+            .settings()
+            .contexts
+            .clone()
+            .unwrap_or_else(|| Contexts::path_in(&root));
+        let contexts = Contexts::load(&path).map_err(|error| error.to_string())?;
+
+        // Variable names, not values: the names are what a document refers to.
+        let listed: Vec<serde_json::Value> = contexts
+            .contexts
+            .iter()
+            .map(|(name, context)| {
+                serde_json::json!({
+                    "name": name,
+                    "active": contexts.active.as_deref() == Some(name.as_str()),
+                    "description": context.description,
+                    "variables": context.variables.keys().collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+
+        // Names and descriptions, as `etl secret list` prints them. There is
+        // deliberately no path from here to a value.
+        let secrets: Vec<serde_json::Value> = if SecretStore::has_key(&root) {
+            let store = SecretStore::open_existing(&root).map_err(|error| error.to_string())?;
+            store
+                .names()
+                .into_iter()
+                .map(|name| {
+                    serde_json::json!({
+                        "name": name,
+                        "description": store.description(name),
+                        "reference": format!("${{SECRET:{name}}}"),
+                    })
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        Ok(serde_json::json!({ "contexts": listed, "secrets": secrets }))
+    }
+}
+
 /// Every pipeline document under a directory, at most a few levels down.
 ///
 /// Bounded rather than unbounded: a workspace is a folder somebody keeps
@@ -991,9 +1349,11 @@ fn collect_pipelines(
 }
 
 fn read_document(path: &Path) -> Result<PipelineDoc, String> {
-    let text = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
+    let text = std::fs::read_to_string(path)
+        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
 
-    PipelineDoc::from_json(&text).map_err(|error| error.to_string())
+    PipelineDoc::from_json(&text)
+        .map_err(|error| format!("{} is not a valid pipeline: {error}", path.display()))
 }
 
 /// `load_and_compile`, with the message returned rather than printed.
@@ -1004,9 +1364,7 @@ fn read_document(path: &Path) -> Result<PipelineDoc, String> {
 fn load_and_compile_quietly(pipeline: &Path, settings: &Settings) -> Result<Loaded, String> {
     let document = read_document(pipeline)?;
 
-    let resolver = settings
-        .resolver()
-        .map_err(|_| "the workspace's contexts or secrets could not be read".to_string())?;
+    let resolver = settings.try_resolver()?;
 
     let resolved = params::resolve(&document, &resolver).map_err(|error| error.to_string())?;
 
@@ -1019,7 +1377,8 @@ fn load_and_compile_quietly(pipeline: &Path, settings: &Settings) -> Result<Load
     // the console serves.
     let options = remember::compile_options(&resolved.document, &stored).options;
 
-    let plan = compile_with(&resolved.document, &options).map_err(|error| error.to_string())?;
+    let plan = compile_with(&resolved.document, &options)
+        .map_err(|error| resolved.redact(&error.to_string()))?;
 
     Ok(Loaded {
         plan,
@@ -1983,6 +2342,86 @@ fn command_build(
     target: Option<&str>,
     settings: &Settings,
 ) -> u8 {
+    let built = match build_artifact(
+        pipeline,
+        out,
+        runner,
+        allow_secrets,
+        embed,
+        target,
+        settings,
+        false,
+    ) {
+        Ok(built) => built,
+        Err((code, _)) => return code,
+    };
+
+    println!("Built {}", built.destination.display());
+    println!("  pipeline   {}", built.state_key);
+    println!("  stages     {}", built.stages);
+    println!("  size       {:.1} MB", built.size as f64 / 1_048_576.0);
+
+    if built.carries_secrets {
+        println!();
+        println!("This file has a secret baked into it. Treat it as a credential.");
+    }
+
+    match &built.engine {
+        None => {
+            // Said plainly rather than left to be discovered.
+            println!();
+            println!("No engine is embedded, so this needs a DuckDB where it runs.");
+        }
+        Some(engine) => {
+            println!("  engine     {engine}");
+            if built.extensions.is_empty() {
+                println!("  extensions none needed");
+            } else {
+                println!("  extensions {}", built.extensions.join(", "));
+            }
+        }
+    }
+
+    exit::OK
+}
+
+/// What `build_artifact` made.
+struct Built {
+    destination: PathBuf,
+    state_key: String,
+    stages: usize,
+    size: u64,
+    carries_secrets: bool,
+    /// `DuckDB <version> (<platform>)` when one is embedded.
+    engine: Option<String>,
+    extensions: Vec<String>,
+    /// What the artifact's owner has to know: where it keeps its state.
+    notes: Vec<String>,
+}
+
+/// Bake a pipeline into an executable: `etl build`'s work, and MCP's.
+///
+/// Loud for `etl build`, which prints warnings, notes and refusals as it goes;
+/// quiet for MCP, whose stdout is the protocol's. Either way an `Err` carries
+/// the exit code and the whole message.
+#[allow(clippy::too_many_arguments)]
+fn build_artifact(
+    pipeline: &Path,
+    out: Option<PathBuf>,
+    runner: Option<PathBuf>,
+    allow_secrets: bool,
+    embed: bool,
+    target: Option<&str>,
+    settings: &Settings,
+    quiet: bool,
+) -> Result<Built, (u8, String)> {
+    let refuse = |code: u8, message: String| {
+        if !quiet {
+            eprintln!("error: {message}");
+        }
+        (code, message)
+    };
+
     let target = match target {
         Some(named) => Target::named(named),
         None => Target::host(),
@@ -2001,12 +2440,14 @@ fn command_build(
         plan,
         resolved,
         state_key,
-    } = match load_and_compile_deferring_built_ins(pipeline, settings) {
-        Ok(loaded) => loaded,
-        Err(code) => return code,
-    };
+    } = load_and_compile_deferring_built_ins(pipeline, settings, quiet)
+        .map_err(|(code, message)| refuse(code, message))?;
 
-    report_warnings(&plan);
+    if !quiet {
+        report_warnings(&plan);
+    }
+
+    let mut notes = Vec::new();
 
     // An incremental source needs somewhere to keep its high-water mark, and
     // the runner has no state store. Shipping one anyway would produce a
@@ -2019,55 +2460,68 @@ fn command_build(
     // its state where it runs (Settled decision 36), which is worth saying at
     // build time, because that directory is what has to persist between runs.
     if !incremental.is_empty() {
-        println!(
-            "note: {} loads incrementally. The artifact keeps its watermarks in .etl/state/ \
+        notes.push(format!(
+            "{} loads incrementally. The artifact keeps its watermarks in .etl/state/ \
              under the directory it runs in (or --workspace); keep that directory between runs.",
             incremental.join(", ")
-        );
+        ));
     }
     let streams = stream_nodes(&resolved.document);
     if !streams.is_empty() {
-        println!(
-            "note: {} keeps a read position. The artifact saves it in .etl/state/ under the \
+        notes.push(format!(
+            "{} keeps a read position. The artifact saves it in .etl/state/ under the \
              directory it runs in (or --workspace); a run from a fresh directory starts over.",
             streams.join(", ")
-        );
+        ));
+    }
+    if !quiet {
+        for note in &notes {
+            println!("note: {note}");
+        }
     }
 
     if resolved.uses_secrets() && !allow_secrets {
-        eprintln!("error: this pipeline resolves a secret, and baking it would write that");
-        eprintln!("       secret's plaintext into the output file. Anyone holding the file");
-        eprintln!("       holds the credential.");
-        eprintln!("       Pass --allow-secrets if that is what you want.");
-        return exit::USAGE;
+        return Err(refuse(
+            exit::USAGE,
+            "this pipeline resolves a secret, and baking it would write that\n       \
+             secret's plaintext into the output file. Anyone holding the file\n       \
+             holds the credential.\n       \
+             Pass --allow-secrets if that is what you want."
+                .to_string(),
+        ));
     }
 
     let runner = match runner {
         Some(explicit) if explicit.is_file() => explicit,
         Some(explicit) => {
-            eprintln!("error: no runner at {}", explicit.display());
-            return exit::USAGE;
+            return Err(refuse(
+                exit::USAGE,
+                format!("no runner at {}", explicit.display()),
+            ))
         }
         None => match locate_runner(&target, settings) {
             Some(found) => found,
             None if target.is_host => {
-                eprintln!("error: no `etl-runner` found beside this executable.");
-                eprintln!("       Build it with `cargo build -p etl-runner`, or name one");
-                eprintln!("       with --runner.");
-                return exit::USAGE;
+                return Err(refuse(
+                    exit::USAGE,
+                    "no `etl-runner` found beside this executable.\n       \
+                     Build it with `cargo build -p etl-runner`, or name one\n       \
+                     with --runner."
+                        .to_string(),
+                ))
             }
             None => {
-                eprintln!(
-                    "error: no runner vendored for {}. Expected one at {}.",
-                    target.platform,
-                    target.runner_path(&toolchain_roots(settings)[0]).display()
-                );
-                eprintln!("       Build it with:");
-                eprintln!(
-                    "         .\\scripts\\build-runner.ps1 -Platform {}",
-                    target.platform
-                );
-                return exit::USAGE;
+                return Err(refuse(
+                    exit::USAGE,
+                    format!(
+                        "no runner vendored for {}. Expected one at {}.\n       \
+                         Build it with:\n         \
+                         .\\scripts\\build-runner.ps1 -Platform {}",
+                        target.platform,
+                        target.runner_path(&toolchain_roots(settings)[0]).display(),
+                        target.platform
+                    ),
+                ))
             }
         },
     };
@@ -2095,67 +2549,49 @@ fn command_build(
     // not all nine, which would be 284 MB of which most is never loaded. The
     // registry already knows the answer; `Plan::extensions` is it.
     let blobs = if embed {
-        match gather_embedded(&plan, settings, &target, &mut payload) {
-            Ok(blobs) => blobs,
-            Err(message) => {
-                eprintln!("error: {message}");
-                return exit::USAGE;
-            }
-        }
+        gather_embedded(&plan, settings, &target, &mut payload)
+            .map_err(|message| refuse(exit::USAGE, message))?
     } else {
         Vec::new()
     };
 
-    if let Err(error) = payload.write_built(&runner, &destination, &blobs) {
-        eprintln!("error: {error}");
-        return exit::USAGE;
-    }
+    payload
+        .write_built(&runner, &destination, &blobs)
+        .map_err(|error| refuse(exit::USAGE, error.to_string()))?;
 
     let size = std::fs::metadata(&destination)
         .map(|meta| meta.len())
         .unwrap_or(0);
 
-    println!("Built {}", destination.display());
-    println!("  pipeline   {state_key}");
-    println!("  stages     {}", plan.stages.len());
-    println!("  size       {:.1} MB", size as f64 / 1_048_576.0);
-
-    if payload.carries_secrets {
-        println!();
-        println!("This file has a secret baked into it. Treat it as a credential.");
-    }
-
-    if payload.files.is_empty() {
-        // Said plainly rather than left to be discovered.
-        println!();
-        println!("No engine is embedded, so this needs a DuckDB where it runs.");
-    } else {
-        println!(
-            "  engine     DuckDB {}{}",
+    let engine = (!payload.files.is_empty()).then(|| {
+        format!(
+            "DuckDB {}{}",
             payload.duckdb_version,
             if payload.platform.is_empty() {
                 String::new()
             } else {
                 format!(" ({})", payload.platform)
             }
-        );
+        )
+    });
+    let extensions = payload
+        .files
+        .iter()
+        .filter(|file| file.role == etl_runner::Role::Extension)
+        .filter(|file| file.name.ends_with(".duckdb_extension"))
+        .map(|file| file.name.trim_end_matches(".duckdb_extension").to_string())
+        .collect();
 
-        let extensions: Vec<&str> = payload
-            .files
-            .iter()
-            .filter(|file| file.role == etl_runner::Role::Extension)
-            .filter(|file| file.name.ends_with(".duckdb_extension"))
-            .map(|file| file.name.trim_end_matches(".duckdb_extension"))
-            .collect();
-
-        if extensions.is_empty() {
-            println!("  extensions none needed");
-        } else {
-            println!("  extensions {}", extensions.join(", "));
-        }
-    }
-
-    exit::OK
+    Ok(Built {
+        destination,
+        state_key,
+        stages: plan.stages.len(),
+        size,
+        carries_secrets: payload.carries_secrets,
+        engine,
+        extensions,
+        notes,
+    })
 }
 
 /// `load_and_compile`, with `${workspace}` and `${date}` left in the document.
@@ -2167,37 +2603,38 @@ fn command_build(
 fn load_and_compile_deferring_built_ins(
     pipeline: &Path,
     settings: &Settings,
-) -> Result<Loaded, u8> {
+    quiet: bool,
+) -> Result<Loaded, (u8, String)> {
     let text = std::fs::read_to_string(pipeline).map_err(|error| {
-        eprintln!("error: cannot read {}: {error}", pipeline.display());
-        exit::USAGE
+        (
+            exit::USAGE,
+            format!("cannot read {}: {error}", pipeline.display()),
+        )
     })?;
 
     let document = PipelineDoc::from_json(&text).map_err(|error| {
-        eprintln!(
-            "error: {} is not a valid pipeline: {error}",
-            pipeline.display()
-        );
-        exit::USAGE
+        (
+            exit::USAGE,
+            format!("{} is not a valid pipeline: {error}", pipeline.display()),
+        )
     })?;
 
-    let resolver = settings.resolver()?.defer_built_ins();
+    let resolver = settings
+        .try_resolver()
+        .map_err(|message| (exit::USAGE, message))?
+        .defer_built_ins();
 
-    let resolved = params::resolve(&document, &resolver).map_err(|error| {
-        eprintln!("error: {error}");
-        exit::INVALID
-    })?;
+    let resolved = params::resolve(&document, &resolver)
+        .map_err(|error| (exit::INVALID, error.to_string()))?;
 
-    report_param_warnings(&resolved.warnings);
+    if !quiet {
+        report_param_warnings(&resolved.warnings);
+    }
 
     let state_key = state::key_for(resolved.document.name.as_deref(), pipeline);
 
-    let plan = compile_with(&resolved.document, &CompileOptions::default()).map_err(
-        |error: EngineError| {
-            eprintln!("error: {error}");
-            exit::INVALID
-        },
-    )?;
+    let plan = compile_with(&resolved.document, &CompileOptions::default())
+        .map_err(|error: EngineError| (exit::INVALID, resolved.redact(&error.to_string())))?;
 
     Ok(Loaded {
         plan,
@@ -2686,44 +3123,49 @@ fn watermarks_for(
 
 fn report_param_warnings(warnings: &[ParamWarning]) {
     for warning in warnings {
-        let text = match warning {
-            ParamWarning::Undeclared { name } => {
-                format!("'{name}' was supplied but this pipeline declares no such parameter")
-            }
-            ParamWarning::ShadowsBuiltIn { name } => {
-                format!("'{name}' hides the built-in of the same name")
-            }
-        };
+        eprintln!("warning: {}", param_warning_text(warning));
+    }
+}
 
-        eprintln!("warning: {text}");
+fn param_warning_text(warning: &ParamWarning) -> String {
+    match warning {
+        ParamWarning::Undeclared { name } => {
+            format!("'{name}' was supplied but this pipeline declares no such parameter")
+        }
+        ParamWarning::ShadowsBuiltIn { name } => {
+            format!("'{name}' hides the built-in of the same name")
+        }
     }
 }
 
 fn report_warnings(plan: &Plan) {
     for warning in &plan.warnings {
-        let text = match warning {
-            Warning::DisabledSkipped { id } => format!("'{id}' is switched off and was skipped"),
-            Warning::DroppedDownstreamOfDisabled { id, disabled } => {
-                format!("'{id}' was dropped because '{disabled}' is switched off")
-            }
-            Warning::Orphan { id } => format!("'{id}' is not wired to anything"),
-            Warning::IncrementalIgnored { id, component_id } => format!(
-                "'{id}' asks to load incrementally, but '{component_id}' is not a source, so \
-                 the whole of it is read"
-            ),
-            Warning::UnknownProperty { id, property } => {
-                format!("'{id}' sets '{property}', which its component does not define")
-            }
-            Warning::UnknownMaterialize { id, value } => format!(
-                "'{id}' asks to materialize as '{value}', which this engine does not know; \
-                 using auto"
-            ),
-            Warning::NoSink => {
-                "this pipeline has no sink, so it will read data and write nothing".to_string()
-            }
-        };
+        eprintln!("warning: {}", warning_text(warning));
+    }
+}
 
-        eprintln!("warning: {text}");
+/// How a compiler warning reads, on stderr or in an MCP result.
+fn warning_text(warning: &Warning) -> String {
+    match warning {
+        Warning::DisabledSkipped { id } => format!("'{id}' is switched off and was skipped"),
+        Warning::DroppedDownstreamOfDisabled { id, disabled } => {
+            format!("'{id}' was dropped because '{disabled}' is switched off")
+        }
+        Warning::Orphan { id } => format!("'{id}' is not wired to anything"),
+        Warning::IncrementalIgnored { id, component_id } => format!(
+            "'{id}' asks to load incrementally, but '{component_id}' is not a source, so \
+                 the whole of it is read"
+        ),
+        Warning::UnknownProperty { id, property } => {
+            format!("'{id}' sets '{property}', which its component does not define")
+        }
+        Warning::UnknownMaterialize { id, value } => format!(
+            "'{id}' asks to materialize as '{value}', which this engine does not know; \
+                 using auto"
+        ),
+        Warning::NoSink => {
+            "this pipeline has no sink, so it will read data and write nothing".to_string()
+        }
     }
 }
 

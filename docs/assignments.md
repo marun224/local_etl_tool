@@ -524,3 +524,18 @@ Copy-Item samples\pipelines\orders_enriched.json samples\out\scratch\
   `samples/pipelines/sqlserver_orders.json`'s parameters, and run it twice.
   *Check:* the second run reads nothing new and the merge adds no row twice; a `datetime2`
   column written as text arrives exact. This is the check the project still owes.
+
+## Phase 11a — the MCP server
+
+- [ ] **A68. Let Claude Code drive it.**
+  *Do:* add the `.mcp.json` from `docs/mcp.md` to a scratch workspace holding
+  `samples/data/orders.csv`, start Claude Code there, and ask it to "read data/orders.csv,
+  keep the latest order per customer, write Parquet, and run it".
+  *Check:* it calls `get_component` or `get_schema`, then `create_pipeline` and
+  `run_pipeline`; `etl runs list` shows the run. This is the check 11a leaves to you.
+
+- [ ] **A69. 🦀 Try to leak a secret.**
+  *Do:* in `crates/cli/tests/mcp.rs`, add a tool call to the secrets test that you think
+  might return the value (an error message, a lineage path).
+  *Check:* the test still passes, and you can name the line in `main.rs` that masks what you
+  tried.

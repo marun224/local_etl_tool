@@ -18,6 +18,7 @@
 //!   at most of them reads as covered while leaving a hole.
 
 pub mod component;
+pub mod schema;
 
 pub use component::{
     ComponentSpec, ControlKind, Namespace, PortSpec, PropertySpec, PropertyType, MAIN_PORT,

@@ -3,6 +3,17 @@
 **State only.** Design lives in [PLAN_duckle_parity.md](PLAN_duckle_parity.md). Read this file
 first when picking the project back up.
 
+> ## ✅ Phase 11a (the MCP server) — built 2026-09-24, green locally
+>
+> **What 11a built:** `etl mcp`, an MCP server on stdin and stdout (`crates/mcp`, `rmcp`
+> 3.4), with thirteen tools: components, schema, pipelines, validate, create, plan, lineage,
+> run, runs, run log, build, connections. Paths stay in the workspace; secrets leave by name
+> only, and a pipeline using one is not built over MCP. A JSON Schema of pipeline documents
+> generated from the registry (`etl_metadata::schema`), for 11b too. `docs/mcp.md`.
+> **1134 Rust tests** (17 new; 1124 on Linux) with every server up, twice, none skipped; fmt
+> and clippy clean. Claude Code itself driving a run is
+> the check left for the user (see the log entry).
+
 > ## ✅ Phase 10u (SQL Server) — built 2026-09-24, green locally, against a fixture only
 >
 > **What 10u built:** `src.db.sqlserver` and `snk.db.sqlserver` over TDS through `tiberius`
@@ -86,7 +97,9 @@ first when picking the project back up.
 >
 > **Working notes for whoever resumes** (learned this session): Windows reserves ports
 > 55621–56220 here, and 58921–59020 since the machine restarted (so MinIO moved to 57900), so
-> new services use 57xxx or 58xxx below 58921; `at` is a reserved word in DuckDB's and
+> new services use 57xxx or 58xxx below 58921; **after the machine sleeps, restart
+> `etl-test-kinesis`**: kinesis-mock keeps the clock offset it started with (2.4 s ahead,
+> seen 2026-09-24), which fails the `latest` test until it restarts; `at` is a reserved word in DuckDB's and
 > the BigQuery emulator's SQL; PowerShell 5.1 mangles nested double quotes passed to native
 > programs; shell heredocs and Python strings through the Bash tool can corrupt backslashes,
 > so edits with backslashes go through the editor or a script file.
@@ -276,14 +289,14 @@ first when picking the project back up.
 >
 > | Job | Checked locally by |
 > |---|---|
-> | `gate (windows)` — fmt, clippy, 1117 tests (servers skip), samples | running it, repeatedly |
-> | `gate (ubuntu)` — fmt, clippy, **1107 tests** with Postgres, MySQL, MariaDB, ClickHouse, SeaweedFS (S3), Kafka (four listeners), NATS (five servers), kinesis-mock, ElasticMQ, the Pub/Sub emulator, RabbitMQ, MongoDB and the BigQuery emulator, samples | `cargo test` in `rust:1.96-slim-bookworm` |
+> | `gate (windows)` — fmt, clippy, 1134 tests (servers skip), samples | running it, repeatedly |
+> | `gate (ubuntu)` — fmt, clippy, **1124 tests** with Postgres, MySQL, MariaDB, ClickHouse, SeaweedFS (S3), Kafka (four listeners), NATS (five servers), kinesis-mock, ElasticMQ, the Pub/Sub emulator, RabbitMQ, MongoDB and the BigQuery emulator, samples | `cargo test` in `rust:1.96-slim-bookworm` |
 > | `artifact (both)` — bake, run from elsewhere, run in a bare container | Phase 9b and 9c |
 > | `cross-build-script` — `build-runner.ps1`, ELF check, unbaked contract, no-op rerun | each assertion run by hand |
 > | `frontend` — 158 tests, typecheck, build | running it |
 >
 > **The Linux job excludes `apps/desktop`** (Tauri needs WebKitGTK and GTK to compile), so
-> **1107 + 10 desktop = 1117** is the arithmetic to check if either number moves. **CI fetches
+> **1124 + 10 desktop = 1134** is the arithmetic to check if either number moves. **CI fetches
 > only the extensions the tests load** (`DUCKDB_TEST_EXTENSIONS`, hyphen-separated because
 > `actions/cache` refuses a comma in a key). **CI cannot do the Windows-to-Linux cross-build**
 > (GitHub's Windows runners run no Linux containers), so it proves the output instead: a Linux
@@ -293,7 +306,7 @@ first when picking the project back up.
 >
 > ```powershell
 > ./scripts/test-services.ps1                                       # Postgres, MySQL, SeaweedFS (S3), Kafka, NATS, Kinesis, SQS, Pub/Sub, RabbitMQ, MongoDB, BigQuery in Docker
-> cargo test --workspace                                            # expect 1117 passing
+> cargo test --workspace                                            # expect 1134 passing
 > ./scripts/test-services.ps1 -Stop                                 # tidy up afterwards
 > npm --prefix frontend run test                                    # expect 158 passing
 > npm --prefix frontend run typecheck                               # expect clean
@@ -321,9 +334,10 @@ first when picking the project back up.
 
 ## Where things stand
 
-- **Next phase:** none planned. **Phases 10m–10u are finished**; the next family (the plan's
-  *Later families*: Redshift, Databricks, DuckDB, file formats, object storage, SaaS) is
-  planned when the user chooses it. **10n (Redis), 10s (Cassandra) and 10t (Neo4j) are not
+- **Next phase:** **11b, the local model and grammar-constrained output**, planned in
+  [PLAN_duckle_parity.md](PLAN_duckle_parity.md) under *Phases 11a–11d*; it starts when the
+  user says "start 11b". **11a is done** (`etl mcp`). **Phases 10m–10u are finished**; Phase 10's later families (the
+  plan's *Later families*) wait until the user chooses one. **10n (Redis), 10s (Cassandra) and 10t (Neo4j) are not
   built** (decisions 82 and 86).
 - **In progress:** nothing. **Phases 0–9, 10a–10m, 10o–10r and 10u are done** (10a–10f on
   2026-09-23, 10g–10q on 2026-09-24; CI green through 10o on run 35976507434). **10p
@@ -353,7 +367,7 @@ pass), `ctl.throttle` (nothing to throttle until Phase 10 has a row cursor).
 **a scheduler that runs them**, and **a console to watch it from**. From the repo root:
 
 ```powershell
-cargo test --workspace        # 1117 tests: 324 engine, 321 connectors, 113 scheduler, 65 console, 51 e2e, 51 cli, 48 state, 48 verified, 26 runner, 23 secrets, 17 native e2e, 15 metadata, 10 desktop, 5 plugin-sdk
+cargo test --workspace        # 1134 tests: 324 engine, 321 connectors, 113 scheduler, 65 console, 51 e2e, 51 cli, 48 state, 48 verified, 26 runner, 23 secrets, 19 metadata, 17 native e2e, 10 desktop, 9 mcp, 5 plugin-sdk, 4 mcp e2e
 .\target\debug\etl.exe run samples\pipelines\orders_enriched.json
 .\target\debug\etl.exe validate samples\pipelines\orders_enriched.json
 .\target\debug\etl.exe plan samples\pipelines\orders_enriched.json --script
@@ -820,7 +834,11 @@ fail the run. That is `ctl.fail`'s shape and it needs 6b's execution-model decis
 | 10s | — Cassandra | **removed from the plan** (the user's choice, decision 86) | 2026-09-24 |
 | 10t | — Neo4j | **removed from the plan** (the user's choice, decision 86) | 2026-09-24 |
 | 10u | — SQL Server | **done** (against the local TDS fixture only; not checked against real SQL Server) | 2026-09-24 |
-| 11 | AI assistant + MCP server | not started | |
+| 11 | AI assistant + MCP server | **planned** in four sub-phases (decisions 91–98) | |
+| 11a | — the MCP server (`etl mcp`, stdio) | **done** (thirteen tools; `docs/mcp.md`) | 2026-09-24 |
+| 11b | — the local model and grammar-constrained output | **next** | |
+| 11c | — the chat panel | planned | |
+| 11d | — the `xf.ai.*` transforms | scope decided when it starts | |
 | 12 | Benchmarks + parity audit | not started | |
 
 ## Settled decisions
@@ -1118,6 +1136,26 @@ recommended, except Elasticsearch, which is not built.
     made through `weed shell` inside the container, so nothing is mounted and no client image
     is needed; capped at 1 GB. RustFS, a MinIO copy in the user's registry, and Adobe's
     S3Mock were the alternatives.
+
+Decisions 91–98 are Phase 11's, agreed 2026-09-24, all as recommended:
+
+91. **Four sub-phases**: 11a the MCP server, 11b the local model and grammar, 11c the chat
+    panel, 11d the `xf.ai.*` transforms; each committed and pushed when green, each started
+    only when the user says so.
+92. **MCP over stdio only**, as `etl mcp`: the agent starts it; nothing listens on a port.
+    HTTP through `etl serve` can come later.
+93. **Every tool the plan lists**: components, schema, create, validate and run pipelines,
+    logs, plan, lineage, build, connections. The agent's own permission prompts are the gate;
+    **secrets are returned by name only, never their values**.
+94. **`rmcp`**, the official Rust MCP SDK (3.4, Rust 1.88), not a hand-written JSON-RPC.
+95. **llama.cpp's `llama-server` as a subprocess, with Qwen2.5-Coder-1.5B-Instruct Q4_K_M**
+    (about 1 GB), fetched into `tools/` by a script as DuckDB is. The model is a setting.
+96. **The grammar comes from a JSON Schema generated from the manifest**, passed to
+    `llama-server` as `json_schema`; the same schema checks output in tests and is MCP's
+    `get_schema`.
+97. **The 9-of-10 check runs on this machine only**, skipping without the model; CI checks the
+    schema, the grammar's input and the prompt without one.
+98. **The `xf.ai.*` transforms' scope is decided when 11d starts.**
 
 ## Open decisions
 
@@ -3186,3 +3224,48 @@ fail `docker manifest inspect` now; this machine only had MinIO cached.
   variables); the setup is one `sh -c` with no double quotes, for PowerShell 5.1; the old
   `etl-test-minio` is still removed by `-Stop`. `gate.yml` and `verified.rs` comments.
 - The website repo: SQL Server built and awaiting a real-server check (`8b7a8b1`, pushed).
+
+### 2026-09-24 — Phase 11 planned
+
+The user: "can we start phase 11", then eight questions answered "all as recommended".
+Facts gathered first: this machine's 16 GB, i7-8665U and no usable GPU (a CPU-only model); a
+156 KB manifest (too big for a small model's prompt, hence a grammar); the CLI commands an MCP
+server wraps; `rmcp` 3.4.1 needing Rust 1.88. The plan's Phase 11 now has sub-phases
+11a–11d; decisions 91–98; next **11a, the MCP server**, when the user says so. No code.
+
+### 2026-09-24 — CI on `2427016`: both gates green; the Ubuntu artifact job out of disk
+
+Run 36028220348: **`gate (ubuntu)` and `gate (windows)` green**, so 10p–10u pass on Linux in
+CI for the first time, with SeaweedFS for S3; `frontend`, `build-runner.ps1` and `artifact
+(windows)` green. `artifact (ubuntu)` failed restoring the cargo cache: "No space left on
+device" in the runner's own log, no step of ours reached. The artifact job had no disk
+clearing; `gate.yml` now gives it the gate's `Free disk space` step. Not yet pushed.
+
+### 2026-09-24 — Phase 11a: the MCP server
+
+Started by the user ("pls start 11a"). The CI fix (the artifact job's disk) and Phase 11's
+plan ride in this commit.
+
+- **Read first**: how `etl-console` keeps the engine out of its crate (a `Workspace` trait
+  that `main.rs` implements), which functions print to stdout (the CLI's commands; no
+  library crate does, and DuckDB's streams are piped), and `rmcp` 3.4.1's source for the
+  tool macros, the stdio transport and the child-process client.
+- `crates/metadata/src/schema.rs` — the pipeline JSON Schema, 4 tests.
+- `crates/mcp` — `Workspace`, `Server` with thirteen tools, `inside` (paths kept in the
+  workspace), `serve_stdio`; 9 tests with `rmcp`'s client over an in-memory pipe.
+- `crates/cli` — `etl mcp`; `McpWorkspace`; `Settings::try_resolver` and `with`;
+  `build_artifact` (loud or quiet) behind `etl build`; `warning_text`, `param_warning_text`;
+  `read_document` names the file; `tests/mcp.rs`, 4 tests against the real binary.
+- By hand: a raw JSON-RPC handshake to `etl mcp` answered; `etl build` prints as before
+  (a build, the secret refusal); the executable `build_executable` made runs (12, 6, 6 rows).
+- Docs: `docs/mcp.md`, the plan's as-built notes, `learnings.md`, `assignments.md`
+  (A68-A69).
+- **Not done here: Claude Code itself driving a run.** This session cannot add an MCP server
+  to itself; the snippet in `docs/mcp.md` is for the user to try, and it is assignment A68.
+- **The full suite, with a detour**: the first run failed one Kinesis test (`latest` read
+  all five records). kinesis-mock stamped arrivals 2.4 s ahead of the host, though the
+  container's own clock was 0.2 s off: it had started, 57 minutes before, around the
+  machine's sleep, and kept that offset. `docker restart etl-test-kinesis` cleared it.
+  Running the Kinesis tests alone also meets kinesis-mock's limit on streams being created
+  at once; the full suite spreads them out. Then **1134 Rust tests with every server up,
+  twice, none skipped**; 158 frontend.

@@ -800,3 +800,26 @@ the fuller record. From Phase 10 on, a section is added at the end of each phase
 **Mistakes worth not repeating**
 - **Shell heredocs through the Bash tool can swallow a script whose Rust holds `\` line
   continuations**: write edits with backslashes to a file and run that.
+
+## Phase 11a — the MCP server (2026-09-24)
+
+**Concepts**
+- **An stdio protocol owns stdout.** Anything a tool calls must write nowhere but stderr:
+  checked by finding every `println!` a tool could reach, and that DuckDB's streams are piped.
+- **The same seam twice**: the console and MCP each define what they need from a workspace
+  and `etl` implements it, so neither crate depends on the engine and both reuse one
+  listing, one history reader and one run lock.
+- **Errors as results**: an agent can act on "invalid: xf.nothing_like_this is not a
+  component"; it can only give up on a protocol error.
+
+**Decisions and why**
+- **No secret-baking over MCP**: `--allow-secrets` exists so that a person reads a warning;
+  over MCP no one would.
+- **The schema is stricter than the engine** (closed properties): it describes what should
+  be written, and 11b's model will add any key a schema allows.
+- **Split a command into "do" and "say"** (`build_artifact` and `command_build`) rather
+  than capturing stdout.
+
+**Mistakes worth not repeating**
+- **Assuming what the mask looks like**: the engine masks with `********`; the test
+  guessed `[REDACTED]`, which is what `resolved.used` says instead.

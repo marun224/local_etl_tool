@@ -2232,6 +2232,118 @@ executable, manage connections.
 
 **Done.** Both surfaces work against the same manifest.
 
+#### Phases 11a–11d — planned 2026-09-24
+
+**Questions answered 2026-09-24** (Settled decisions 91–98), all as recommended. **Four
+sub-phases**, each committed and pushed when green and started only when the user says so;
+MCP first, because it needs no model and is useful at once with Claude Code, and it gives the
+assistant a tested surface to stand on.
+
+| Phase | What | Needs a model |
+|---|---|---|
+| 11a | The MCP server: `etl mcp` over stdio | no |
+| 11b | The local model and grammar-constrained pipeline JSON | yes, on this machine only |
+| 11c | The chat panel on the canvas | yes |
+| 11d | The six `xf.ai.*` transforms: scope decided when it starts (decision 98) | some |
+
+**This machine** (2026-09-24): 16 GB of memory, an i7-8665U (4 cores), no usable GPU. A
+local model runs on the CPU, estimated at 10–20 tokens a second, so a generated pipeline takes
+a minute or two. The manifest (`etl components --manifest`) is 156 KB: too much to put in a
+small model's prompt, which is why the output is constrained by a grammar rather than
+described.
+
+##### Phase 11a — the MCP server
+
+**Files.** `crates/mcp/` (a library: the tools, over the engine the CLI already uses), `etl
+mcp` in `crates/cli`; `rmcp` 3.4 (the official Rust SDK, Rust 1.88) with `server`,
+`transport-io` and `macros`; `docs/mcp.md`; a sample `.mcp.json` for Claude Code.
+
+**Do.**
+
+1. **`etl mcp`**: an MCP server on **stdin/stdout only** (decision 92): Claude Code or any
+   agent starts it as a subprocess; nothing listens on a port. `--workspace` as the other
+   commands take it. Logs go to stderr, never stdout, which is the protocol's.
+2. **Tools** (decision 93: everything the plan lists, gated by the agent's own permission
+   prompts): `list_components` (ids, labels, one line each) and `get_component` (one
+   component's full manifest entry); `get_schema` (the pipeline document's JSON Schema, the
+   one 11b constrains the model with); `validate_pipeline` (a document or a file, with the
+   CLI's messages); `create_pipeline` (validate, then write under the workspace, never
+   outside it, never over a file without `overwrite: true`); `run_pipeline` (with
+   parameters and a context, returning the run's summary and id); `list_runs` and
+   `get_run_log`; `plan_pipeline` (the SQL); `lineage`; `build_executable` (a target from
+   the CLI's list); `list_connections` (contexts, and secrets **by name only**).
+3. **Secrets never leave**: no tool returns a secret's value; results pass through the same
+   masking the CLI's messages do.
+4. **Errors are results**: a pipeline that fails validation or a run that fails is a tool
+   result the agent can read and act on, not a protocol error.
+
+**Verify.** Each tool through `rmcp`'s client against `etl mcp` as a subprocess, in the
+test suite (CI too: no model); a secret set in the workspace never appearing in any result;
+a `create_pipeline` path outside the workspace refused; **Claude Code drives a run over MCP**
+(by hand, recorded in the as-built notes).
+
+**Done.** An agent can find components, write, validate, run and build a pipeline, and read
+what happened, through `etl mcp`.
+
+**As built (2026-09-24).** Done as planned, with these differences:
+
+- **`crates/mcp` knows MCP and not the engine**: a `Workspace` trait, as `etl-console` has,
+  implemented in `etl`'s `main.rs` (`McpWorkspace`), which reuses the console's listing,
+  history and one-run-at-a-time lock. Blocking work runs on `spawn_blocking`.
+- **Thirteen tools**: the plan's list, with `list_pipelines` added and "read logs" as
+  `list_runs` and `get_run_log`. `list_connections` lists contexts (variable names only) and
+  secrets (names and descriptions); there is no tool that sets a secret, since the agent
+  would have had to see its value.
+- **`build_executable` never bakes a secret in** (`etl build --allow-secrets` is the way, on
+  purpose), and makes the output's folder. `etl build`'s work moved into `build_artifact`,
+  loud for the CLI and quiet for MCP, the CLI's output unchanged.
+- **The schema lives in `etl-metadata`** (`schema.rs`): each node tied to one component, its
+  type the canvas kind, its properties typed and closed, `${...}` allowed for any value.
+- **Messages that were lost are kept**: `load_and_compile_quietly` now returns the
+  resolver's own reason, and a pipeline file that cannot be read is named, for the console
+  too.
+- **No `.mcp.json` in the repo**: Claude Code would pick it up in every session here;
+  `docs/mcp.md` has the snippet.
+- **Verified** by `rmcp`'s client against a fake workspace (9 tests) and against `etl mcp`
+  as a subprocess (4 tests: write, check, plan, run, read, lineage and build of a real
+  pipeline whose executable then runs; a secret's value absent from every result; an
+  invalid document not written; the schema matching the registry).
+
+##### Phase 11b — the local model and grammar-constrained output
+
+**Files.** `crates/assistant/`; `scripts/fetch-model.ps1` (decision 95: `llama-server` from
+llama.cpp's releases and **Qwen2.5-Coder-1.5B-Instruct Q4_K_M**, about 1 GB, into the
+git-ignored `tools/`, as `fetch-duckdb.ps1` does); `etl assist "<request>"` in the CLI.
+
+**Do.** Start `llama-server` as a subprocess on a localhost port of its own, and stop it
+after. **The JSON Schema from the manifest** (11a's `get_schema`) is passed as the request's
+`json_schema`; `llama-server` turns it into a GBNF grammar, so every token keeps the output
+a valid document (decision 96). A short prompt with the components likeliest to matter,
+picked by the request's words from the manifest. The result goes through `validate` before
+anyone sees it. The model is a setting, so another GGUF file can be pointed at.
+
+**Verify.** In CI, without a model: the schema generated from the manifest accepts every
+sample in `samples/pipelines/` and refuses broken ones; the prompt builder's choices. **On
+this machine only** (decision 97), a test that skips without the model: "read this Postgres
+table, dedupe, write Parquet" passes `validate` on the first try in **9 of 10** runs.
+
+**Done.** `etl assist` writes pipelines that validate, locally, with no network.
+
+##### Phase 11c — the chat panel
+
+**Files.** `frontend/` (a panel beside the canvas), the console's API (`etl serve`) for the
+desktop app and the browser alike.
+
+**Do.** Ask in words; the assistant's pipeline appears on the canvas as a draft to accept or
+discard; validation messages shown as the canvas shows them. Planned in detail when 11b is
+done.
+
+##### Phase 11d — the `xf.ai.*` transforms
+
+Scope decided when it starts (decision 98). The plan's six: three fully local (embeddings,
+chunk, PII redact) and three with the user's own OpenAI-compatible endpoint (`baseUrl`, the
+key a secret).
+
 ### Phase 12 — Benchmarks + parity audit
 
 **Goal.** Prove it, and know exactly where we stand against Duckle.

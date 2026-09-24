@@ -6,6 +6,7 @@ members = [
     "crates/state",
     "crates/scheduler",
     "crates/console",
+    "crates/mcp",
     "crates/runner",
     "crates/plugin-sdk",
     "crates/connectors",
@@ -27,6 +28,7 @@ etl-secrets = { path = "crates/secrets", version = "0.1.0" }
 etl-state = { path = "crates/state", version = "0.1.0" }
 etl-scheduler = { path = "crates/scheduler", version = "0.1.0" }
 etl-console = { path = "crates/console", version = "0.1.0" }
+etl-mcp = { path = "crates/mcp", version = "0.1.0" }
 etl-runner = { path = "crates/runner", version = "0.1.0" }
 etl-plugin-sdk = { path = "crates/plugin-sdk", version = "0.1.0" }
 etl-connectors = { path = "crates/connectors", version = "0.1.0" }
