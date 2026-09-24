@@ -21,7 +21,9 @@ ring = "0.17"
 rskafka = { version = "0.6", features = ["transport-tls"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 serde_json.workspace = true
+tiberius = { version = "0.12.3", default-features = false, features = ["tds73", "rustls"] }
 tokio = { version = "1", default-features = false, features = ["rt", "net", "time", "rt-multi-thread"] }
+tokio-util = { version = "0.7", default-features = false, features = ["compat"] }
 ureq = "~3.2.1"
 webpki-roots = "1"
 

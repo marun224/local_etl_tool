@@ -3,6 +3,24 @@
 **State only.** Design lives in [PLAN_duckle_parity.md](PLAN_duckle_parity.md). Read this file
 first when picking the project back up.
 
+> ## ✅ Phase 10u (SQL Server) — built 2026-09-24, green locally, against a fixture only
+>
+> **What 10u built:** `src.db.sqlserver` and `snk.db.sqlserver` over TDS through `tiberius`
+> (rustls, no OpenSSL, SQL logins): reads streamed and typed, incremental by a **parameter**
+> with the position saved at the column's full precision; batched `INSERT`s of bound text,
+> `append`, `truncate`, or `merge` on key columns through a staging table and one `MERGE`.
+> TLS required, login-only or none, trusting `ca_cert` or `trust_server_certificate`, never
+> this machine's store (decision 42). Azure SQL's redirect followed once. **No SQL Server runs
+> here** (decision 87): everything is proved against a local TDS fixture that `tiberius`
+> decodes, and "not yet checked against real SQL Server" is recorded (assignment A67).
+> **82 components, 1117 Rust tests** (1107 on Linux) with every server up, twice, none
+> skipped; **158 frontend** (three for the new sample); nine mutations each caught. **Pushed with CI** (decision 89),
+> which covers 10p–10r for the first time.
+>
+> **Phases 10m–10u are finished** (MongoDB, BigQuery, Snowflake, MariaDB, ClickHouse, SQL
+> Server; Redis, Cassandra and Neo4j not built). The next family is not planned yet: the
+> plan's *Later families* lists what is left.
+
 > ## ▶ Resumed 2026-09-24 — checks green; 10s and 10t removed from the plan
 >
 > Every check re-run against the 13 test servers: **1086** Rust tests, none failed or
@@ -10,8 +28,9 @@ first when picking the project back up.
 > (`test-services.ps1`): Windows now reserves 58921–59020 as well. **Cassandra (10s) and
 > Neo4j (10t) are removed from the plan** (the user, decision 86). **Next: 10u, SQL Server**,
 > against a fixture only (question 15 answered: decision 87), when the user says "start 10u".
-> The website drops Cassandra and Neo4j (decision 88). Engine docs and the services script
-> committed and pushed with `[skip ci]` (the user).
+> The website drops Cassandra, Neo4j, Redis and Elasticsearch (decision 88; `475ef5d`, pushed:
+> 20 of 46 working). Engine docs and the services script pushed with `[skip ci]` (`6663395`).
+> **CI runs for 10u** (decision 89), covering 10p–10r for the first time.
 
 > ## ⏸ PAUSED — 2026-09-24, at the user's request, after Phase 10r
 >
@@ -37,7 +56,7 @@ first when picking the project back up.
 > | 10r | ClickHouse, and question 16's MySQL fix | done; **no CI** at the user's request |
 > | 10s | Cassandra | **removed from the plan** (the user, decision 86, after resuming) |
 > | 10t | Neo4j | **removed from the plan** (the user, decision 86, after resuming) |
-> | **10u** | **SQL Server** | **next**; against a fixture only (question 15 answered, decision 87) |
+> | 10u | SQL Server | **done** after resuming, against the fixture only (decision 87) |
 >
 > **CI:** the last fully green run is 10o's (35976507434). 10p, 10q and 10r have passed
 > everything locally (1086 Rust tests with every server up, twice) but not in CI. **Ask the
@@ -51,10 +70,10 @@ first when picking the project back up.
 >    etl-test-bigquery` between repeated full runs).
 > 2. `cargo test --workspace` with the variables it prints: expect **1086** passing, none
 >    skipped; `etl components`: **80**; `npm --prefix frontend run test`: **155**.
-> 3. Confirm with the user: "start 10u" (SQL Server, fixture only), and whether CI runs
->    for it. (Was "start 10s"; 10s and 10t were removed after resuming, decision 86.)
+> 3. Wait for the user's "start 10u" (SQL Server, fixture only). CI runs when it is pushed
+>    (decision 89). (Was "start 10s"; 10s and 10t were removed after resuming, decision 86.)
 >
-> **Open for the user:** whether CI runs again (question 15 answered after resuming: decision 87);
+> **Open for the user:** nothing (question 15: decision 87; CI for 10u: decision 89);
 > the website's redeploy. BigQuery and Snowflake stay off the website until checked against
 > the real services (assignment A62 is the Snowflake check).
 >
@@ -250,14 +269,14 @@ first when picking the project back up.
 >
 > | Job | Checked locally by |
 > |---|---|
-> | `gate (windows)` — fmt, clippy, 1086 tests (servers skip), samples | running it, repeatedly |
-> | `gate (ubuntu)` — fmt, clippy, **1076 tests** with Postgres, MySQL, MariaDB, ClickHouse, MinIO, Kafka (four listeners), NATS (five servers), kinesis-mock, ElasticMQ, the Pub/Sub emulator, RabbitMQ, MongoDB and the BigQuery emulator, samples | `cargo test` in `rust:1.96-slim-bookworm` |
+> | `gate (windows)` — fmt, clippy, 1117 tests (servers skip), samples | running it, repeatedly |
+> | `gate (ubuntu)` — fmt, clippy, **1107 tests** with Postgres, MySQL, MariaDB, ClickHouse, MinIO, Kafka (four listeners), NATS (five servers), kinesis-mock, ElasticMQ, the Pub/Sub emulator, RabbitMQ, MongoDB and the BigQuery emulator, samples | `cargo test` in `rust:1.96-slim-bookworm` |
 > | `artifact (both)` — bake, run from elsewhere, run in a bare container | Phase 9b and 9c |
 > | `cross-build-script` — `build-runner.ps1`, ELF check, unbaked contract, no-op rerun | each assertion run by hand |
-> | `frontend` — 155 tests, typecheck, build | running it |
+> | `frontend` — 158 tests, typecheck, build | running it |
 >
 > **The Linux job excludes `apps/desktop`** (Tauri needs WebKitGTK and GTK to compile), so
-> **1076 + 10 desktop = 1086** is the arithmetic to check if either number moves. **CI fetches
+> **1107 + 10 desktop = 1117** is the arithmetic to check if either number moves. **CI fetches
 > only the extensions the tests load** (`DUCKDB_TEST_EXTENSIONS`, hyphen-separated because
 > `actions/cache` refuses a comma in a key). **CI cannot do the Windows-to-Linux cross-build**
 > (GitHub's Windows runners run no Linux containers), so it proves the output instead: a Linux
@@ -267,12 +286,12 @@ first when picking the project back up.
 >
 > ```powershell
 > ./scripts/test-services.ps1                                       # Postgres, MySQL, MinIO, Kafka, NATS, Kinesis, SQS, Pub/Sub, RabbitMQ, MongoDB, BigQuery in Docker
-> cargo test --workspace                                            # expect 1086 passing
+> cargo test --workspace                                            # expect 1117 passing
 > ./scripts/test-services.ps1 -Stop                                 # tidy up afterwards
-> npm --prefix frontend run test                                    # expect 155 passing
+> npm --prefix frontend run test                                    # expect 158 passing
 > npm --prefix frontend run typecheck                               # expect clean
 > npm --prefix frontend run build                                   # expect clean
-> .\target\debug\etl.exe components                                 # expect 80
+> .\target\debug\etl.exe components                                 # expect 82
 > .\target\debug\etl.exe run samples\pipelines\orders_enriched.json # expect 12/5/7/6/6
 > .\target\debug\etl.exe run samples\pipelines\orders_checked.json  # expect 12/10+2/9+1/9/2/1
 > .\target\debug\etl.exe run samples\pipelines\orders_guarded.json  # expect 12 through, branch taken
@@ -295,10 +314,11 @@ first when picking the project back up.
 
 ## Where things stand
 
-- **Next phase:** **10u, SQL Server**, planned in [PLAN_duckle_parity.md](PLAN_duckle_parity.md)
-  under *Phases 10m–10u*; against a fixture only (decision 87); it starts when the user says so.
-  **10n (Redis), 10s (Cassandra) and 10t (Neo4j) are not built** (decisions 82 and 86).
-- **In progress:** nothing. **Phases 0–9, 10a–10m and 10o–10r are done** (10a–10f on
+- **Next phase:** none planned. **Phases 10m–10u are finished**; the next family (the plan's
+  *Later families*: Redshift, Databricks, DuckDB, file formats, object storage, SaaS) is
+  planned when the user chooses it. **10n (Redis), 10s (Cassandra) and 10t (Neo4j) are not
+  built** (decisions 82 and 86).
+- **In progress:** nothing. **Phases 0–9, 10a–10m, 10o–10r and 10u are done** (10a–10f on
   2026-09-23, 10g–10q on 2026-09-24; CI green through 10o on run 35976507434). **10p
   (`2a474a1`) and 10q (`9073352`) are pushed, but their CI never finished**: 10p's run
   (35983333700) passed both gates before the 10q push cancelled its artifact jobs, and 10q's
@@ -326,7 +346,7 @@ pass), `ctl.throttle` (nothing to throttle until Phase 10 has a row cursor).
 **a scheduler that runs them**, and **a console to watch it from**. From the repo root:
 
 ```powershell
-cargo test --workspace        # 1086 tests: 324 engine, 290 connectors, 113 scheduler, 65 console, 51 e2e, 51 cli, 48 state, 48 verified, 26 runner, 23 secrets, 17 native e2e, 15 metadata, 10 desktop, 5 plugin-sdk
+cargo test --workspace        # 1117 tests: 324 engine, 321 connectors, 113 scheduler, 65 console, 51 e2e, 51 cli, 48 state, 48 verified, 26 runner, 23 secrets, 17 native e2e, 15 metadata, 10 desktop, 5 plugin-sdk
 .\target\debug\etl.exe run samples\pipelines\orders_enriched.json
 .\target\debug\etl.exe validate samples\pipelines\orders_enriched.json
 .\target\debug\etl.exe plan samples\pipelines\orders_enriched.json --script
@@ -771,7 +791,7 @@ fail the run. That is `ctl.fail`'s shape and it needs 6b's execution-model decis
 | 9b | — the engine and its extensions inside the file | **done** | 2026-09-17 |
 | 9c | — cross-building (Linux from Windows) | **done** | 2026-09-17 |
 | 9d | — the CI matrix | **done** (green on the third run) | 2026-09-23 |
-| 10 | Rust-native connectors | **in progress** (10a–10i done; the next family open) | |
+| 10 | Rust-native connectors | **in progress** (10a–10m, 10o–10r and 10u done; the next family not yet chosen) | |
 | 10a | — plugin SDK, staging bridge, XML | **done** | 2026-09-23 |
 | 10b | — SaaS REST, source and sink | **done** | 2026-09-23 |
 | 10c | — verify Phase 4's database and lake connectors | **done** | 2026-09-23 |
@@ -792,7 +812,7 @@ fail the run. That is `ctl.fail`'s shape and it needs 6b's execution-model decis
 | 10r | — ClickHouse | **done** (against ClickHouse 25.8 itself; pushed without CI) | 2026-09-24 |
 | 10s | — Cassandra | **removed from the plan** (the user's choice, decision 86) | 2026-09-24 |
 | 10t | — Neo4j | **removed from the plan** (the user's choice, decision 86) | 2026-09-24 |
-| 10u | — SQL Server | planned; against a fixture only (decision 87) | |
+| 10u | — SQL Server | **done** (against the local TDS fixture only; not checked against real SQL Server) | 2026-09-24 |
 | 11 | AI assistant + MCP server | not started | |
 | 12 | Benchmarks + parity audit | not started | |
 
@@ -1080,8 +1100,12 @@ recommended, except Elasticsearch, which is not built.
     image needs 2 GB, over decision 79's cap, so no test container and no CI service. The
     fixture speaks enough TDS for the tests; "not yet checked against real SQL Server" is
     recorded and it stays off the website's `working` list, as BigQuery and Snowflake do.
-88. **The website drops Cassandra and Neo4j** (the user, as recommended): out of its
-    connector list, and its roadmap names only SQL Server as next.
+88. **The website drops Cassandra, Neo4j, Redis and Elasticsearch** (the user, as
+    recommended): out of its connector list (20 of 46 working, 26 planned), and its roadmap
+    names only SQL Server as next. Website `475ef5d`, pushed; the live site still needs a
+    redeploy.
+89. **CI runs for 10u** (the user, as recommended): a normal push, which also covers 10p–10r,
+    unchecked in CI since 10o.
 
 ## Open decisions
 
@@ -3103,3 +3127,33 @@ The user: "run ./scripts/test-services.ps1 … cargo test --workspace and valida
 The user then answered: question 15 (c), a fixture only (decision 87); the website drops
 Cassandra and Neo4j (decision 88); commit and push these docs and the services script with
 `[skip ci]`. The plan's 10u section rewritten for the fixture.
+
+Then, all as recommended: the website also drops Redis and Elasticsearch, committed and
+pushed (`475ef5d`, decision 88); CI runs for 10u (decision 89). Next: "start 10u".
+
+### 2026-09-24 — Phase 10u: SQL Server
+
+Started by the user ("pls start 10u"); CI runs for it (decision 89).
+
+- **No probe against a server** (decision 87). Instead `tiberius` 0.12.3's source was read
+  for what the fixture must answer: PRELOGIN, TLS inside PRELOGIN packets, LOGIN7, the
+  tokens and each type's encoding. Found there: its `On` encryption panics against a server
+  that refuses (so the connector asks for `Required`), its rustls TLS trusts one CA file,
+  everything, or the machine's store (so decision 42 is kept by requiring one of the first
+  two), and it panics (`todo!`) on `sql_variant` and CLR types (so the connector catches the
+  panic and names a `CAST`).
+- `crates/connectors` — `sqlserver.rs` (`src.db.sqlserver`, `snk.db.sqlserver`),
+  `sqlserver/fixture.rs` (a TDS server: TLS, sign-in refusals 18456 and 4060, batches,
+  `sp_executesql`, twenty types, errors, Azure SQL's routing), `sqlserver/tests.rs` with 31
+  tests; `tiberius` (`tds73`, `rustls`) and `tokio-util` (`compat`) added;
+  `tests/fixtures/sqlserver/` — a test CA, a `localhost` certificate it signed, and an
+  unrelated CA, made with OpenSSL 3.5.7 (README says how).
+- `samples/pipelines/sqlserver_orders.json` (for a real server; `etl validate --param
+  sqlserver_password=...` passes); `gate.yml` — 82 components; the registry test.
+- Nine mutations on the incremental and write paths, each caught once the failed-batch test
+  failed on a full batch rather than the last partial one.
+- Docs: `connectors.md` (SQL Server), the plan's as-built notes, `learnings.md`,
+  `assignments.md` (A66-A67).
+
+**1117 Rust tests with every server up, twice, none skipped; 158 frontend; fmt and clippy
+clean.** Not checked against real SQL Server.

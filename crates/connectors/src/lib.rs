@@ -33,6 +33,7 @@ pub mod pubsub;
 pub mod rabbitmq;
 pub mod rest;
 pub mod snowflake;
+pub mod sqlserver;
 pub mod sqs;
 mod tls;
 pub mod xml;
@@ -69,6 +70,8 @@ pub fn all() -> &'static [(String, Connector)] {
             Connector::Sink(&snowflake::SnowflakeSink),
             Connector::Source(&clickhouse::ClickhouseSource),
             Connector::Sink(&clickhouse::ClickhouseSink),
+            Connector::Source(&sqlserver::SqlserverSource),
+            Connector::Sink(&sqlserver::SqlserverSink),
         ]
         .into_iter()
         .map(|connector| (connector.spec().id, connector))

@@ -1,0 +1,146 @@
+{
+  "formatVersion": 1,
+  "name": "sqlserver_orders",
+  "nodes": [
+    {
+      "id": "read_orders",
+      "type": "source",
+      "position": {
+        "x": 0.0,
+        "y": 0.0
+      },
+      "data": {
+        "label": "Orders table",
+        "componentId": "src.db.sqlserver",
+        "properties": {
+          "host": "${sqlserver_host}",
+          "port": 1433,
+          "database": "${sqlserver_database}",
+          "username": "${sqlserver_user}",
+          "password": "${sqlserver_password}",
+          "encryption": "required",
+          "ca_cert": "${sqlserver_ca_cert}",
+          "table": "dbo.orders",
+          "incremental_column": "order_id",
+          "columns": {
+            "order_id": "INTEGER",
+            "customer_id": "VARCHAR",
+            "order_ts": "TIMESTAMP",
+            "amount": "DECIMAL(10,2)",
+            "status": "VARCHAR"
+          }
+        },
+        "alias": "orders"
+      }
+    },
+    {
+      "id": "large_only",
+      "type": "transform",
+      "position": {
+        "x": 280.0,
+        "y": 0.0
+      },
+      "data": {
+        "label": "Over 100",
+        "componentId": "xf.filter",
+        "properties": {
+          "predicate": "amount > 100"
+        }
+      }
+    },
+    {
+      "id": "write_large",
+      "type": "sink",
+      "position": {
+        "x": 560.0,
+        "y": 0.0
+      },
+      "data": {
+        "label": "Large orders",
+        "componentId": "snk.file.parquet",
+        "properties": {
+          "path": "${workspace}/samples/out/sqlserver_large_orders.parquet",
+          "mode": "overwrite"
+        }
+      }
+    },
+    {
+      "id": "merge_large",
+      "type": "sink",
+      "position": {
+        "x": 560.0,
+        "y": 160.0
+      },
+      "data": {
+        "label": "Large orders table",
+        "componentId": "snk.db.sqlserver",
+        "properties": {
+          "host": "${sqlserver_host}",
+          "port": 1433,
+          "database": "${sqlserver_database}",
+          "username": "${sqlserver_user}",
+          "password": "${sqlserver_password}",
+          "encryption": "required",
+          "ca_cert": "${sqlserver_ca_cert}",
+          "table": "dbo.large_orders",
+          "mode": "merge",
+          "key_columns": ["order_id"]
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "source": "read_orders",
+      "target": "large_only",
+      "sourceHandle": "main",
+      "targetHandle": "in"
+    },
+    {
+      "id": "e2",
+      "source": "large_only",
+      "target": "write_large",
+      "sourceHandle": "main",
+      "targetHandle": "in"
+    },
+    {
+      "id": "e3",
+      "source": "large_only",
+      "target": "merge_large",
+      "sourceHandle": "main",
+      "targetHandle": "in"
+    }
+  ],
+  "parameters": {
+    "sqlserver_host": {
+      "type": "string",
+      "required": true,
+      "default": "sql.example.internal",
+      "description": "The server. No SQL Server runs in this project's tests: this sample is for a real server, and is not yet checked against one."
+    },
+    "sqlserver_database": {
+      "type": "string",
+      "required": true,
+      "default": "sales",
+      "description": "The database holding dbo.orders and dbo.large_orders."
+    },
+    "sqlserver_user": {
+      "type": "string",
+      "required": true,
+      "default": "etl_loader",
+      "description": "A SQL Server login."
+    },
+    "sqlserver_password": {
+      "type": "string",
+      "required": true,
+      "description": "The login's password. Pass it at run time, or set it to ${SECRET:name} with the password kept by etl secret set, never in this file."
+    },
+    "sqlserver_ca_cert": {
+      "type": "string",
+      "required": true,
+      "default": "certs/sqlserver-ca.pem",
+      "description": "The certificate authority that signed the server's certificate, one PEM certificate, relative to the workspace. For Azure SQL, the root its certificate chains to."
+    }
+  }
+}

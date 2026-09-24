@@ -2179,6 +2179,35 @@ Snowflake do.
 it, or a separate CI job on a larger runner, were the alternatives. The fixture is larger
 than Snowflake's: TDS is a binary protocol, not HTTP.
 
+**As built (2026-09-24).** Done as planned, with these differences:
+
+- **`tiberius` 0.12 with `tds73` and `rustls` only**: not `native-tls` (OpenSSL on Linux) and
+  not `winauth`. It brings rustls 0.21 beside the project's 0.23 (the same `ring`), because it
+  builds its own TLS configuration and cannot take one from `tls.rs`.
+- **TLS trust stays within decision 42**: the client offers a CA file, trust-all, or the
+  machine's store; the connector requires `ca_cert` or `trust_server_certificate` to encrypt,
+  and with `encryption: none` points the client at a CA file that cannot exist, so a server
+  insisting on TLS is refused, not trusted through the store. `encryption` is `required`
+  (the client's `Required`, since its `On` panics against a server that refuses),
+  `login_only` or `none`.
+- **The fixture** (`sqlserver/fixture.rs`) speaks PRELOGIN, TLS inside PRELOGIN packets
+  (rustls 0.23 on the server side, with `tests/fixtures/sqlserver/`'s CA and certificate),
+  LOGIN7 with its refusals (18456, 4060), SQL batches, `sp_executesql` calls, COLMETADATA and
+  ROW for twenty types, errors, DONE tokens, and Azure SQL's routing ENVCHANGE. `tiberius`
+  decodes all of it, so a wrong encoding fails a test.
+- **Incremental positions keep the column's full precision**: the saved text is the value as
+  SQL Server casts it back (`datetime2(7)` to seven digits, `datetime` as `.003`), bound as a
+  parameter and `CAST` to the type the value came with.
+- **Every value is bound as text**, as Snowflake's are; `merge` stages into `#etl_stage`
+  (made by a plain batch, since one made in `sp_executesql` dies with the call), then one
+  `MERGE ... WITH (HOLDLOCK)` with `ROW_NUMBER()` so the later of two rows with one key wins.
+- **Beyond the plan**: Azure SQL's redirect followed once; a `tiberius` panic on a column it
+  cannot read (`sql_variant`, `geography`) caught and made an error naming a `CAST`; a second
+  result set, a duplicate or unnamed column refused; SQL Server's error 1033 explained when
+  `incremental_column` wraps a query with its own `ORDER BY`.
+- **Not in `verified.rs`**, as no server runs; `samples/pipelines/sqlserver_orders.json` is
+  for a real server, and `etl validate` passes it.
+
 **Deferred.** **Elasticsearch** (decision 76: memory), **Oracle** (decision 80: Oracle's
 native client library would break the single binary), OpenSearch with Elasticsearch.
 **Later families**, planned when reached: the site's remaining warehouses (Redshift,

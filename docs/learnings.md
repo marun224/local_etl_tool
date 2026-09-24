@@ -772,3 +772,31 @@ the fuller record. From Phase 10 on, a section is added at the end of each phase
 **Mistakes worth not repeating**
 - **`contains` in a test of generated SQL** lets a wrong clause through; compare the whole
   statement.
+
+## Phase 10u — SQL Server (2026-09-24)
+
+**Concepts**
+- **TDS carries its own TLS**: the handshake travels inside PRELOGIN packets, and
+  `Encrypt=false` still encrypts the sign-in, then drops TLS. A test server has to do the same
+  to be believed.
+- **A temporary table made inside `sp_executesql` dies when that call ends.** One that must
+  outlive a statement is made by a plain batch; the calls after it can still see it.
+- **A fixture decoded by a real client checks itself**: every answer the fixture encodes
+  wrongly, `tiberius` refuses. It cannot say what SQL Server would do with the SQL, which stays
+  unproved until a real server runs it.
+- **Saving a position at the precision the display loses**: a `datetime2(7)` shown to the
+  microsecond would skip rows that differ in the seventh digit, so the position keeps all
+  seven.
+
+**Decisions and why**
+- **Refuse rather than trust the machine's store** when the client can only choose between a
+  CA file, trusting everything, and the store (decision 42): one of the first two must be
+  named, and `encryption: none` refuses a server that insists.
+- **Turn a client's panic into an error** (`catch_unwind`) where the client has `todo!()`s on
+  real input: a `sql_variant` column should not end the process.
+- **Ask for `Required`, not `On`**: `tiberius` panics when it asked for `On` and the server
+  cannot, and returns an error for `Required`.
+
+**Mistakes worth not repeating**
+- **Shell heredocs through the Bash tool can swallow a script whose Rust holds `\` line
+  continuations**: write edits with backslashes to a file and run that.

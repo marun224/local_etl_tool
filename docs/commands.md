@@ -2420,3 +2420,20 @@ npm --prefix frontend run test             # 155
 # PLAN_duckle_parity.md: 10s/10t rows and sections deleted, component counts corrected
 # task_tracker.md: decision 86, status rows, next phase 10u, log entry
 ```
+
+## 2026-09-24 — Phase 10u: SQL Server
+
+```bash
+cargo info tiberius                          # 0.12.3; default features tds73, winauth, native-tls
+# its source read from ~/.cargo/registry: prelogin, TLS wrapper, login7, tokens, types
+cd crates/connectors/tests/fixtures/sqlserver   # a test CA, a localhost certificate, another CA
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 ... (see README.md there)
+cargo tree -p etl-connectors -e normal       # tiberius brings rustls 0.21 beside 0.23, the same ring
+cargo test -p etl-connectors sqlserver       # 31 passed
+python scratchpad/mutate.py                  # nine mutations, each caught
+cargo build -p etl-cli; ./target/debug/etl components | tail -1        # 82 component(s)
+./target/debug/etl validate samples/pipelines/sqlserver_orders.json --param sqlserver_password=example
+cargo fmt --all -- --check; cargo clippy --workspace --all-targets      # clean
+docker restart etl-test-bigquery; cargo test --workspace (with the services' variables)   # 1117, twice
+npm --prefix frontend run test               # 158: three for the new sample
+```

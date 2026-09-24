@@ -509,3 +509,18 @@ Copy-Item samples\pipelines\orders_enriched.json samples\out\scratch\
   and send one batch twice with the same `insert_deduplication_token`.
   *Check:* the second insert adds nothing; on a table without the setting it adds the rows
   again. What does that mean for a retried batch in `snk.db.clickhouse`?
+
+## Phase 10u — SQL Server
+
+- [ ] **A66. 🦀 Break the fixture on purpose.**
+  *Do:* in `sqlserver/fixture.rs`, make `cell` send a `datetime2(7)` with 4 bytes of time
+  instead of 5, and run `cargo test -p etl-connectors sqlserver`.
+  *Check:* `tiberius` refuses the answer, and a test fails. Explain why that makes the
+  fixture a check on itself, and what it still cannot tell you about SQL Server.
+
+- [ ] **A67. 🦀 Run it for real (if you have a SQL Server).**
+  *Do:* on a server with 2 GB to spare, or Azure SQL, create `dbo.orders` and
+  `dbo.large_orders` (with `order_id` its primary key), fill in
+  `samples/pipelines/sqlserver_orders.json`'s parameters, and run it twice.
+  *Check:* the second run reads nothing new and the merge adds no row twice; a `datetime2`
+  column written as text arrives exact. This is the check the project still owes.

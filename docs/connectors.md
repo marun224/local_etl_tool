@@ -1002,3 +1002,84 @@ is kept, the version stripped.
   inserted twice (seen in the probe). At-least-once otherwise.
 - **Like every native sink, it inserts only after a run that fully succeeded**, and never in
   `preview`.
+
+## `src.db.sqlserver` and `snk.db.sqlserver`
+
+Added in Phase 10u (2026-09-24), over TDS through the `tiberius` client (rustls, no OpenSSL,
+no Windows authentication). **Not checked against real SQL Server**: its image needs 2 GB,
+over the 1 GB a test container is given, so no SQL Server runs here (Settled decision 87).
+What is proved, against a local TDS fixture that `tiberius` itself decodes: sign-in and its
+refusals, TLS in each mode, the redirect Azure SQL's gateway sends, every type below, and the
+SQL and parameters sent. **What SQL Server then does with that SQL is not proved**: the
+conversions of bound text, the staging table, the `MERGE`. A first run against a real server
+is the check still owed (assignment A67).
+
+**Where:** `host`, `port` (1433; a named instance is reached by its port, as SQL Browser is
+not asked), `database` (unset: the login's default), `username` and `password` (a SQL Server
+login; a `${SECRET:...}`). Reports and errors name `host:port/database` and the user, never
+the password; SQL Server's own error number and message are kept (`SQL Server error 208:
+Invalid object name 'dbo.nope'.`). Every call has a deadline, `timeout_ms`. **Azure SQL's
+redirect** to another server is followed once.
+
+**Encryption:** `encryption: required` (the default) encrypts everything; `login_only` only
+the sign-in, as SQL Server's `Encrypt=false` does; `none` nothing. The server's certificate is
+checked against **`ca_cert`**, one certificate in a `.pem`, `.crt` or `.der` file (the
+authority that signed it; for Azure SQL, the root its chain ends at), or not at all with
+**`trust_server_certificate: true`**, for a test server. **One of the two is required to
+encrypt**: the client can only otherwise trust this machine's certificate store, which no
+connector here does (decision 42). For the same reason, with `encryption: none` a server that
+insists on TLS is refused, with that said, rather than trusted through the store.
+
+### Reading: `src.db.sqlserver`
+
+- **A `table`** (`name`, `schema.name` or `database.schema.name`, bare or bracketed) **or a
+  `query`**, sent through `sp_executesql` and **streamed row by row**. `max_records` becomes
+  `TOP (n)` for a table, and stops reading a query.
+- **Values**: integers and floats numbers; `decimal`/`numeric` their exact text, or a number
+  when the scale is 0 and it fits in 64 bits; `bit` a boolean; `date` its text; `time`,
+  `datetime`, `smalldatetime` and `datetime2` their text to the microsecond (a `datetime2`'s
+  seventh digit is dropped from the row, not from the saved position); `datetimeoffset` the
+  same **in UTC**; `uniqueidentifier` upper-case text, as SQL Server shows it; `varbinary`
+  hex; `xml` its text; `nvarchar(max)` whole.
+- **What a row cannot hold is refused, not dropped**: two columns of one name, a column with
+  no name, a second result set. **A type the client cannot read** (`geography`, `geometry`,
+  `hierarchyid`, `sql_variant`, a CLR type) is an error saying to `CAST` it in a query;
+  `tiberius` panics on those, and the connector turns the panic into that error (its message
+  still reaches the console).
+- **An error part-way through a result fails the read**, with SQL Server's number and
+  message.
+- **Only what is new**: `incremental_column` wraps the read as `SELECT * FROM (<read>) AS
+  [etl_read] WHERE col > CAST(@P1 AS <type>) ORDER BY col`, the last successful run's highest
+  value a **parameter**, never pasted into the SQL; the first run starts at `start`, a SQL
+  literal you write (`'2026-01-01'`, `1000`). **The value saved is the column's own text at
+  its full precision** (`2026-09-24 13:45:30.1234567` for a `datetime2(7)`, `.003` for a
+  `datetime`), so nothing between two microseconds is skipped. Saved only when the whole run
+  succeeds; set aside, and said so, when the table, query or column changed. The column must
+  only go up; `bit`, binary, `xml` and the old `text` types cannot be one. **A query with its
+  own `ORDER BY` fails** as a subquery (SQL Server error 1033), and the error says to leave it
+  out.
+
+### Writing: `snk.db.sqlserver`
+
+- **Batched, parameterised `INSERT`s**: `INSERT INTO <table> (<columns>) VALUES (@P1, ...),
+  (...)`, as many rows as fit in 2,000 parameters, at most 1,000 (SQL Server's own limits:
+  2,100 parameters, 1,000 rows a `VALUES`). The table must exist, and every row must have the
+  first row's columns.
+- **Every value is bound as text** (`nvarchar`), a null as NULL, and **SQL Server converts
+  each to its column's type**: exact for `decimal`, and `'true'`/`'false'` for `bit`.
+  **Not converted**: text into `varbinary` (SQL Server refuses it implicitly), a number in
+  exponent form (`1e-10`) into `decimal`, and a DuckDB `TIMESTAMP WITH TIME ZONE`'s `+00`
+  suffix into `datetimeoffset` (it wants `+00:00`); cast those upstream. A nested value
+  arrives as its JSON text.
+- **`mode: append`** inserts; **`truncate`** runs `TRUNCATE TABLE` first (not one
+  transaction with the inserts); a failure says how many rows were inserted before it, and
+  they stay. At-least-once: a re-run inserts again.
+- **`mode: merge`** on `key_columns` makes a re-run idempotent: every row is first inserted
+  into a temporary table (made by a plain batch, so it outlives the `sp_executesql` calls
+  that fill it), then **one `MERGE ... WITH (HOLDLOCK)`** updates the rows whose keys match
+  and inserts the rest. The table changes all at once or not at all: a failure before or in
+  the `MERGE` leaves it untouched, and says so. **Of two rows with the same key, the later
+  wins.** A row whose key is NULL never matches, so it is inserted every run.
+- **Like every native sink, it inserts only after a run that fully succeeded**, and never in
+  `preview`. There is no bulk load (`INSERT BULK`) yet: a million rows is a thousand-odd
+  statements.
