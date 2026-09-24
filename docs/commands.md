@@ -2314,3 +2314,10 @@ cargo test --workspace                     # every ETL_TEST_* set, twice: 1035 a
 python docs_10m.py                         # connectors.md, plan, tracker, learnings, assignments (A57-A58)
 ./scripts/test-services.ps1 -Stop
 ```
+
+```bash
+gh run view 35971619028                    # gate (ubuntu) FAILED at Tests
+gh api --allow-escape-sequences repos/marun224/local_etl_tool/actions/jobs/107542415884/logs
+#   "You are running out of disk space ... 77 MB"; rustc: "No space left on device" compiling mongodb
+# gate.yml: a "Free disk space" step on Ubuntu, first after checkout
+```

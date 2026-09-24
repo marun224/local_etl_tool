@@ -1667,6 +1667,12 @@ ran*. Earlier ones were resolved 2026-09-16 (Settled decisions 5–8).
 
 ### From Phase 10m
 
+- **CI's Ubuntu runner ran out of disk** on the first push of 10m (`d1fff00`, run
+  35971619028): the Rust build and every test server's image no longer fit, and `rustc`
+  failed with "No space left on device" compiling `mongodb`. Not a test failure. `gate.yml`
+  now frees the runner's unused toolchains (.NET, Android, GHC, CodeQL, about 20 GB) before
+  anything else on Ubuntu. Every phase that adds a server adds an image, so this is the
+  budget to watch.
 - **Every MongoDB test passed at its first run**, after a probe of the driver answered the
   design's questions first (TLS, upserts, errors, a missing collection).
 - **The mutation that inserts stop at the first refusal was not caught at first**: the test
