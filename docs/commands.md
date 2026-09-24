@@ -2397,3 +2397,26 @@ python docs_10r.py                         # connectors.md, plan, tracker (decis
 ./scripts/test-services.ps1 -Stop
 git commit ... "[skip ci]"; git push      # the user: no CI for 10r
 ```
+
+## 2026-09-24 — Paused
+
+```bash
+docker ps                                  # nothing running
+git status --short                         # both repositories clean; engine ad7b5ee, website 39ec206
+# task_tracker.md: a PAUSED section at the top with the state, CI status and how to resume
+```
+
+## 2026-09-24 — Resumed; 10s and 10t removed from the plan
+
+```bash
+./scripts/test-services.ps1                # MinIO refused 59000: Windows now reserves 58921-59020
+netsh interface ipv4 show excludedportrange protocol=tcp
+# test-services.ps1: MinIO 59000 -> 57900 (the docker run and ETL_TEST_S3); docker rm -f etl-test-minio
+./scripts/test-services.ps1                # all 13 ready
+cargo test --workspace                     # 1086 passed, 0 failed, 0 ignored
+npm --prefix frontend run test             # 155
+./target/debug/etl.exe components          # 80
+# the user: "let us not implement 10s and 10t. let us remove from the plan itself"
+# PLAN_duckle_parity.md: 10s/10t rows and sections deleted, component counts corrected
+# task_tracker.md: decision 86, status rows, next phase 10u, log entry
+```

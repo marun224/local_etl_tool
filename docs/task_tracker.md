@@ -3,6 +3,68 @@
 **State only.** Design lives in [PLAN_duckle_parity.md](PLAN_duckle_parity.md). Read this file
 first when picking the project back up.
 
+> ## ▶ Resumed 2026-09-24 — checks green; 10s and 10t removed from the plan
+>
+> Every check re-run against the 13 test servers: **1086** Rust tests, none failed or
+> ignored; `etl components` **80**; frontend **155**. MinIO moved from port 59000 to **57900**
+> (`test-services.ps1`): Windows now reserves 58921–59020 as well. **Cassandra (10s) and
+> Neo4j (10t) are removed from the plan** (the user, decision 86). **Next: 10u, SQL Server**,
+> against a fixture only (question 15 answered: decision 87), when the user says "start 10u".
+> The website drops Cassandra and Neo4j (decision 88). Engine docs and the services script
+> committed and pushed with `[skip ci]` (the user).
+
+> ## ⏸ PAUSED — 2026-09-24, at the user's request, after Phase 10r
+>
+> **Nothing is half-done.** Both repositories are committed, pushed and clean:
+>
+> | Repository | Last commit | State |
+> |---|---|---|
+> | Engine (`E:\workspace_09212026\ETL_Local_Tool`) | `ad7b5ee` Phase 10r, pushed with `[skip ci]` | clean |
+> | Website (`E:\workspace_09212026\ETL_Local_WebApp`) | `39ec206` MariaDB and ClickHouse working, 20 of 50 | clean; the live site still needs a redeploy |
+>
+> No test containers are running (`./scripts/test-services.ps1 -Stop` was run) and no
+> background CI watch is left. Docker Desktop was running; start it again before resuming.
+>
+> **Where Phases 10m–10u stand** (one connector each, decision 71):
+>
+> | Phase | Connector | State |
+> |---|---|---|
+> | 10m | MongoDB | done, green in CI (run 35972853098) |
+> | 10n | Redis | **not built** (the user, decision 82) |
+> | 10o | BigQuery | done, green in CI (run 35976507434); emulator only |
+> | 10p | Snowflake | done; CI passed both gates, its artifact jobs were cancelled by the next push; fixture only |
+> | 10q | MariaDB | done; its CI run was cancelled at the user's request |
+> | 10r | ClickHouse, and question 16's MySQL fix | done; **no CI** at the user's request |
+> | 10s | Cassandra | **removed from the plan** (the user, decision 86, after resuming) |
+> | 10t | Neo4j | **removed from the plan** (the user, decision 86, after resuming) |
+> | **10u** | **SQL Server** | **next**; against a fixture only (question 15 answered, decision 87) |
+>
+> **CI:** the last fully green run is 10o's (35976507434). 10p, 10q and 10r have passed
+> everything locally (1086 Rust tests with every server up, twice) but not in CI. **Ask the
+> user before the next push whether CI should run**: they stopped it ("Stop CI runs") and
+> asked for none for 10r. A normal push would run CI over 10p–10r together.
+>
+> **To resume:**
+>
+> 1. Start Docker Desktop, then `./scripts/test-services.ps1` (13 servers, all 1 GB-capped
+>    where the image allows; the BigQuery emulator leaks memory, so `docker restart
+>    etl-test-bigquery` between repeated full runs).
+> 2. `cargo test --workspace` with the variables it prints: expect **1086** passing, none
+>    skipped; `etl components`: **80**; `npm --prefix frontend run test`: **155**.
+> 3. Confirm with the user: "start 10u" (SQL Server, fixture only), and whether CI runs
+>    for it. (Was "start 10s"; 10s and 10t were removed after resuming, decision 86.)
+>
+> **Open for the user:** whether CI runs again (question 15 answered after resuming: decision 87);
+> the website's redeploy. BigQuery and Snowflake stay off the website until checked against
+> the real services (assignment A62 is the Snowflake check).
+>
+> **Working notes for whoever resumes** (learned this session): Windows reserves ports
+> 55621–56220 here, and 58921–59020 since the machine restarted (so MinIO moved to 57900), so
+> new services use 57xxx or 58xxx below 58921; `at` is a reserved word in DuckDB's and
+> the BigQuery emulator's SQL; PowerShell 5.1 mangles nested double quotes passed to native
+> programs; shell heredocs and Python strings through the Bash tool can corrupt backslashes,
+> so edits with backslashes go through the editor or a script file.
+
 > ## ✅ Phase 10r (ClickHouse) — built 2026-09-24, green locally; **pushed without CI** at the user's request
 >
 > **What 10r built:** `src.db.clickhouse` and `snk.db.clickhouse` over the HTTP interface:
@@ -147,11 +209,12 @@ first when picking the project back up.
 > minutes). Everything through 10l is committed and pushed; the plan for 10m–10u is not yet
 > committed.
 >
-> **Next:** **10s, Cassandra**, when the user says so: one connector each (MongoDB,
-> BigQuery, Snowflake, MariaDB and ClickHouse done; Cassandra, Neo4j, SQL Server),
-> planned 2026-09-24. **Redis (10n) is not built** (the user, 2026-09-24); Elasticsearch is
+> **Next:** **10u, SQL Server**, against a fixture only (decision 87), when the user says so: one
+> connector each (MongoDB, BigQuery, Snowflake, MariaDB and ClickHouse done; SQL Server left),
+> planned 2026-09-24. **Redis (10n), Cassandra (10s) and Neo4j (10t) are not built** (the
+> user, 2026-09-24; decisions 82 and 86); Elasticsearch is
 > not built (memory); Oracle is deferred.
-> Open question 15 (SQL Server's memory) waits for 10u. **The website** (`b035bd9`,
+> Question 15 is answered: SQL Server against a fixture only. **The website** (`b035bd9`,
 > pushed) shows 18 of 50 connectors working, MongoDB the latest (both ways); its roadmap
 > names BigQuery and Snowflake as next. BigQuery and Snowflake stay off the working list
 > until read against the real services (decision 78). Kinesis, SQS and Pub/Sub stay off it until
@@ -232,9 +295,9 @@ first when picking the project back up.
 
 ## Where things stand
 
-- **Next phase:** **10s, Cassandra**, planned in [PLAN_duckle_parity.md](PLAN_duckle_parity.md)
-  under *Phases 10m–10u*. Each starts when the user says so. **10n (Redis) is not built**
-  (decision 82).
+- **Next phase:** **10u, SQL Server**, planned in [PLAN_duckle_parity.md](PLAN_duckle_parity.md)
+  under *Phases 10m–10u*; against a fixture only (decision 87); it starts when the user says so.
+  **10n (Redis), 10s (Cassandra) and 10t (Neo4j) are not built** (decisions 82 and 86).
 - **In progress:** nothing. **Phases 0–9, 10a–10m and 10o–10r are done** (10a–10f on
   2026-09-23, 10g–10q on 2026-09-24; CI green through 10o on run 35976507434). **10p
   (`2a474a1`) and 10q (`9073352`) are pushed, but their CI never finished**: 10p's run
@@ -727,9 +790,9 @@ fail the run. That is `ctl.fail`'s shape and it needs 6b's execution-model decis
 | 10p | — Snowflake | **done** (against the fixture only; not checked against real Snowflake) | 2026-09-24 |
 | 10q | — MariaDB (through the MySQL components) | **done** (against MariaDB 11.8 itself; question 16 fixed with 10r) | 2026-09-24 |
 | 10r | — ClickHouse | **done** (against ClickHouse 25.8 itself; pushed without CI) | 2026-09-24 |
-| 10s | — Cassandra | planned | |
-| 10t | — Neo4j | planned | |
-| 10u | — SQL Server | planned; **open question 15** first | |
+| 10s | — Cassandra | **removed from the plan** (the user's choice, decision 86) | 2026-09-24 |
+| 10t | — Neo4j | **removed from the plan** (the user's choice, decision 86) | 2026-09-24 |
+| 10u | — SQL Server | planned; against a fixture only (decision 87) | |
 | 11 | AI assistant + MCP server | not started | |
 | 12 | Benchmarks + parity audit | not started | |
 
@@ -974,7 +1037,7 @@ Decisions 71–81 are Phases 10m–10u's (databases and warehouses), agreed 2026
 recommended, except Elasticsearch, which is not built.
 
 71. **One connector per sub-phase** (10m MongoDB, 10n Redis (dropped: decision 82), 10o BigQuery, 10p Snowflake, 10q
-    MariaDB, 10r ClickHouse, 10s Cassandra, 10t Neo4j, 10u SQL Server), each committed and
+    MariaDB, 10r ClickHouse, 10s Cassandra and 10t Neo4j (both dropped: decision 86), 10u SQL Server), each committed and
     pushed when green, the website updated after each, each started only when the user says so.
 72. **"Others on the site's list"** are the rest of its Databases group: MariaDB, ClickHouse,
     Cassandra, SQL Server and Neo4j. Redshift, Databricks and DuckDB wait for a later family.
@@ -1010,13 +1073,19 @@ recommended, except Elasticsearch, which is not built.
     ClickHouse, both tested against the real servers; CI ran for neither (the user stopped
     it, then asked for none for 10r), which `CLAIMS.md` says.
 85. **No CI for 10r** (the user): pushed with `[skip ci]`.
+86. **Cassandra (10s) and Neo4j (10t) are not built** (the user, 2026-09-24, after 10r:
+    "remove from the plan itself"). Unlike Redis, their designs are deleted from the plan, not
+    kept. The letters are not reused, so 10u SQL Server follows 10r; 82 components after 10u.
+87. **SQL Server is tested against a local fixture only** (question 15, the user: (c)): its
+    image needs 2 GB, over decision 79's cap, so no test container and no CI service. The
+    fixture speaks enough TDS for the tests; "not yet checked against real SQL Server" is
+    recorded and it stays off the website's `working` list, as BigQuery and Snowflake do.
+88. **The website drops Cassandra and Neo4j** (the user, as recommended): out of its
+    connector list, and its roadmap names only SQL Server as next.
 
 ## Open decisions
 
-15. **SQL Server's test server** (before Phase 10u): it needs at least 2 GB of memory, more
-    than decision 79's 1 GB cap that ruled out Elasticsearch. (a) defer it, as Elasticsearch;
-    (b) run it only in a separate CI job with a larger runner; (c) test it against a fixture
-    only. No recommendation yet: the probe in 10q–10t will show how the other servers fit.
+None open. (15, SQL Server's test server, was answered 2026-09-24: a fixture only, decision 87.)
 
 Resolved 2026-09-23, all as recommended: (1) the session's stderr race is fixed by
 framing stderr with an `error()` marker, not by softening the test; (2) the failed Ubuntu job
@@ -3016,3 +3085,21 @@ The user: questions 16 and 17 as recommended, "start 10r, do not run CI for 10r"
 
 **1086 Rust tests with every server up, twice, none skipped; 155 frontend.** Pushed with
 `[skip ci]`.
+
+### 2026-09-24 — Resumed; 10s and 10t removed from the plan
+
+The user: "run ./scripts/test-services.ps1 … cargo test --workspace and validate", then
+"let us not implement 10s and 10t. let us remove from the plan itself".
+
+- **Test servers**: MinIO's port 59000 was refused: Windows now reserves 58921–59020 (after a
+  restart). Moved to **57900** in `test-services.ps1`, which is the only place that uses it;
+  CI starts its own services.
+- **Checks**: 1086 Rust tests with every server up, none failed or ignored; 80 components;
+  155 frontend.
+- **Plan**: the 10s and 10t rows and sections deleted; the component counts corrected
+  (10o–10r's planned counts still included Redis: now 76, 78, 78, 80; 82 after 10u). Decision
+  86, status rows, next phase **10u, SQL Server**, after open question 15. No code touched.
+
+The user then answered: question 15 (c), a fixture only (decision 87); the website drops
+Cassandra and Neo4j (decision 88); commit and push these docs and the services script with
+`[skip ci]`. The plan's 10u section rewritten for the fixture.

@@ -1910,7 +1910,8 @@ protocols, vector DBs.
 **Elasticsearch is not built** (decision 76): its test server needs more memory than the
 project will give a test container. **One connector per sub-phase**, each committed and
 pushed when green, the website updated after each, and each started only when the user says
-so. Oracle is deferred (decision 80).
+so. Oracle is deferred (decision 80). **Cassandra (10s) and Neo4j (10t) were removed from the
+plan** (decision 86, the user, 2026-09-24, after 10r); their letters are not reused.
 
 | Phase | Connector | Components | Test server | Checked against |
 |---|---|---|---|---|
@@ -1920,11 +1921,10 @@ so. Oracle is deferred (decision 80).
 | 10p | Snowflake | `src.warehouse.snowflake`, `snk.warehouse.snowflake` | none exists: the local fixture | the fixture; not real Snowflake |
 | 10q | MariaDB | none new: `src.db.mysql` and `snk.db.mysql` | `mariadb:11.8` (104 MB) | MariaDB itself |
 | 10r | ClickHouse | `src.db.clickhouse`, `snk.db.clickhouse` | `clickhouse:25.8` (231 MB) | ClickHouse itself |
-| 10s | Cassandra | `src.db.cassandra`, `snk.db.cassandra` | `cassandra:5.0` (168 MB), heap capped | Cassandra itself |
-| 10t | Neo4j | `src.db.neo4j`, `snk.db.neo4j` | `neo4j` 2026.08 (402 MB), heap capped | Neo4j itself |
-| 10u | SQL Server | `src.db.sqlserver`, `snk.db.sqlserver` | Microsoft's image, **needs 2 GB** | **open question 15** before it starts |
+| 10u | SQL Server | `src.db.sqlserver`, `snk.db.sqlserver` | none: its image needs 2 GB; the local fixture (decision 87) | the fixture; not real SQL Server |
 
-Components: 72 now; 74, 78, 80, 82, 82, 84, 86, 88, and 90 after 10u.
+Components: 72 before 10m; 74 after 10m, 76 after 10o, 78 after 10p and 10q, 80 after 10r,
+and 82 after 10u (10n, 10s and 10t are not built).
 
 ###### What every one of these shares
 
@@ -2045,7 +2045,7 @@ The samples on both transports. **78 components.**
 **Verify.** Against the emulator: a table read and a query read, types, pages, an
 incremental second run reading only new rows, a missing table named; the load job
 round trip, `truncate` replacing. Against the fixture: sign-in carried, a job still running
-polled, a failed job's errors reported. The sample on both transports. **80 components.**
+polled, a failed job's errors reported. The sample on both transports. **76 components.**
 
 **Done.** BigQuery both ways against the emulator; "not yet checked against real Google
 Cloud" recorded.
@@ -2073,7 +2073,7 @@ RS256 (moved to a shared `jwt.rs` if both need it) and `http.rs`; `connectors.md
 **Verify.** Against the fixture only: the JWT's claims and fingerprint, checked against a
 public-key fingerprint computed independently in the test; a statement polled (`202`, then
 `200`); partitions fetched; types; bind variables sent, never interpolated; errors with
-Snowflake's `code` and `message` named; the sink's batches. **82 components.**
+Snowflake's `code` and `message` named; the sink's batches. **78 components.**
 
 **Done.** Snowflake both ways against the fixture; "not yet checked against real Snowflake"
 recorded, and not marked working on the website.
@@ -2102,7 +2102,7 @@ section of the docs, the website.
 modes, types (MariaDB's `UUID`, `INET6`, `JSON` as `LONGTEXT`), a wrong password. Fix what
 fails. No new component unless the probe shows MariaDB needs one (then `src.db.mariadb`).
 
-**Verify.** The same tests as MySQL's in `verified.rs`, against MariaDB. **82 components.**
+**Verify.** The same tests as MySQL's in `verified.rs`, against MariaDB. **78 components.**
 
 **Done.** MariaDB proven through the MySQL components, or given its own if it must be.
 
@@ -2137,7 +2137,7 @@ SQL too; the tests say `stamp`.
 
 **Verify.** Against ClickHouse: a table and a query read, types (`Decimal`, `DateTime64`,
 `Array`, `Nullable`, `LowCardinality`), incremental runs, a missing table and a wrong
-password named; the sink round trip and a retried batch deduplicated. **84 components.**
+password named; the sink round trip and a retried batch deduplicated. **80 components.**
 
 **Done.** ClickHouse both ways, semantics documented.
 
@@ -2155,71 +2155,29 @@ password named; the sink round trip and a retried batch deduplicated. **84 compo
 - **`max_records` is a `LIMIT`**, and `start` a SQL literal as for the warehouses.
 - **Pushed without CI** (`[skip ci]`), at the user's request.
 
-###### Phase 10s — Cassandra
-
-**Files.** `crates/connectors/src/{cassandra.rs, cassandra/tests.rs}`; `scylla` 1.9 with
-`rustls-023`; the services script (`cassandra:5.0`, heap 512 MB, a password authenticator),
-`gate.yml`, `verified.rs`, a sample, `connectors.md`.
-
-**Do.**
-
-1. **`src.db.cassandra`**: `contact_points`, `username`, `password`, `keyspace`, `table` or
-   `query` (CQL), `consistency` (default `LOCAL_QUORUM`); paged reads (`page_size`);
-   `max_records`. A full-table read is a token-range scan, documented as such: Cassandra has
-   no cheap "everything newer than" query, so **no incremental read** unless the query names
-   a clustering-key range itself.
-2. **`snk.db.cassandra`**: prepared `INSERT`s, concurrent up to a limit, `ttl_seconds`
-   optional. Cassandra's inserts are upserts, so a re-run is idempotent by primary key.
-3. Types: `uuid`/`timeuuid` as text, `decimal` and `varint` as text, collections and UDTs as
-   JSON, `timestamp` as UTC.
-
-**Verify.** Against Cassandra: a table and a query read across several pages, types, a
-missing keyspace and a wrong password named; the sink round trip and a re-run adding
-nothing. **86 components.**
-
-**Done.** Cassandra both ways, semantics documented.
-
-###### Phase 10t — Neo4j
-
-**Files.** `crates/connectors/src/{neo4j.rs, neo4j/tests.rs}` over `http.rs` (Neo4j's Query
-API, `POST /db/<database>/query/v2`); the services script (`neo4j`, heap 512 MB, a
-password), `gate.yml`, `verified.rs`, a sample, `connectors.md`.
-
-**Do.**
-
-1. **`src.db.neo4j`**: `url`, `username`, `password`, `database`, `query` (Cypher, returning
-   named columns), `parameters`; nodes and relationships returned whole become JSON;
-   `max_records`, enforced with the query's own `LIMIT` when it has none.
-2. **`snk.db.neo4j`**: `cypher` run once per batch with the rows as `$rows`
-   (`UNWIND $rows AS row MERGE ...`), batches of 1,000 in one transaction each; the write is
-   as idempotent as the Cypher (`MERGE`), which `connectors.md` says plainly.
-
-**Verify.** Against Neo4j: a query read of nodes, relationships and scalars, parameters, a
-Cypher error named with its code; the sink creating nodes and relationships, a re-run with
-`MERGE` adding nothing. **88 components.**
-
-**Done.** Neo4j both ways, semantics documented.
-
-###### Phase 10u — SQL Server (only once open question 15 is answered)
+###### Phase 10u — SQL Server (against a fixture only: decision 87)
 
 **Files.** `crates/connectors/src/{sqlserver.rs, sqlserver/tests.rs}`; `tiberius` with
-`rustls`; the services script (`mcr.microsoft.com/mssql/server`), `gate.yml`, `verified.rs`,
-a sample, `connectors.md`.
+`rustls`; a local fixture that speaks enough TDS (SQL Server's binary protocol) for the tests,
+in `crates/connectors/src/sqlserver/`; a sample against the fixture, `connectors.md`. No test
+container and no `gate.yml` service: SQL Server's image needs 2 GB, over decision 79's cap.
 
 **Do.** `src.db.sqlserver` (`table` or `query`, `incremental_column` as a parameter) and
 `snk.db.sqlserver` (batched inserts, `mode` `append`, `truncate` or `merge` on `key_columns`
 through a staging table); SQL and Windows-free authentication (SQL logins), TLS with
 `ca_cert` or `trust_server_certificate` for a test server.
 
-**Verify.** Against SQL Server: reads, types (`decimal`, `datetime2`, `datetimeoffset`,
-`uniqueidentifier`, `nvarchar(max)`), incremental runs, the three write modes. **90
-components.**
+**Verify.** Against the fixture only: sign-in, reads, types (`decimal`, `datetime2`,
+`datetimeoffset`, `uniqueidentifier`, `nvarchar(max)`), incremental runs, the three write
+modes, a server error named with its number. **82 components.**
 
-**Done.** SQL Server both ways, semantics documented.
+**Done.** SQL Server both ways against the fixture; "not yet checked against real SQL Server"
+recorded, and it stays off the website's `working` list until it is, as BigQuery and
+Snowflake do.
 
-**Open question 15 (before 10u):** SQL Server's test server needs at least 2 GB of memory,
-more than the 1 GB cap that ruled out Elasticsearch. (a) defer it, as Elasticsearch;
-(b) run it only in a separate CI job with a larger runner; (c) test it against a fixture only.
+**Question 15 answered** (the user, 2026-09-24): (c), a fixture only (decision 87). Deferring
+it, or a separate CI job on a larger runner, were the alternatives. The fixture is larger
+than Snowflake's: TDS is a binary protocol, not HTTP.
 
 **Deferred.** **Elasticsearch** (decision 76: memory), **Oracle** (decision 80: Oracle's
 native client library would break the single binary), OpenSearch with Elasticsearch.

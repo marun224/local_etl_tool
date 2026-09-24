@@ -140,7 +140,7 @@ Invoke-Docker run -d --name etl-test-mariadb --network $network --memory 1g -p 5
 # now answers "repository does not exist" (found 2026-09-23). Any
 # S3-compatible server would do; this one is only what the tests were
 # first written against.
-Invoke-Docker run -d --name etl-test-minio --network $network -p 59000:9000 `
+Invoke-Docker run -d --name etl-test-minio --network $network -p 57900:9000 `
     -e MINIO_ROOT_USER=etl-test -e MINIO_ROOT_PASSWORD=etl-test-secret `
     quay.io/minio/minio server /data
 
@@ -395,7 +395,7 @@ $variables = [ordered]@{
     ETL_TEST_POSTGRES = 'host=127.0.0.1 port=55432 user=postgres password=etl dbname=postgres'
     ETL_TEST_MYSQL    = 'host=127.0.0.1 port=53306 user=root passwd=etl database=etl'
     ETL_TEST_MARIADB  = 'host=127.0.0.1 port=53307 user=root passwd=etl database=etl'
-    ETL_TEST_S3       = 'http://127.0.0.1:59000'
+    ETL_TEST_S3       = 'http://127.0.0.1:57900'
     ETL_TEST_KAFKA    = '127.0.0.1:59092'
     ETL_TEST_KAFKA_SASL     = '127.0.0.1:59094'
     ETL_TEST_KAFKA_TLS      = '127.0.0.1:59095'
