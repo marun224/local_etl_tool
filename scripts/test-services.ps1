@@ -2,8 +2,8 @@
 .SYNOPSIS
     Start the servers the verification tests run against: PostgreSQL, MySQL
     and MinIO (S3) from Phase 10c, Kafka from 10e, NATS from 10g, a Kinesis
-    stand-in from 10h, an SQS stand-in from 10j and Google's Pub/Sub emulator
-    from 10k, each in a throwaway container.
+    stand-in from 10h, an SQS stand-in from 10j, Google's Pub/Sub emulator
+    from 10k and RabbitMQ from 10l, each in a throwaway container.
 
 .DESCRIPTION
     The verification tests read these environment variables and skip each
@@ -38,6 +38,13 @@
       ETL_TEST_PUBSUB     http://host:port of Google's Pub/Sub emulator, which
                           takes any project and checks no sign-in (the RS256
                           and token tests do, without it)
+      ETL_TEST_RABBITMQ   amqp://etl:etl-secret@host:port/%2f of RabbitMQ 4.3
+      ETL_TEST_RABBITMQ_TLS
+                          the same broker's TLS listener, amqps://, with a
+                          certificate signed by Kafka's CA (ETL_TEST_KAFKA_CA)
+      ETL_TEST_RABBITMQ_HTTP
+                          http://host:port of its management API, which the
+                          engine's tests use to make queues and count them
 
     This script starts the containers on a private network, waits until each
     one answers, creates the bucket with MinIO's own `mc` client, and then
@@ -67,7 +74,8 @@ $kafkaSecrets = 'etl-test-kafka-secrets'
 $natsCreds = 'etl-test-nats-creds'
 $containers = @('etl-test-postgres', 'etl-test-mysql', 'etl-test-minio', 'etl-test-kafka',
     'etl-test-nats', 'etl-test-nats-users', 'etl-test-nats-token', 'etl-test-nats-tls',
-    'etl-test-nats-creds', 'etl-test-kinesis', 'etl-test-sqs', 'etl-test-pubsub')
+    'etl-test-nats-creds', 'etl-test-kinesis', 'etl-test-sqs', 'etl-test-pubsub',
+    'etl-test-rabbitmq')
 
 function Invoke-Docker {
     $output = & docker @args 2>&1
@@ -102,7 +110,7 @@ if ($LASTEXITCODE -ne 0) {
 Remove-Everything
 Invoke-Docker network create $network
 
-Write-Host 'Starting PostgreSQL, MySQL, MinIO, Kafka, NATS, Kinesis, SQS and Pub/Sub (the first run pulls the images)'
+Write-Host 'Starting PostgreSQL, MySQL, MinIO, Kafka, NATS, Kinesis, SQS, Pub/Sub and RabbitMQ (the first run pulls the images)'
 
 Invoke-Docker run -d --name etl-test-postgres --network $network -p 55432:5432 `
     -e POSTGRES_PASSWORD=etl postgres:16
@@ -203,6 +211,27 @@ Invoke-Docker run -d --name etl-test-pubsub --network $network -p 58085:8085 `
     gcr.io/google.com/cloudsdktool/google-cloud-cli:586.0.0-emulators `
     gcloud beta emulators pubsub start --host-port=0.0.0.0:8085 --project=etl-test
 
+# RabbitMQ 4.3, a plain listener and a TLS one with the certificate made for
+# Kafka above, and the management plugin (bundled in the image) for its HTTP
+# API. The TLS settings and the plugin list are written by the container's own
+# shell before the server starts, so no file from this checkout (and its line
+# endings) is involved. User etl / etl-secret; guest may only sign in from
+# inside the container. Ports 5767x: Windows reserves some ranges near 55672
+# for itself (found on this machine), and a reserved port cannot be published.
+$rabbitTls = @(
+    'listeners.ssl.default = 5671',
+    'ssl_options.cacertfile = /certs/ca.pem',
+    'ssl_options.certfile = /certs/server.pem',
+    'ssl_options.keyfile = /certs/server.key',
+    'ssl_options.verify = verify_none',
+    'ssl_options.fail_if_no_peer_cert = false'
+) | ForEach-Object { "'$_'" }   # single quotes: PowerShell 5.1 mangles nested double ones
+Invoke-Docker run -d --name etl-test-rabbitmq --network $network `
+    -p 57672:5672 -p 57671:5671 -p 57673:15672 -v "${kafkaSecrets}:/certs:ro" `
+    -e RABBITMQ_DEFAULT_USER=etl -e RABBITMQ_DEFAULT_PASS=etl-secret `
+    --entrypoint sh rabbitmq:4.3-alpine -c `
+    "printf '%s\n' $($rabbitTls -join ' ') > /etc/rabbitmq/conf.d/20-etl-tls.conf && echo '[rabbitmq_management].' > /etc/rabbitmq/enabled_plugins && exec docker-entrypoint.sh rabbitmq-server"
+
 function Wait-For([string] $what, [scriptblock] $probe, [int] $seconds = 180) {
     $deadline = (Get-Date).AddSeconds($seconds)
     while ((Get-Date) -lt $deadline) {
@@ -283,6 +312,9 @@ Wait-For 'Pub/Sub' {
     } catch { $global:LASTEXITCODE = 1 }
 }
 
+# Both listeners accepting connections, not merely the node up.
+Wait-For 'RabbitMQ' { docker exec etl-test-rabbitmq rabbitmq-diagnostics -q check_port_connectivity }
+
 # The CA certificate, for the tests' `ca_cert`. Under target/, which git ignores.
 $caDirectory = Join-Path $PSScriptRoot '../target/test-services'
 New-Item -ItemType Directory -Force $caDirectory | Out-Null
@@ -309,6 +341,9 @@ $variables = [ordered]@{
     ETL_TEST_KINESIS        = 'http://127.0.0.1:54568'
     ETL_TEST_SQS            = 'http://127.0.0.1:59324'
     ETL_TEST_PUBSUB         = 'http://127.0.0.1:58085'
+    ETL_TEST_RABBITMQ       = 'amqp://etl:etl-secret@127.0.0.1:57672/%2f'
+    ETL_TEST_RABBITMQ_TLS   = 'amqps://etl:etl-secret@127.0.0.1:57671/%2f'
+    ETL_TEST_RABBITMQ_HTTP  = 'http://127.0.0.1:57673'
 }
 
 if ($env:GITHUB_ENV) {

@@ -119,8 +119,9 @@ jobs:
 
       # Phase 10c: PostgreSQL, MySQL and MinIO in containers, for
       # tests/verified.rs; since 10e a Kafka broker, since 10g five NATS servers and
-      # since 10h kinesis-mock, since 10j ElasticMQ (SQS) and since 10k the Pub/Sub
-      # emulator, for the streaming and queue connectors' tests and samples. Linux only, because
+      # since 10h kinesis-mock, since 10j ElasticMQ (SQS), since 10k the Pub/Sub
+      # emulator and since 10l RabbitMQ, for the streaming and queue connectors'
+      # tests and samples. Linux only, because
       # Windows runners cannot run Linux containers; on Windows those tests
       # skip, and the lake ones still run.
       - name: Start the servers the verification tests use
@@ -145,7 +146,7 @@ jobs:
         run: |
           count=$(${{ matrix.etl }} components | tail -1 | grep -oE '^[0-9]+')
           echo "components: $count"
-          test "$count" = "70"
+          test "$count" = "72"
 
       - name: The samples still print what they printed
         shell: bash

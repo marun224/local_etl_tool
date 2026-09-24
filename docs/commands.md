@@ -2240,3 +2240,35 @@ python docs_10k.py                        # scratchpad: plan as-built, tracker, 
 ```
 
 Not committed.
+
+## 2026-09-24 — Commit and push 10j and 10k, and the website
+
+```bash
+git add -A; git -c user.name="Arun M" -c user.email=marun.mahadevu@gmail.com commit -F <message file>   # 4b44de9, one commit for 10j and 10k
+git push origin main                       # CI run 35959734855: all six jobs green
+# website: git add -A; commit efc49ee; git push origin main
+```
+
+## 2026-09-24 — Phase 10l: RabbitMQ
+
+```bash
+cargo new lapin_probe (scratchpad); cargo add lapin@4.12 --no-default-features -F rustls--ring,tokio
+docker run -d --rm --name etl-probe-rabbit -p 55672:5672 rabbitmq:4.3-alpine   # FAILED: port reserved by Windows
+netsh interface ipv4 show excludedportrange protocol=tcp                        # 55621-56220 reserved
+docker run ... -p 57672:5672 -p 57671:5671 rabbitmq:4.3-alpine (TLS conf.d written by sh)
+cargo run (probe)                          # hold, nack/requeue, drop requeues, NOT_FOUND, ACCESS_REFUSED,
+                                           #   missing vhost hangs (20 s timeout), TLS via RustlsConnector
+cargo add -p etl-connectors lapin amq-protocol-tcp async-rs; tokio +rt-multi-thread
+./scripts/test-services.ps1                # FAILED once: nested double quotes mangled; single quotes fixed it
+cargo test -p etl-connectors --lib rabbitmq::tests       # 11 + 1 fixed (x-acquired-count); then 12 x3
+cargo test -p etl-duckdb-engine --test verified rabbitmq # 4
+python mutate_10l.py                       # 4 mutations, each caught, each reverted
+cargo fmt --all --check; cargo clippy --workspace --all-targets -- -D warnings
+./target/debug/etl components              # 72
+cd frontend; npm test; npm run typecheck   # 143
+cargo test --workspace                     # every ETL_TEST_* set, twice: 1021 and 1021, none skipped
+python docs_10l.py                         # connectors.md, plan, tracker, learnings, assignments (A55-A56)
+./scripts/test-services.ps1 -Stop
+```
+
+Not committed.

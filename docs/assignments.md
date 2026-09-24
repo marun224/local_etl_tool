@@ -424,3 +424,19 @@ Copy-Item samples\pipelines\orders_enriched.json samples\out\scratch\
   `max_wait_ms` on an empty topic).
   *Check:* explain, from `pubsub.rs`, what would happen to the held messages at second 10 if
   `receive` did not call `modify_deadline` after each pull, and which test would catch it.
+
+## Phase 10l — RabbitMQ
+
+- [ ] **A55. Lose the connection on purpose.**
+  *Do:* with the services up, publish six orders to a queue, start
+  `samples/pipelines/rabbitmq_orders.json` with a filter that sleeps, and meanwhile run
+  `docker exec etl-test-rabbitmq rabbitmqctl close_all_connections "test"`.
+  *Check:* the run's report has a warning, not a lost message: the next run reads six rows,
+  each with `_redelivered` true. Which line of `rabbitmq.rs` made the warning?
+
+- [ ] **A56. 🦀 Publish into nothing.**
+  *Do:* in `rabbitmq.rs`, set `mandatory: false` and run
+  `a_row_no_queue_receives_fails_saying_what_landed`.
+  *Hint:* what does the confirm say about a message that reached no queue?
+  *Check:* explain in two sentences why the test passes with `mandatory: true` and fails
+  without it, and what a user would have seen in production.

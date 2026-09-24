@@ -635,3 +635,31 @@ the fuller record. From Phase 10 on, a section is added at the end of each phase
   runs on Windows.
 - **Documentation with Windows paths is written with the editor, not through a
   string-escaping script**: `\a` is a bell in Python.
+
+## Phase 10l — RabbitMQ (2026-09-24)
+
+**Concepts**
+- **An AMQP hold is a channel.** Unacknowledged deliveries belong to the channel that
+  received them; close it, or lose the connection, and the broker puts them back. So the
+  receipt owns a live connection instead of a list of handles.
+- **Delivery tags and `multiple`.** Tags count up per channel, and one `ack` or `nack` with
+  `multiple` settles everything up to a tag: a whole batch in one frame.
+- **Publisher confirms and `mandatory`.** A confirm says the broker took a message, not that
+  any queue did; `mandatory` makes the broker hand back a message no queue matched, so
+  "published into nothing" becomes an error.
+- **An async client in blocking code** needs its runtime alive between calls when the
+  protocol has background work (heartbeats): a worker thread, not a current-thread runtime.
+
+**Decisions and why**
+- **Probe before planning the code**: the plan named the TLS question as open; ten minutes
+  in a scratch project answered it and found the vhost hang, which would otherwise have
+  surfaced as a hung test.
+- **A deadline on every call** over trusting the client: a hang is the worst way a run can
+  fail, since nothing reports it.
+- **The management API for the engine's tests** over another AMQP client in the engine crate:
+  `ureq` was already there.
+
+**Mistakes worth not repeating**
+- **Passing a string with nested double quotes to a native program from PowerShell 5.1.**
+  Use single quotes inside, or build the argument some other way.
+- **Assuming a header a broker documents is stable across major versions** (`x-delivery-count`).

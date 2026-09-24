@@ -29,7 +29,7 @@ records again. `etl state list` shows positions, and `etl state forget <pipeline
 in (or `--workspace`). `preview` reads from the saved position and saves nothing.
 
 **A queue source holds its messages instead** (Phase 10j; SQS is the first, Pub/Sub the
-second). A queue keeps no
+second, RabbitMQ the third). A queue keeps no
 position to come back to: it hands a message out, hides it, and deletes it only when told to.
 So a queue source saves nothing in `.etl/state/`; it **holds** what it received and hands the
 engine a *receipt*, which the engine settles exactly once:
@@ -710,5 +710,63 @@ naming the row.
   published before it; they stay on the topic.
 - **At-least-once**, as the other sinks: a re-run publishes everything again. Pub/Sub has no
   duplicate window for publishing.
+- **Like every native sink, it publishes only after a run that fully succeeded**, and never
+  in `preview`.
+
+## `src.queue.rabbitmq` and `snk.queue.rabbitmq`
+
+Added in Phase 10l (2026-09-24). AMQP 0-9-1 through `lapin`, on a small `tokio` runtime of the
+connector's own. **Verified against RabbitMQ 4.3 itself**, plain and over TLS, classic and
+quorum queues.
+
+**Where:** `url`, `amqp://host[:port][/vhost]` or `amqps://` for TLS (ports 5672 and 5671 by
+default). `username`, `password` and `vhost` fill in or override the URL's, so the password
+can be a `${SECRET:...}` rather than part of a URL. The report and every error name
+`host:port` and the vhost, never the password. **TLS** trusts the bundled public roots, or
+`ca_cert`, exactly as Kafka and NATS do: `lapin` is handed the same `rustls` configuration
+through its own connect function. **`timeout_ms`** (default 30,000) bounds every call to the
+broker. It matters: a connect to a **vhost that does not exist** is refused by RabbitMQ at
+once, but the refusal never reaches the client, so the run fails after `timeout_ms` saying
+the vhost is the first thing to check.
+
+### Receiving: `src.queue.rabbitmq`
+
+- **A batch** is `basic.get` without acknowledging, one message at a time, until
+  `max_records` (default **10,000**), the queue answers empty, or `max_wait_ms` (default
+  30,000) has passed. The queue must already exist.
+- **Held by the open channel.** RabbitMQ keeps what it handed out for as long as the channel
+  stays open, so the receipt owns the connection and the channel. Nothing needs extending:
+  `lapin` sends heartbeats on a thread of its own while the run goes on. Acknowledging is one
+  `basic.ack` with `multiple`, up to the last delivery; releasing is one `basic.nack` with
+  `multiple` and `requeue`. Then the channel and connection are closed.
+- **A connection lost while holding gives everything back**: the broker requeues whatever
+  was unacknowledged. The acknowledgement then fails, and the run warns that those messages
+  will come again. The broker's own limit on a hold is `consumer_timeout`, **30 minutes by
+  default**; a run holding messages longer than that ends the same way.
+- **Rows** are the brokers' `value_format` (`json`, `text`, `bytes`) over the body, plus
+  `_queue`, `_exchange` (null for the default exchange), `_routing_key`, `_redelivered`
+  (true when it was handed out before), `_message_id` and `_timestamp` (the publisher's, if
+  set) and `_headers` (as JSON). **A quorum queue counts hand-outs in the
+  `x-acquired-count` header**; RabbitMQ 4's `x-delivery-count` counts only deliveries that
+  failed.
+- **Order:** a queue's own. A released message goes back to its place in a classic queue;
+  a quorum queue may put it behind later ones.
+- **Nothing is saved in `.etl/state/`**: the queue holds the state.
+
+### Publishing: `snk.queue.rabbitmq`
+
+Each row is published as **one JSON message** (`content_type` `application/json`) to
+`exchange`, the default exchange when unset, with `routing_key` or each row's
+`routing_key_column` (a null key fails, naming the row). The default exchange routes by
+queue name, so it needs a routing key.
+
+- **`persistent`** (default on) marks messages persistent, so a durable queue keeps them over
+  a broker restart.
+- **Publisher confirms**, awaited every 1,000 messages and at the end. Messages are published
+  `mandatory`, so **a message no queue receives fails the run**, naming the row and its
+  routing key, rather than vanishing, which an exchange with no matching binding otherwise
+  does in silence. A failure says how many messages had been confirmed before it; they stay
+  published.
+- **At-least-once**: a re-run publishes everything again.
 - **Like every native sink, it publishes only after a run that fully succeeded**, and never
   in `preview`.

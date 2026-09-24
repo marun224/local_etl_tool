@@ -1865,3 +1865,273 @@ fn previewing_a_pubsub_source_gives_everything_back() {
     assert_eq!(shown.rows.len(), 9);
     assert_eq!(topic.waiting(), 9, "a preview is a look, not a take");
 }
+
+// ---------------------------------------------------------------------------
+// RabbitMQ, held until the run's outcome is known (Phase 10l)
+// ---------------------------------------------------------------------------
+
+/// One call to the test broker's management API, as its test user.
+fn rabbitmq_http(
+    http: &str,
+    method: &str,
+    path: &str,
+    body: serde_json::Value,
+) -> serde_json::Value {
+    let url = format!("{http}/api/{path}");
+    let auth = "Basic ZXRsOmV0bC1zZWNyZXQ="; // etl:etl-secret
+    let sent = match method {
+        "PUT" => ureq::put(&url)
+            .header("Authorization", auth)
+            .header("Content-Type", "application/json")
+            .send(body.to_string().as_bytes()),
+        "POST" => ureq::post(&url)
+            .header("Authorization", auth)
+            .header("Content-Type", "application/json")
+            .send(body.to_string().as_bytes()),
+        _ => ureq::delete(&url).header("Authorization", auth).call(),
+    };
+    let mut response = sent.unwrap_or_else(|error| panic!("{method} {path}: {error}"));
+    let text = response.body_mut().read_to_string().unwrap();
+    serde_json::from_str(&text).unwrap_or(serde_json::Value::Null)
+}
+
+/// A durable queue in the default vhost, deleted when dropped.
+struct RabbitQueue {
+    http: String,
+    name: String,
+}
+
+impl RabbitQueue {
+    fn new(http: &str, name: &str) -> Self {
+        rabbitmq_http(
+            http,
+            "PUT",
+            &format!("queues/%2F/{name}"),
+            serde_json::json!({ "durable": true }),
+        );
+        RabbitQueue {
+            http: http.to_string(),
+            name: name.to_string(),
+        }
+    }
+
+    /// How many messages are waiting: each is taken, counted and put straight
+    /// back. Those a run is holding are not waiting.
+    fn waiting(&self) -> u64 {
+        let got = rabbitmq_http(
+            &self.http,
+            "POST",
+            &format!("queues/%2F/{}/get", self.name),
+            serde_json::json!({ "count": 1000, "ackmode": "reject_requeue_true", "encoding": "auto" }),
+        );
+        got.as_array().map_or(0, |messages| messages.len() as u64)
+    }
+}
+
+impl Drop for RabbitQueue {
+    fn drop(&mut self) {
+        let _ = std::panic::catch_unwind(|| {
+            rabbitmq_http(
+                &self.http,
+                "DELETE",
+                &format!("queues/%2F/{}", self.name),
+                serde_json::Value::Null,
+            )
+        });
+    }
+}
+
+/// The broker's AMQP URL and its management API, or `None` to skip.
+fn rabbitmq() -> Option<(String, String)> {
+    Some((
+        server("ETL_TEST_RABBITMQ")?,
+        server("ETL_TEST_RABBITMQ_HTTP")?,
+    ))
+}
+
+/// An orders queue holding `orders`, and an empty one for the large orders,
+/// named as `rabbitmq_orders` binds them.
+fn rabbitmq_queues(
+    http: &str,
+    test: &str,
+    orders: &[serde_json::Value],
+) -> (RabbitQueue, RabbitQueue) {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .subsec_nanos();
+    let name = format!("etl-verified-{test}-{nanos}");
+    let queue = RabbitQueue::new(http, &name);
+    let large = RabbitQueue::new(http, &format!("{name}-large"));
+    for order in orders {
+        let routed = rabbitmq_http(
+            http,
+            "POST",
+            "exchanges/%2F/amq.default/publish",
+            serde_json::json!({
+                "properties": {}, "routing_key": name,
+                "payload": order.to_string(), "payload_encoding": "string",
+            }),
+        );
+        assert_eq!(routed["routed"], true, "{routed}");
+    }
+    (queue, large)
+}
+
+fn rabbitmq_orders(
+    workspace: &Path,
+    url: &str,
+    queue: &RabbitQueue,
+    policy: Option<serde_json::Value>,
+) -> etl_duckdb_engine::Plan {
+    let text = std::fs::read_to_string(repo_root().join("samples/pipelines/rabbitmq_orders.json"))
+        .expect("the sample is committed");
+    let mut json: serde_json::Value = serde_json::from_str(&text).unwrap();
+    if let Some(policy) = policy {
+        json["nodes"][1]["data"]["policy"] = policy;
+    }
+    let resolver = Resolver::new(workspace)
+        .bind("rabbitmq_url", url)
+        .bind("queue", &queue.name)
+        .bind("large_queue", &format!("{}-large", queue.name));
+    let resolved = resolve(&document(&json.to_string()), &resolver).expect("resolves");
+    compile_with(&resolved.document, &CompileOptions::default()).expect("compiles")
+}
+
+fn the_rabbitmq_sample_takes_what_it_read(name: &str, policy: Option<serde_json::Value>) {
+    let Some((url, http)) = rabbitmq() else {
+        return;
+    };
+    let Some((workspace, binary)) = workspace(name, &[]) else {
+        return;
+    };
+    let (queue, large) = rabbitmq_queues(&http, name, &sample_orders());
+
+    let first = run(
+        &rabbitmq_orders(&workspace, &url, &queue, policy.clone()),
+        &options(&workspace),
+    )
+    .expect("runs");
+    let put = rows(&first)[3].expect("the large orders were published");
+    assert_eq!(rows(&first)[0], Some(12));
+    assert_eq!(rows(&first)[1], Some(put));
+    assert!(first.warnings.is_empty(), "{:?}", first.warnings);
+    let acknowledged = format!(
+        "Orders queue: 12 message(s) acknowledged on queue '{}'",
+        queue.name
+    );
+    assert!(
+        first.notes.iter().any(|note| note == &acknowledged),
+        "{:?}",
+        first.notes
+    );
+    assert_eq!(queue.waiting(), 0, "acknowledged: gone");
+    assert_eq!(large.waiting(), put);
+    assert_eq!(
+        query(
+            &binary,
+            &workspace,
+            "SELECT count(*) AS n, bool_or(_redelivered) AS r, min(_routing_key) AS k \
+             FROM 'samples/out/rabbitmq_large_orders.parquet';"
+        ),
+        format!(r#"[{{"n":{put},"r":false,"k":"{}"}}]"#, queue.name)
+    );
+
+    let second = run(
+        &rabbitmq_orders(&workspace, &url, &queue, policy),
+        &options(&workspace),
+    )
+    .expect("runs");
+    assert_eq!(rows(&second), [Some(0), Some(0), Some(0), Some(0)]);
+}
+
+#[test]
+fn the_rabbitmq_sample_takes_what_it_read_on_the_one_script_path() {
+    the_rabbitmq_sample_takes_what_it_read("rabbitmq_script", None);
+}
+
+#[test]
+fn the_rabbitmq_sample_takes_what_it_read_on_the_session_path() {
+    the_rabbitmq_sample_takes_what_it_read(
+        "rabbitmq_session",
+        Some(serde_json::json!({ "retryAttempts": 1 })),
+    );
+}
+
+/// A pipeline reading `queue` into a filter that fails at run time.
+fn rabbitmq_broken(url: &str, queue: &str, policy: &str) -> PipelineDoc {
+    document(&format!(
+        r#"{{ "formatVersion": 1, "nodes": [
+            {{ "id": "read", "position": {{"x":0,"y":0}}, "data": {{ "label": "Queue",
+               "componentId": "src.queue.rabbitmq",
+               "properties": {{ "queue": "{queue}", "url": "{url}" }} }} }},
+            {{ "id": "broken", "position": {{"x":0,"y":0}}, "data": {{ "label": "Broken",
+               "componentId": "xf.filter", "properties": {{ "predicate": "no_such_column > 1" }}
+               {policy} }} }},
+            {{ "id": "out", "position": {{"x":0,"y":0}}, "data": {{ "label": "Out",
+               "componentId": "snk.file.parquet", "properties": {{ "path": "out.parquet" }} }} }}
+          ],
+          "edges": [ {{ "id": "e1", "source": "read", "target": "broken" }},
+                     {{ "id": "e2", "source": "broken", "target": "out" }} ] }}"#
+    ))
+}
+
+#[test]
+fn a_failed_rabbitmq_run_gives_every_message_back() {
+    let Some((url, http)) = rabbitmq() else {
+        return;
+    };
+    let Some((workspace, _)) = workspace("rabbitmq_failed", &[]) else {
+        return;
+    };
+    let (queue, _large) = rabbitmq_queues(&http, "failed", &sample_orders()[..6]);
+
+    // One script: the failure is an error, and the messages are back at once.
+    let plan = compile_with(
+        &rabbitmq_broken(&url, &queue.name, ""),
+        &CompileOptions::default(),
+    )
+    .unwrap();
+    assert!(run(&plan, &options(&workspace)).is_err());
+    assert_eq!(queue.waiting(), 6, "released");
+
+    // Carrying on past the failure: still a failed run, still released, and
+    // the report says so.
+    let plan = compile_with(
+        &rabbitmq_broken(
+            &url,
+            &queue.name,
+            r#", "policy": { "continueOnFailure": true }"#,
+        ),
+        &CompileOptions::default(),
+    )
+    .unwrap();
+    let report = run(&plan, &options(&workspace)).expect("a report, not an error");
+    assert!(report.failed());
+    assert_eq!(report.stages[0].rows, Some(6), "the source did read them");
+    let released = format!(
+        "Queue: 6 message(s) released back to queue '{}'",
+        queue.name
+    );
+    assert!(
+        report.notes.iter().any(|note| note == &released),
+        "{:?}",
+        report.notes
+    );
+    assert_eq!(queue.waiting(), 6, "released again");
+}
+
+#[test]
+fn previewing_a_rabbitmq_source_gives_everything_back() {
+    let Some((url, http)) = rabbitmq() else {
+        return;
+    };
+    let Some((workspace, _)) = workspace("rabbitmq_preview", &[]) else {
+        return;
+    };
+    let (queue, _large) = rabbitmq_queues(&http, "preview", &sample_orders()[..9]);
+    let plan = rabbitmq_orders(&workspace, &url, &queue, None);
+    let shown = preview(&plan, "read_orders", 50, &options(&workspace)).expect("previews");
+    assert_eq!(shown.rows.len(), 9);
+    assert_eq!(queue.waiting(), 9, "a preview is a look, not a take");
+}

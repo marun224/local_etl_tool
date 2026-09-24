@@ -7,17 +7,20 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+amq-protocol-tcp = { version = "10.6", default-features = false, features = ["rustls-common", "rustls--ring", "tokio"] }
 async-nats = { version = "0.50", default-features = false, features = ["jetstream", "ring", "nkeys"] }
+async-rs = { version = "0.8", default-features = false, features = ["tokio"] }
 etl-metadata.workspace = true
 etl-plugin-sdk.workspace = true
 etl-state.workspace = true
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+lapin = { version = "4.12", default-features = false, features = ["rustls--ring", "tokio"] }
 quick-xml = "0.41.0"
 ring = "0.17"
 rskafka = { version = "0.6", features = ["transport-tls"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 serde_json.workspace = true
-tokio = { version = "1", default-features = false, features = ["rt", "net", "time"] }
+tokio = { version = "1", default-features = false, features = ["rt", "net", "time", "rt-multi-thread"] }
 ureq = "~3.2.1"
 webpki-roots = "1"
 

@@ -1,0 +1,139 @@
+{
+  "formatVersion": 1,
+  "name": "rabbitmq_orders",
+  "nodes": [
+    {
+      "id": "read_orders",
+      "type": "source",
+      "position": {
+        "x": 0.0,
+        "y": 0.0
+      },
+      "data": {
+        "label": "Orders queue",
+        "componentId": "src.queue.rabbitmq",
+        "properties": {
+          "queue": "${queue}",
+          "url": "${rabbitmq_url}",
+          "username": "${rabbitmq_user}",
+          "password": "${rabbitmq_password}",
+          "max_records": 1000,
+          "columns": {
+            "order_id": "INTEGER",
+            "customer_id": "VARCHAR",
+            "order_ts": "TIMESTAMP",
+            "amount": "DECIMAL(10,2)",
+            "status": "VARCHAR",
+            "_redelivered": "BOOLEAN",
+            "_routing_key": "VARCHAR"
+          }
+        },
+        "alias": "orders"
+      }
+    },
+    {
+      "id": "large_only",
+      "type": "transform",
+      "position": {
+        "x": 280.0,
+        "y": 0.0
+      },
+      "data": {
+        "label": "Over 100",
+        "componentId": "xf.filter",
+        "properties": {
+          "predicate": "amount > 100"
+        }
+      }
+    },
+    {
+      "id": "write_large",
+      "type": "sink",
+      "position": {
+        "x": 560.0,
+        "y": 0.0
+      },
+      "data": {
+        "label": "Large orders",
+        "componentId": "snk.file.parquet",
+        "properties": {
+          "path": "${workspace}/samples/out/rabbitmq_large_orders.parquet",
+          "mode": "overwrite"
+        }
+      }
+    },
+    {
+      "id": "put_large",
+      "type": "sink",
+      "position": {
+        "x": 560.0,
+        "y": 160.0
+      },
+      "data": {
+        "label": "Large orders queue",
+        "componentId": "snk.queue.rabbitmq",
+        "properties": {
+          "routing_key": "${large_queue}",
+          "url": "${rabbitmq_url}",
+          "username": "${rabbitmq_user}",
+          "password": "${rabbitmq_password}"
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "source": "read_orders",
+      "target": "large_only",
+      "sourceHandle": "main",
+      "targetHandle": "in"
+    },
+    {
+      "id": "e2",
+      "source": "large_only",
+      "target": "write_large",
+      "sourceHandle": "main",
+      "targetHandle": "in"
+    },
+    {
+      "id": "e3",
+      "source": "large_only",
+      "target": "put_large",
+      "sourceHandle": "main",
+      "targetHandle": "in"
+    }
+  ],
+  "parameters": {
+    "queue": {
+      "type": "string",
+      "required": true,
+      "default": "etl-sample-orders",
+      "description": "The RabbitMQ queue to read. A run's messages are acknowledged only when the whole run succeeds; otherwise they go back to the queue."
+    },
+    "large_queue": {
+      "type": "string",
+      "required": true,
+      "default": "etl-sample-large-orders",
+      "description": "The queue the large orders are published to, through the default exchange. It must already exist."
+    },
+    "rabbitmq_url": {
+      "type": "string",
+      "required": true,
+      "default": "amqp://127.0.0.1:57672/%2f",
+      "description": "The broker. The committed default is the RabbitMQ scripts/test-services.ps1 starts."
+    },
+    "rabbitmq_user": {
+      "type": "string",
+      "required": false,
+      "default": "etl",
+      "description": "The user to sign in as."
+    },
+    "rabbitmq_password": {
+      "type": "string",
+      "required": false,
+      "default": "etl-secret",
+      "description": "Test-only: the test broker's password. For a real broker, keep the password in a secret (etl secret set) and reference that instead."
+    }
+  }
+}

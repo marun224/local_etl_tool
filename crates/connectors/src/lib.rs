@@ -27,6 +27,7 @@ pub mod kinesis;
 mod lease;
 pub mod nats;
 pub mod pubsub;
+pub mod rabbitmq;
 pub mod rest;
 pub mod sqs;
 mod tls;
@@ -54,6 +55,8 @@ pub fn all() -> &'static [(String, Connector)] {
             Connector::Sink(&sqs::SqsSink),
             Connector::Source(&pubsub::PubsubSource),
             Connector::Sink(&pubsub::PubsubSink),
+            Connector::Source(&rabbitmq::RabbitmqSource),
+            Connector::Sink(&rabbitmq::RabbitmqSink),
         ]
         .into_iter()
         .map(|connector| (connector.spec().id, connector))

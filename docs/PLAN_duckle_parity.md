@@ -1880,6 +1880,27 @@ confirms. The sample on both transports. **72 components.**
 
 **Done.** RabbitMQ both ways, plain and TLS, semantics documented.
 
+**As built (2026-09-24).** Done as planned, with these differences:
+
+- **TLS is `tls.rs`'s, as hoped.** `lapin` takes no `rustls` configuration directly, but its
+  `Connection::connector` takes a connect function, and `RustlsConnector` is built from a
+  `rustls::ClientConfig`; that needs `amq-protocol-tcp`'s `rustls-common` feature, named
+  directly. No `aws-lc`, OpenSSL or platform verifier comes in. Found in a scratchpad probe.
+- **A multi-threaded `tokio` runtime with one worker**, owned by the receipt, rather than
+  NATS's current-thread one: `lapin`'s heartbeat is a task on it, and has to run while the
+  engine is busy elsewhere. `lapin`'s I/O loop is a thread of its own.
+- **Every call has a deadline, `timeout_ms`.** The probe found a connect to a missing vhost
+  never answered by `lapin`, though the broker refused it in 30 ms.
+- **Release falls back to closing.** If the `nack` cannot be sent, closing the connection
+  gives the messages back all the same, so a release never fails.
+- **Sends are `mandatory`**, so an unroutable message fails the run (a returned message
+  arrives with its confirm) instead of being dropped by the exchange.
+- **Quorum queues count redeliveries in `x-acquired-count`** (RabbitMQ 4), not
+  `x-delivery-count`.
+- **The engine's tests reach the broker through its management API** (`ETL_TEST_RABBITMQ_HTTP`,
+  the plugin enabled in the container), since `verified.rs` cannot use the connector crate's
+  AMQP client. Ports 5767x: 55621-56220 were reserved by Windows on this machine.
+
 **Later families**, planned one at a time when reached: NoSQL, warehouses over their own
 protocols, vector DBs.
 
