@@ -2437,3 +2437,16 @@ cargo fmt --all -- --check; cargo clippy --workspace --all-targets      # clean
 docker restart etl-test-bigquery; cargo test --workspace (with the services' variables)   # 1117, twice
 npm --prefix frontend run test               # 158: three for the new sample
 ```
+
+## 2026-09-24 — CI for 10u; MinIO replaced by SeaweedFS
+
+```bash
+gh run view 36023832935 --json jobs          # windows gate green; ubuntu failed starting servers
+gh api repos/marun224/local_etl_tool/actions/jobs/107715161422/logs   # quay.io/minio/minio: unauthorized
+docker manifest inspect quay.io/minio/minio:latest   # (and minio/minio, quay.io/minio/mc): refused
+docker run -d --name probe-seaweed --memory 1g -p 57901:8333 chrislusf/seaweedfs:4.47 server -dir=/data -s3 -s3.port=8333
+docker exec probe-seaweed sh -c "printf 's3.configure -user etl-test ... -apply\ns3.bucket.create -name etl-test\n' | weed shell"
+$env:ETL_TEST_S3='http://127.0.0.1:57901'; cargo test -p etl-duckdb-engine --test verified s3_   # 2 passed
+./scripts/test-services.ps1 -Stop; ./scripts/test-services.ps1   # SeaweedFS (S3) is ready
+cargo test --workspace                        # with the services' variables
+```

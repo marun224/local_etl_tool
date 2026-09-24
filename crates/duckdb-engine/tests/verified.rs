@@ -249,7 +249,7 @@ fn a_moved_iceberg_table_named_by_its_metadata_file_is_refused_before_it_runs() 
 }
 
 // ---------------------------------------------------------------------------
-// Servers: Postgres, MySQL, S3 (MinIO)
+// Servers: Postgres, MySQL, S3 (SeaweedFS; MinIO before 10u)
 // ---------------------------------------------------------------------------
 //
 // Each reads its server from an environment variable and skips without it.
@@ -395,7 +395,7 @@ fn a_wrong_database_password_fails_and_is_masked() {
     assert!(!error.contains("wrong-hunter2"), "{error}");
 }
 
-/// S3 through MinIO: write Parquet and CSV, read both back.
+/// S3 through an S3-compatible server: write Parquet and CSV, read both back.
 #[test]
 fn s3_is_written_and_read_back_through_an_s3_compatible_endpoint() {
     let Some(endpoint) = server("ETL_TEST_S3") else {

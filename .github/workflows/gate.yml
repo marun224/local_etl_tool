@@ -131,7 +131,7 @@ jobs:
       - name: Clippy
         run: cargo clippy ${{ matrix.scope }} --all-targets -- -D warnings
 
-      # Phase 10c: PostgreSQL, MySQL and MinIO in containers, for
+      # Phase 10c: PostgreSQL, MySQL and S3 (SeaweedFS since 10u) in containers, for
       # tests/verified.rs; since 10e a Kafka broker, since 10g five NATS servers and
       # since 10h kinesis-mock, since 10j ElasticMQ (SQS), since 10k the Pub/Sub
       # emulator, since 10l RabbitMQ, since 10m MongoDB, since 10o a BigQuery

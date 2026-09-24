@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
     Start the servers the verification tests run against: PostgreSQL, MySQL
-    and MinIO (S3) from Phase 10c, Kafka from 10e, NATS from 10g, a Kinesis
+    and an S3 server (SeaweedFS since 10u; MinIO before) from Phase 10c, Kafka from 10e, NATS from 10g, a Kinesis
     stand-in from 10h, an SQS stand-in from 10j, Google's Pub/Sub emulator
     from 10k, RabbitMQ from 10l, MongoDB from 10m and a BigQuery emulator from
     10o, MariaDB from 10q and ClickHouse from 10r, each in a throwaway
@@ -60,7 +60,7 @@
                           certificate signed by Kafka's CA (ETL_TEST_KAFKA_CA)
 
     This script starts the containers on a private network, waits until each
-    one answers, creates the bucket with MinIO's own `mc` client, and then
+    one answers, creates the S3 user and bucket with SeaweedFS's shell, and then
     prints the variables -- or, in GitHub Actions, writes them to
     $GITHUB_ENV so later steps see them.
 
@@ -85,7 +85,8 @@ $ErrorActionPreference = 'Continue'
 $network = 'etl-test'
 $kafkaSecrets = 'etl-test-kafka-secrets'
 $natsCreds = 'etl-test-nats-creds'
-$containers = @('etl-test-postgres', 'etl-test-mysql', 'etl-test-minio', 'etl-test-kafka',
+# `etl-test-minio` is the S3 server of before 10u, removed where it is left.
+$containers = @('etl-test-postgres', 'etl-test-mysql', 'etl-test-s3', 'etl-test-minio', 'etl-test-kafka',
     'etl-test-nats', 'etl-test-nats-users', 'etl-test-nats-token', 'etl-test-nats-tls',
     'etl-test-nats-creds', 'etl-test-kinesis', 'etl-test-sqs', 'etl-test-pubsub',
     'etl-test-rabbitmq', 'etl-test-mongodb', 'etl-test-bigquery', 'etl-test-mariadb',
@@ -124,7 +125,7 @@ if ($LASTEXITCODE -ne 0) {
 Remove-Everything
 Invoke-Docker network create $network
 
-Write-Host 'Starting PostgreSQL, MySQL, MinIO, Kafka, NATS, Kinesis, SQS, Pub/Sub, RabbitMQ, MongoDB, BigQuery, MariaDB and ClickHouse (the first run pulls the images)'
+Write-Host 'Starting PostgreSQL, MySQL, SeaweedFS (S3), Kafka, NATS, Kinesis, SQS, Pub/Sub, RabbitMQ, MongoDB, BigQuery, MariaDB and ClickHouse (the first run pulls the images)'
 
 Invoke-Docker run -d --name etl-test-postgres --network $network -p 55432:5432 `
     -e POSTGRES_PASSWORD=etl postgres:16
@@ -136,13 +137,13 @@ Invoke-Docker run -d --name etl-test-mysql --network $network -p 53306:3306 `
 Invoke-Docker run -d --name etl-test-mariadb --network $network --memory 1g -p 53307:3306 `
     -e MARIADB_ROOT_PASSWORD=etl -e MARIADB_DATABASE=etl mariadb:11.8
 
-# From quay.io: MinIO no longer publishes to Docker Hub, where `minio/minio`
-# now answers "repository does not exist" (found 2026-09-23). Any
-# S3-compatible server would do; this one is only what the tests were
-# first written against.
-Invoke-Docker run -d --name etl-test-minio --network $network -p 57900:9000 `
-    -e MINIO_ROOT_USER=etl-test -e MINIO_ROOT_PASSWORD=etl-test-secret `
-    quay.io/minio/minio server /data
+# S3 is SeaweedFS's S3 server. MinIO was until 10u, when its images stopped
+# being public: Docker Hub's first (2026-09-23), then quay.io's, whose
+# `minio/minio` and `minio/mc` answered "unauthorized" to CI on 2026-09-24.
+# Any S3-compatible server would do; the tests ask only for path-style
+# SigV4 and a refused wrong secret.
+Invoke-Docker run -d --name etl-test-s3 --network $network --memory 1g -p 57900:8333 `
+    chrislusf/seaweedfs:4.47 server -dir=/data -s3 -s3.port=8333
 
 # The Kafka broker's certificates and SASL settings, made in a throwaway
 # container of its own image into a Docker volume the broker then mounts. The
@@ -291,13 +292,16 @@ Wait-For 'PostgreSQL' { docker exec etl-test-postgres pg_isready -U postgres }
 Wait-For 'MySQL' { docker exec etl-test-mysql mysql -uroot -petl -e 'SELECT 1' etl }
 Wait-For 'MariaDB' { docker exec etl-test-mariadb mariadb -uroot -petl -e 'SELECT 1' etl }
 
-# The bucket, made with MinIO's own client from a companion container on the
-# same network: DuckDB cannot create a bucket, and this works the same on
-# Docker Desktop and on a Linux runner.
-Wait-For 'MinIO' {
-    docker run --rm --network $network --entrypoint sh quay.io/minio/mc -c `
-        'mc alias set m http://etl-test-minio:9000 etl-test etl-test-secret && mc mb --ignore-existing m/etl-test'
-}
+# The user and the bucket, through SeaweedFS's own shell inside its container:
+# DuckDB cannot create a bucket, no file needs mounting, and it works the same
+# on Docker Desktop and on a Linux runner. Until the user exists the server
+# takes anyone, so the wrong-secret test depends on this. One `sh` command with
+# no double quotes (PowerShell 5.1 mangles them), whose last step fails until
+# both the user and the bucket are there.
+$s3Setup = 'printf ''s3.configure -user etl-test -access_key etl-test -secret_key etl-test-secret -actions Read,Write,List,Tagging,Admin -apply\ns3.bucket.create -name etl-test\n'' | weed shell >/dev/null 2>&1; ' +
+    'printf ''s3.configure\ns3.bucket.list\n'' | weed shell >/tmp/etl-s3 2>&1; ' +
+    'grep -q etl-test-secret /tmp/etl-s3 && grep -q ''etl-test.*size'' /tmp/etl-s3'
+Wait-For 'SeaweedFS (S3)' { docker exec etl-test-s3 sh -c $s3Setup }
 
 Wait-For 'Kafka' {
     docker exec etl-test-kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:19092 --list

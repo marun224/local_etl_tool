@@ -17,6 +17,13 @@ first when picking the project back up.
 > skipped; **158 frontend** (three for the new sample); nine mutations each caught. **Pushed with CI** (decision 89),
 > which covers 10p–10r for the first time.
 >
+> **CI on `cf740ff` (run 36023832935): Windows gate green** (the SQL Server tests, 82
+> components, the samples); **the Ubuntu gate failed before any test ran**: MinIO's images
+> are no longer public (`quay.io/minio/minio` and `minio/mc` answered "unauthorized"; Docker
+> Hub's went on 2026-09-23). **S3 is now SeaweedFS 4.47** (decision 90, the user: "you
+> suggest which one is best"), its user and bucket made through its own shell; both S3 tests
+> pass against it. Pushed with CI again; see the log entry for the run.
+>
 > **Phases 10m–10u are finished** (MongoDB, BigQuery, Snowflake, MariaDB, ClickHouse, SQL
 > Server; Redis, Cassandra and Neo4j not built). The next family is not planned yet: the
 > plan's *Later families* lists what is left.
@@ -270,7 +277,7 @@ first when picking the project back up.
 > | Job | Checked locally by |
 > |---|---|
 > | `gate (windows)` — fmt, clippy, 1117 tests (servers skip), samples | running it, repeatedly |
-> | `gate (ubuntu)` — fmt, clippy, **1107 tests** with Postgres, MySQL, MariaDB, ClickHouse, MinIO, Kafka (four listeners), NATS (five servers), kinesis-mock, ElasticMQ, the Pub/Sub emulator, RabbitMQ, MongoDB and the BigQuery emulator, samples | `cargo test` in `rust:1.96-slim-bookworm` |
+> | `gate (ubuntu)` — fmt, clippy, **1107 tests** with Postgres, MySQL, MariaDB, ClickHouse, SeaweedFS (S3), Kafka (four listeners), NATS (five servers), kinesis-mock, ElasticMQ, the Pub/Sub emulator, RabbitMQ, MongoDB and the BigQuery emulator, samples | `cargo test` in `rust:1.96-slim-bookworm` |
 > | `artifact (both)` — bake, run from elsewhere, run in a bare container | Phase 9b and 9c |
 > | `cross-build-script` — `build-runner.ps1`, ELF check, unbaked contract, no-op rerun | each assertion run by hand |
 > | `frontend` — 158 tests, typecheck, build | running it |
@@ -285,7 +292,7 @@ first when picking the project back up.
 > **To check everything, from the repo root:**
 >
 > ```powershell
-> ./scripts/test-services.ps1                                       # Postgres, MySQL, MinIO, Kafka, NATS, Kinesis, SQS, Pub/Sub, RabbitMQ, MongoDB, BigQuery in Docker
+> ./scripts/test-services.ps1                                       # Postgres, MySQL, SeaweedFS (S3), Kafka, NATS, Kinesis, SQS, Pub/Sub, RabbitMQ, MongoDB, BigQuery in Docker
 > cargo test --workspace                                            # expect 1117 passing
 > ./scripts/test-services.ps1 -Stop                                 # tidy up afterwards
 > npm --prefix frontend run test                                    # expect 158 passing
@@ -1106,6 +1113,11 @@ recommended, except Elasticsearch, which is not built.
     redeploy.
 89. **CI runs for 10u** (the user, as recommended): a normal push, which also covers 10p–10r,
     unchecked in CI since 10o.
+90. **S3 tests run against SeaweedFS** (`chrislusf/seaweedfs:4.47`), not MinIO, whose images
+    stopped being public (the user left the choice to Claude). Its S3 user and the bucket are
+    made through `weed shell` inside the container, so nothing is mounted and no client image
+    is needed; capped at 1 GB. RustFS, a MinIO copy in the user's registry, and Adobe's
+    S3Mock were the alternatives.
 
 ## Open decisions
 
@@ -1605,7 +1617,8 @@ ran*. Earlier ones were resolved 2026-09-16 (Settled decisions 5–8).
   in the message. Checked with the original table hidden, so the moved copy really is what
   is read.
 - **MinIO no longer publishes to Docker Hub.** `minio/minio` answers "repository does not
-  exist". `quay.io/minio/minio` and `quay.io/minio/mc` still serve. Any S3-compatible server
+  exist". `quay.io/minio/minio` and `quay.io/minio/mc` still serve. (Until 2026-09-24, when
+  they answered "unauthorized" too; SeaweedFS replaced MinIO, decision 90.) Any S3-compatible server
   would do for these tests.
 - **Windows PowerShell 5.1 made the service script die on docker's own stderr** (pull
   progress, "not found") under `$ErrorActionPreference = 'Stop'`, even with `2>$null`. The
@@ -3157,3 +3170,19 @@ Started by the user ("pls start 10u"); CI runs for it (decision 89).
 
 **1117 Rust tests with every server up, twice, none skipped; 158 frontend; fmt and clippy
 clean.** Not checked against real SQL Server.
+
+### 2026-09-24 — CI for 10u; MinIO replaced by SeaweedFS
+
+CI on `cf740ff` (run 36023832935): `gate (windows)`, `frontend` and `build-runner.ps1`
+green; `gate (ubuntu)` failed at *Start the servers*: `docker run quay.io/minio/minio` was
+refused "unauthorized". `minio/minio`, `minio/minio` release tags and `quay.io/minio/mc` all
+fail `docker manifest inspect` now; this machine only had MinIO cached.
+
+- **Probe**: SeaweedFS 4.47 (`server -dir=/data -s3`), first with a mounted `s3.json`, then
+  with `s3.configure ... -apply` and `s3.bucket.create` through `weed shell`: both S3 tests in
+  `verified.rs` pass against it, the wrong secret refused (without a user the server takes
+  anyone). 62 MB resident.
+- `scripts/test-services.ps1` — `etl-test-s3` (SeaweedFS, 1 GB, same port 57900 and
+  variables); the setup is one `sh -c` with no double quotes, for PowerShell 5.1; the old
+  `etl-test-minio` is still removed by `-Stop`. `gate.yml` and `verified.rs` comments.
+- The website repo: SQL Server built and awaiting a real-server check (`8b7a8b1`, pushed).
