@@ -59,6 +59,7 @@ import {
   TableProperties,
   Triangle,
   Type,
+  Warehouse,
   type LucideIcon,
 } from "lucide-react";
 
@@ -108,6 +109,7 @@ const BY_NAME: Record<string, LucideIcon> = {
   "table-properties": TableProperties,
   "triangle": Triangle,
   "type": Type,
+  "warehouse": Warehouse,
 };
 
 /** The icon for a spec, or a generic box when the name is new to us. */

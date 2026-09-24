@@ -3,8 +3,8 @@
     Start the servers the verification tests run against: PostgreSQL, MySQL
     and MinIO (S3) from Phase 10c, Kafka from 10e, NATS from 10g, a Kinesis
     stand-in from 10h, an SQS stand-in from 10j, Google's Pub/Sub emulator
-    from 10k, RabbitMQ from 10l and MongoDB from 10m, each in a throwaway
-    container.
+    from 10k, RabbitMQ from 10l, MongoDB from 10m and a BigQuery emulator from
+    10o, each in a throwaway container.
 
 .DESCRIPTION
     The verification tests read these environment variables and skip each
@@ -46,6 +46,8 @@
       ETL_TEST_RABBITMQ_HTTP
                           http://host:port of its management API, which the
                           engine's tests use to make queues and count them
+      ETL_TEST_BIGQUERY   http://host:port of goccy's BigQuery emulator, project
+                          etl-test; it checks no sign-in (10k's tests do)
       ETL_TEST_MONGODB    mongodb://etl:etl-secret@host:port/?authSource=admin of
                           MongoDB 8.0
       ETL_TEST_MONGODB_TLS
@@ -81,7 +83,7 @@ $natsCreds = 'etl-test-nats-creds'
 $containers = @('etl-test-postgres', 'etl-test-mysql', 'etl-test-minio', 'etl-test-kafka',
     'etl-test-nats', 'etl-test-nats-users', 'etl-test-nats-token', 'etl-test-nats-tls',
     'etl-test-nats-creds', 'etl-test-kinesis', 'etl-test-sqs', 'etl-test-pubsub',
-    'etl-test-rabbitmq', 'etl-test-mongodb')
+    'etl-test-rabbitmq', 'etl-test-mongodb', 'etl-test-bigquery')
 
 function Invoke-Docker {
     $output = & docker @args 2>&1
@@ -116,7 +118,7 @@ if ($LASTEXITCODE -ne 0) {
 Remove-Everything
 Invoke-Docker network create $network
 
-Write-Host 'Starting PostgreSQL, MySQL, MinIO, Kafka, NATS, Kinesis, SQS, Pub/Sub, RabbitMQ and MongoDB (the first run pulls the images)'
+Write-Host 'Starting PostgreSQL, MySQL, MinIO, Kafka, NATS, Kinesis, SQS, Pub/Sub, RabbitMQ, MongoDB and BigQuery (the first run pulls the images)'
 
 Invoke-Docker run -d --name etl-test-postgres --network $network -p 55432:5432 `
     -e POSTGRES_PASSWORD=etl postgres:16
@@ -248,6 +250,13 @@ Invoke-Docker run -d --name etl-test-mongodb --network $network --memory 1g `
     --entrypoint sh mongo:8.0 -c `
     'cat /certs/server.pem /certs/server.key > /tmp/server-with-key.pem && exec docker-entrypoint.sh mongod --tlsMode allowTLS --tlsCertificateKeyFile /tmp/server-with-key.pem --tlsCAFile /certs/ca.pem --tlsAllowConnectionsWithoutCertificates'
 
+# goccy's BigQuery emulator (422 MB), one project, capped at 1 GB. Datasets and
+# tables are made by the tests. It answers jobs.query, getQueryResults and
+# load jobs by multipart upload, which is what the connector uses; it returns
+# every row on the first page, so paging is tested against the fixture.
+Invoke-Docker run -d --name etl-test-bigquery --network $network --memory 1g `
+    -p 59050:9050 ghcr.io/goccy/bigquery-emulator:0.8.1 --project=etl-test
+
 function Wait-For([string] $what, [scriptblock] $probe, [int] $seconds = 180) {
     $deadline = (Get-Date).AddSeconds($seconds)
     while ((Get-Date) -lt $deadline) {
@@ -342,6 +351,15 @@ Wait-For 'MongoDB' {
     }
 }
 
+# A dataset list means the emulator is serving.
+Wait-For 'BigQuery' {
+    try {
+        Invoke-WebRequest -Uri 'http://127.0.0.1:59050/bigquery/v2/projects/etl-test/datasets' `
+            -UseBasicParsing -TimeoutSec 5 | Out-Null
+        $global:LASTEXITCODE = 0
+    } catch { $global:LASTEXITCODE = 1 }
+}
+
 # The CA certificate, for the tests' `ca_cert`. Under target/, which git ignores.
 $caDirectory = Join-Path $PSScriptRoot '../target/test-services'
 New-Item -ItemType Directory -Force $caDirectory | Out-Null
@@ -373,6 +391,7 @@ $variables = [ordered]@{
     ETL_TEST_RABBITMQ_HTTP  = 'http://127.0.0.1:57673'
     ETL_TEST_MONGODB        = 'mongodb://etl:etl-secret@127.0.0.1:57017/?authSource=admin'
     ETL_TEST_MONGODB_TLS    = 'mongodb://etl:etl-secret@127.0.0.1:57017/?authSource=admin&tls=true'
+    ETL_TEST_BIGQUERY       = 'http://127.0.0.1:59050'
 }
 
 if ($env:GITHUB_ENV) {

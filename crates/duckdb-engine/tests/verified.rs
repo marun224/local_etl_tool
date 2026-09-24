@@ -2365,3 +2365,267 @@ fn previewing_a_mongodb_source_reads_without_remembering() {
         "a preview writes nothing"
     );
 }
+
+// ---------------------------------------------------------------------------
+// BigQuery, incremental by a checkpoint, against the emulator (Phase 10o)
+// ---------------------------------------------------------------------------
+
+/// The project the emulator was started with.
+const BIGQUERY_PROJECT: &str = "etl-test";
+
+/// A dataset with empty `orders` and `large_orders` tables, deleted when dropped.
+struct BigqueryDataset {
+    endpoint: String,
+    name: String,
+}
+
+impl BigqueryDataset {
+    fn new(endpoint: &str, test: &str) -> Self {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .subsec_nanos();
+        let name = format!("etl_verified_{test}_{nanos}");
+        let base = format!("{endpoint}/bigquery/v2/projects/{BIGQUERY_PROJECT}");
+        let post = |url: String, body: serde_json::Value| {
+            ureq::post(&url)
+                .header("Content-Type", "application/json")
+                .send(body.to_string().as_bytes())
+                .unwrap_or_else(|error| panic!("{url}: {error}"));
+        };
+        post(
+            format!("{base}/datasets"),
+            serde_json::json!({ "datasetReference": { "projectId": BIGQUERY_PROJECT, "datasetId": name } }),
+        );
+        for table in ["orders", "large_orders"] {
+            post(
+                format!("{base}/datasets/{name}/tables"),
+                serde_json::json!({
+                    "tableReference": { "projectId": BIGQUERY_PROJECT, "datasetId": name, "tableId": table },
+                    "schema": { "fields": [
+                        { "name": "order_id", "type": "INT64" },
+                        { "name": "customer_id", "type": "STRING" },
+                        { "name": "order_ts", "type": "TIMESTAMP" },
+                        { "name": "amount", "type": "NUMERIC" },
+                        { "name": "status", "type": "STRING" },
+                    ]},
+                }),
+            );
+        }
+        BigqueryDataset {
+            endpoint: endpoint.to_string(),
+            name,
+        }
+    }
+
+    fn properties(&self, table: &str) -> serde_json::Value {
+        serde_json::json!({
+            "project": BIGQUERY_PROJECT, "dataset": self.name, "table": table,
+            "endpoint": self.endpoint,
+        })
+    }
+
+    /// Orders into `orders`, through the connector's own load job.
+    fn insert_orders(&self, orders: &[serde_json::Value]) {
+        use etl_plugin_sdk::Sink;
+        let rows: Vec<etl_plugin_sdk::Record> = orders
+            .iter()
+            .map(|order| order.as_object().unwrap().clone())
+            .collect();
+        etl_connectors::bigquery::BigquerySink
+            .write(
+                &self.properties("orders"),
+                &mut etl_plugin_sdk::Records(rows.into_iter()),
+                &etl_plugin_sdk::Context::default(),
+            )
+            .expect("loads");
+    }
+
+    fn count(&self, table: &str) -> u64 {
+        let mut response = ureq::post(&format!(
+            "{}/bigquery/v2/projects/{BIGQUERY_PROJECT}/queries",
+            self.endpoint
+        ))
+        .header("Content-Type", "application/json")
+        .send(
+            serde_json::json!({
+                "query": format!("SELECT count(*) FROM `{BIGQUERY_PROJECT}.{}.{table}`", self.name),
+                "useLegacySql": false,
+            })
+            .to_string()
+            .as_bytes(),
+        )
+        .unwrap();
+        let answer: serde_json::Value =
+            serde_json::from_str(&response.body_mut().read_to_string().unwrap()).unwrap();
+        answer["rows"][0]["f"][0]["v"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap()
+    }
+}
+
+impl Drop for BigqueryDataset {
+    fn drop(&mut self) {
+        let _ = ureq::delete(&format!(
+            "{}/bigquery/v2/projects/{BIGQUERY_PROJECT}/datasets/{}?deleteContents=true",
+            self.endpoint, self.name
+        ))
+        .call();
+    }
+}
+
+fn bigquery_orders(
+    workspace: &Path,
+    endpoint: &str,
+    dataset: &BigqueryDataset,
+    checkpoints: &BTreeMap<String, serde_json::Value>,
+    policy: Option<serde_json::Value>,
+) -> etl_duckdb_engine::Plan {
+    let text = std::fs::read_to_string(repo_root().join("samples/pipelines/bigquery_orders.json"))
+        .expect("the sample is committed");
+    let mut json: serde_json::Value = serde_json::from_str(&text).unwrap();
+    if let Some(policy) = policy {
+        json["nodes"][1]["data"]["policy"] = policy;
+    }
+    let resolver = Resolver::new(workspace)
+        .bind("bigquery_endpoint", endpoint)
+        .bind("dataset", &dataset.name);
+    let resolved = resolve(&document(&json.to_string()), &resolver).expect("resolves");
+    compile_with(
+        &resolved.document,
+        &CompileOptions {
+            checkpoints: checkpoints.clone(),
+            ..CompileOptions::default()
+        },
+    )
+    .expect("compiles")
+}
+
+/// The sample, three runs: everything, nothing new, then only what arrived.
+fn the_bigquery_sample_carries_on(name: &str, policy: Option<serde_json::Value>) {
+    let Some(endpoint) = server("ETL_TEST_BIGQUERY") else {
+        return;
+    };
+    let Some((workspace, binary)) = workspace(name, &[]) else {
+        return;
+    };
+    let orders = sample_orders();
+    let dataset = BigqueryDataset::new(&endpoint, name);
+    dataset.insert_orders(&orders[..10]);
+
+    let first = run(
+        &bigquery_orders(
+            &workspace,
+            &endpoint,
+            &dataset,
+            &BTreeMap::new(),
+            policy.clone(),
+        ),
+        &options(&workspace),
+    )
+    .expect("runs");
+    let put = rows(&first)[3].expect("the large orders were loaded");
+    assert_eq!(rows(&first)[0], Some(10));
+    assert_eq!(dataset.count("large_orders"), put);
+    let saved = positions(&first);
+    let highest = orders[..10]
+        .iter()
+        .map(|order| order["order_id"].as_i64().unwrap())
+        .max()
+        .unwrap();
+    assert_eq!(saved["read_orders"]["type"], "INTEGER", "{saved:?}");
+    assert_eq!(
+        saved["read_orders"]["value"],
+        highest.to_string(),
+        "{saved:?}"
+    );
+    assert_eq!(
+        query(
+            &binary,
+            &workspace,
+            "SELECT count(*) AS n, typeof(any_value(order_ts)) AS t, typeof(any_value(amount)) AS a \
+             FROM 'samples/out/bigquery_large_orders.parquet';"
+        ),
+        format!(r#"[{{"n":{put},"t":"TIMESTAMP","a":"DECIMAL(10,2)"}}]"#)
+    );
+
+    // Nothing new: nothing read, nothing loaded twice.
+    let second = run(
+        &bigquery_orders(&workspace, &endpoint, &dataset, &saved, policy.clone()),
+        &options(&workspace),
+    )
+    .expect("runs");
+    assert_eq!(rows(&second), [Some(0), Some(0), Some(0), Some(0)]);
+    assert_eq!(dataset.count("large_orders"), put);
+
+    // Two more orders arrive: exactly those are read.
+    dataset.insert_orders(&orders[10..]);
+    let third = run(
+        &bigquery_orders(&workspace, &endpoint, &dataset, &saved, policy),
+        &options(&workspace),
+    )
+    .expect("runs");
+    assert_eq!(rows(&third)[0], Some(2));
+}
+
+#[test]
+fn the_bigquery_sample_carries_on_between_runs_on_the_one_script_path() {
+    the_bigquery_sample_carries_on("bigquery_script", None);
+}
+
+#[test]
+fn the_bigquery_sample_carries_on_between_runs_on_the_session_path() {
+    the_bigquery_sample_carries_on(
+        "bigquery_session",
+        Some(serde_json::json!({ "retryAttempts": 1 })),
+    );
+}
+
+#[test]
+fn a_failed_bigquery_run_saves_no_position_and_loads_nothing() {
+    let Some(endpoint) = server("ETL_TEST_BIGQUERY") else {
+        return;
+    };
+    let Some((workspace, _)) = workspace("bigquery_failed", &[]) else {
+        return;
+    };
+    let dataset = BigqueryDataset::new(&endpoint, "failed");
+    dataset.insert_orders(&sample_orders()[..6]);
+
+    let mut json: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(repo_root().join("samples/pipelines/bigquery_orders.json"))
+            .unwrap(),
+    )
+    .unwrap();
+    json["nodes"][1]["data"]["properties"]["predicate"] = serde_json::json!("no_such_column > 1");
+    json["nodes"][1]["data"]["policy"] = serde_json::json!({ "continueOnFailure": true });
+    let resolver = Resolver::new(&workspace)
+        .bind("bigquery_endpoint", &endpoint)
+        .bind("dataset", &dataset.name);
+    let resolved = resolve(&document(&json.to_string()), &resolver).expect("resolves");
+    let plan = compile_with(&resolved.document, &CompileOptions::default()).unwrap();
+
+    let report = run(&plan, &options(&workspace)).expect("a report, not an error");
+    assert!(report.failed());
+    assert_eq!(report.stages[0].rows, Some(6), "the source did read them");
+    assert!(report.checkpoints.is_empty(), "{:?}", report.checkpoints);
+    assert_eq!(dataset.count("large_orders"), 0);
+}
+
+#[test]
+fn previewing_a_bigquery_source_reads_without_remembering() {
+    let Some(endpoint) = server("ETL_TEST_BIGQUERY") else {
+        return;
+    };
+    let Some((workspace, _)) = workspace("bigquery_preview", &[]) else {
+        return;
+    };
+    let dataset = BigqueryDataset::new(&endpoint, "preview");
+    dataset.insert_orders(&sample_orders()[..9]);
+    let plan = bigquery_orders(&workspace, &endpoint, &dataset, &BTreeMap::new(), None);
+    let shown = preview(&plan, "read_orders", 50, &options(&workspace)).expect("previews");
+    assert_eq!(shown.rows.len(), 9);
+    assert_eq!(dataset.count("large_orders"), 0, "a preview loads nothing");
+}

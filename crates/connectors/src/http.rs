@@ -146,9 +146,15 @@ impl Settings {
     /// A POST to `url` with no headers or auth of its own, for a protocol whose
     /// every request carries its own signature in [`Extra`] (AWS).
     pub(crate) fn signed_post(url: String, timeout: Duration, retries: u32) -> Self {
+        Self::signed(url, Method::Post, timeout, retries)
+    }
+
+    /// [`signed_post`](Self::signed_post), with another method: BigQuery
+    /// polls its jobs and pages its results with GET.
+    pub(crate) fn signed(url: String, method: Method, timeout: Duration, retries: u32) -> Self {
         Settings {
             url,
-            method: Method::Post,
+            method,
             headers: Vec::new(),
             auth: Auth::None,
             timeout,

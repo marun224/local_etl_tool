@@ -689,3 +689,28 @@ the fuller record. From Phase 10 on, a section is added at the end of each phase
   where they differ (a refusal mid-batch) in the test.
 - **Assuming a test that passed once is deterministic**: environmental drift (a VM clock)
   can turn it red an hour later.
+
+## Phase 10o — BigQuery (2026-09-24)
+
+**Concepts**
+- **A warehouse read is a job.** The SQL runs on BigQuery's side and is billed by bytes
+  scanned; the client asks, polls until done, then pages through results. `max_records` saves
+  transfer, not scanning.
+- **Query parameters** carry values into SQL with a type and without text substitution:
+  the only safe way to put a saved value back into a query.
+- **Load jobs versus streaming inserts**: loads are free and batch, streams are billed and
+  immediate. For an ETL run the batch is the unit anyway.
+- **Exact decimal parsing** of `1.790244000123456E9`: shift the decimal point in the digits,
+  do not multiply a double.
+
+**Decisions and why**
+- **`start` as a literal the author writes**: the column's type is only known once a job has
+  run, and a literal carries its own type.
+- **Prove behaviour where the emulator cannot**: paging and polling against the fixture,
+  types and loads against the emulator.
+
+**Mistakes worth not repeating**
+- **Blaming the code for a dead test server.** Check the container's state (`Exited (137)`)
+  before reading test failures that all start at once.
+- **Working out expected timestamps by hand** when the server under test had already shown
+  the right answer in the probe.

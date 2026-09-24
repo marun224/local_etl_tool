@@ -824,3 +824,55 @@ each operation. Reports and errors name the hosts and the database, never the pa
   stored as text.
 - **Like every native sink, it writes only after a run that fully succeeded**, and never in
   `preview`. Insert is at-least-once; upsert is idempotent by its keys.
+
+## `src.warehouse.bigquery` and `snk.warehouse.bigquery`
+
+Added in Phase 10o (2026-09-24). BigQuery's REST API through the shared `ureq` layer, signed
+in as Pub/Sub is (a service account, gcloud's login, or nothing for a plain-`http://`
+endpoint). **Verified against goccy's BigQuery emulator (0.8.1), not against real Google
+Cloud** (Settled decision 78); the sign-in is 10k's, proved separately.
+
+**Which table:** `project` (the project that runs the jobs) with `dataset` and `table`;
+`dataset` may be `other-project.dataset` for another project's. `location` names where the
+dataset lives; unset, BigQuery works it out and the connector keeps what the first job
+reports. `timeout_ms` (default 120,000) bounds each request.
+
+### Reading: `src.warehouse.bigquery`
+
+- **A table, or a `query`** (GoogleSQL, not legacy SQL). Either becomes one **query job**
+  (`jobs.query`), polled while it runs, then read **page by page** (10,000 rows a page)
+  until the last. The report names the job and the bytes BigQuery says it processed, which
+  is what it bills: **a table read is a full scan** unless the query narrows it.
+- **Rows are typed by the result's schema.** INT64 is a number; NUMERIC and BIGNUMERIC their
+  exact text (cast to `DECIMAL` without loss); TIMESTAMP a UTC timestamp to the microsecond
+  (read from BigQuery's text exactly, never through a double); DATETIME, DATE and TIME
+  their text; RECORD an object and REPEATED an array, with the same rules inside; JSON and
+  GEOGRAPHY their text; FLOAT64's NaN and infinities stay text, as JSON has no such numbers.
+- **Only what is new**: `incremental_column` wraps the read as
+  `SELECT * FROM (<read>) WHERE col > @etl_after ORDER BY col`, the last successful run's
+  highest value passed as a **typed query parameter**, never pasted into the SQL. The first
+  run starts at `start`, a GoogleSQL literal you write (`TIMESTAMP '2026-01-01 00:00:00'`,
+  `1000`), or at the beginning. The highest value read is saved as a checkpoint only if the
+  whole run succeeds; a position saved for another table, query or column is set aside and
+  the report says so. The column must be a scalar that can be compared (INT64, NUMERIC,
+  FLOAT64, TIMESTAMP, DATETIME, DATE, STRING) and **must only go up**: a row loaded later
+  with a lower value is never read. The wrapping still scans what the inner read scans;
+  partition the table by that column to make incremental reads cheap.
+- `max_records` stops mid-page and asks for no more pages.
+
+### Writing: `snk.warehouse.bigquery`
+
+- **Load jobs**, not streaming inserts: each run's rows as newline-delimited JSON, **4 MB to
+  a job** (a multipart upload, meant for bodies small enough to send again whole), each job
+  polled until done. Load jobs are free; streaming inserts are billed. BigQuery allows 1,500
+  load jobs a table a day, so a run of more than a few gigabytes needs another way in.
+- **The table must exist** (`CREATE_NEVER`), with columns matching the rows; a load that
+  does not fit fails naming BigQuery's reason and the row it points at.
+- **`mode: append`** (the default) adds the rows. **`mode: truncate`** replaces the table's
+  rows with the first job and appends with the rest, so **a failure part-way leaves the rows
+  loaded until then**, and the message says how many. A truncate with no rows still empties
+  the table.
+- Timestamps arrive as DuckDB's text (`2026-01-04 10:05:00`), which BigQuery's JSON loader
+  reads as UTC.
+- **Like every native sink, it loads only after a run that fully succeeded**, and never in
+  `preview`. At-least-once: a re-run appends again.

@@ -17,6 +17,7 @@ use etl_plugin_sdk::Connector;
 use std::sync::OnceLock;
 
 mod aws;
+pub mod bigquery;
 #[cfg(test)]
 mod fixture;
 mod gcp;
@@ -60,6 +61,8 @@ pub fn all() -> &'static [(String, Connector)] {
             Connector::Sink(&rabbitmq::RabbitmqSink),
             Connector::Source(&mongo::MongoSource),
             Connector::Sink(&mongo::MongoSink),
+            Connector::Source(&bigquery::BigquerySource),
+            Connector::Sink(&bigquery::BigquerySink),
         ]
         .into_iter()
         .map(|connector| (connector.spec().id, connector))

@@ -1,0 +1,126 @@
+{
+  "formatVersion": 1,
+  "name": "bigquery_orders",
+  "nodes": [
+    {
+      "id": "read_orders",
+      "type": "source",
+      "position": {
+        "x": 0.0,
+        "y": 0.0
+      },
+      "data": {
+        "label": "Orders table",
+        "componentId": "src.warehouse.bigquery",
+        "properties": {
+          "project": "${gcp_project}",
+          "dataset": "${dataset}",
+          "endpoint": "${bigquery_endpoint}",
+          "table": "orders",
+          "incremental_column": "order_id",
+          "columns": {
+            "order_id": "INTEGER",
+            "customer_id": "VARCHAR",
+            "order_ts": "TIMESTAMP",
+            "amount": "DECIMAL(10,2)",
+            "status": "VARCHAR"
+          }
+        },
+        "alias": "orders"
+      }
+    },
+    {
+      "id": "large_only",
+      "type": "transform",
+      "position": {
+        "x": 280.0,
+        "y": 0.0
+      },
+      "data": {
+        "label": "Over 100",
+        "componentId": "xf.filter",
+        "properties": {
+          "predicate": "amount > 100"
+        }
+      }
+    },
+    {
+      "id": "write_large",
+      "type": "sink",
+      "position": {
+        "x": 560.0,
+        "y": 0.0
+      },
+      "data": {
+        "label": "Large orders",
+        "componentId": "snk.file.parquet",
+        "properties": {
+          "path": "${workspace}/samples/out/bigquery_large_orders.parquet",
+          "mode": "overwrite"
+        }
+      }
+    },
+    {
+      "id": "put_large",
+      "type": "sink",
+      "position": {
+        "x": 560.0,
+        "y": 160.0
+      },
+      "data": {
+        "label": "Large orders table",
+        "componentId": "snk.warehouse.bigquery",
+        "properties": {
+          "project": "${gcp_project}",
+          "dataset": "${dataset}",
+          "endpoint": "${bigquery_endpoint}",
+          "table": "large_orders",
+          "mode": "append"
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "source": "read_orders",
+      "target": "large_only",
+      "sourceHandle": "main",
+      "targetHandle": "in"
+    },
+    {
+      "id": "e2",
+      "source": "large_only",
+      "target": "write_large",
+      "sourceHandle": "main",
+      "targetHandle": "in"
+    },
+    {
+      "id": "e3",
+      "source": "large_only",
+      "target": "put_large",
+      "sourceHandle": "main",
+      "targetHandle": "in"
+    }
+  ],
+  "parameters": {
+    "gcp_project": {
+      "type": "string",
+      "required": true,
+      "default": "etl-test",
+      "description": "The Google Cloud project that runs the jobs."
+    },
+    "dataset": {
+      "type": "string",
+      "required": true,
+      "default": "etl_sample",
+      "description": "The dataset holding the orders and large_orders tables, which must exist."
+    },
+    "bigquery_endpoint": {
+      "type": "string",
+      "required": false,
+      "default": "http://127.0.0.1:59050",
+      "description": "The committed default is the BigQuery emulator scripts/test-services.ps1 starts, over plain http, which signs nothing. Set it empty for Google Cloud, which signs in with GOOGLE_APPLICATION_CREDENTIALS or gcloud's login."
+    }
+  }
+}

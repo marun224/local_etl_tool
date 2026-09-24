@@ -2321,3 +2321,24 @@ gh api --allow-escape-sequences repos/marun224/local_etl_tool/actions/jobs/10754
 #   "You are running out of disk space ... 77 MB"; rustc: "No space left on device" compiling mongodb
 # gate.yml: a "Free disk space" step on Ubuntu, first after checkout
 ```
+
+## 2026-09-24 — 10n dropped; Phase 10o: BigQuery
+
+```bash
+python drop_10n.py                         # scratchpad: plan (10n not built, counts -4), tracker decision 82
+curl ghcr.io tags for goccy/bigquery-emulator            # 0.8.1 (2026-06-13)
+docker run -d --rm --name etl-probe-bq -p 59050:9050 ghcr.io/goccy/bigquery-emulator:0.8.1 --project=etl-test --dataset=probe
+python bq_probe.py; python bq_probe2.py (scratchpad)     # jobs.query, parameters, types, paging, load jobs, jobs.insert (500)
+cargo check -p etl-connectors --all-targets
+cargo test -p etl-connectors --lib bigquery::tests       # 13 + 3 test expectations fixed (10:00, not 10:40) -> 16
+./scripts/test-services.ps1                # now also etl-test-bigquery (59050, 1 GB)
+cargo test -p etl-duckdb-engine --test verified bigquery # 4
+python mutate_10o.py                       # 7 mutations, each caught; the emulator OOM-killed (137) partway
+docker stats etl-test-bigquery             # ~450 MB kept per full round: a leak; restarted between rounds
+cargo clippy ... -- -D warnings            # one type_complexity in tests, named
+./target/debug/etl components              # 76;  cd frontend; npm test  # 149
+cargo test --workspace                     # twice, emulator restarted between: 1055 and 1055, none skipped
+# website: python site_mongodb.py 35972853098; npm run build; commit b035bd9; push
+python docs_10o.py                         # connectors.md, plan, tracker, learnings, assignments (A59-A60)
+./scripts/test-services.ps1 -Stop
+```

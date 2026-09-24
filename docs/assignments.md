@@ -455,3 +455,17 @@ Copy-Item samples\pipelines\orders_enriched.json samples\out\scratch\
   `mode: insert` and no `_id`.
   *Check:* explain the count you get, and which setting would make the second run add
   nothing.
+
+## Phase 10o — BigQuery
+
+- [ ] **A59. Watch the parameter.**
+  *Do:* run `samples/pipelines/bigquery_orders.json` twice against the emulator, then read
+  the saved position with `etl state list`.
+  *Check:* find where the second run's SQL gets `@etl_after` and its type. Why would pasting
+  the value into the SQL be both unsafe and, for a TIMESTAMP, wrong?
+
+- [ ] **A60. 🦀 A timestamp by hand.**
+  *Do:* in `bigquery/tests.rs`, add cases to `timestamp_micros` for `-1.790244000123456E9`
+  and `1.79E+9`.
+  *Check:* each gives the microseconds you expect, and you can say which line handles the
+  sign and which the exponent's `+`.

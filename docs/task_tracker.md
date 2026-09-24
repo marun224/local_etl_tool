@@ -3,7 +3,18 @@
 **State only.** Design lives in [PLAN_duckle_parity.md](PLAN_duckle_parity.md). Read this file
 first when picking the project back up.
 
-> ## ✅ Phase 10m (MongoDB) — built 2026-09-24, green locally with every server up
+> ## ✅ Phase 10o (BigQuery) — built 2026-09-24, green locally with every server up
+>
+> **What 10o built:** `src.warehouse.bigquery` (a table or a query as one query job, polled
+> and paged; rows typed by the result's schema, timestamps exact to the microsecond;
+> incremental by a column through a checkpoint, the saved value a **typed query parameter**)
+> and `snk.warehouse.bigquery` (load jobs of newline-delimited JSON, 4 MB each, `append` or
+> `truncate`). Signed in as Pub/Sub is. goccy's emulator 0.8.1 in the test services, capped
+> at 1 GB. **76 components, 1055 Rust tests** (1045 on Linux) with every server up, twice
+> (the emulator restarted between, as it leaks), none skipped; **149 frontend**; seven
+> mutations each caught. Not checked against real Google Cloud.
+>
+> ## ✅ Phase 10m (MongoDB) — `d1fff00`, green in CI (run 35972853098, with `1dfd2d0`)
 >
 > **What 10m built:** `src.db.mongodb` (filter, projection and sort in Extended JSON;
 > incremental by a field through a checkpoint, kept as its BSON type; a missing collection
@@ -107,12 +118,14 @@ first when picking the project back up.
 > minutes). Everything through 10l is committed and pushed; the plan for 10m–10u is not yet
 > committed.
 >
-> **Next:** **10n, Redis**, when the user says so: the second of Phases 10m–10u, one
-> connector each (MongoDB, Redis, BigQuery, Snowflake, MariaDB, ClickHouse, Cassandra, Neo4j,
-> SQL Server), planned 2026-09-24. Elasticsearch is not built (memory); Oracle is deferred.
-> Open question 15 (SQL Server's memory) waits for 10u. **The website** (`9fd2a49` and
-> `1dbd1e5`, pushed) shows 17 of 50 connectors working, RabbitMQ the latest; its roadmap names
-> MongoDB, Redis, BigQuery and Snowflake as next. Kinesis, SQS and Pub/Sub stay off it until
+> **Next:** **10p, Snowflake**, when the user says so: one connector each (MongoDB and
+> BigQuery done; Snowflake, MariaDB, ClickHouse, Cassandra, Neo4j, SQL Server),
+> planned 2026-09-24. **Redis (10n) is not built** (the user, 2026-09-24); Elasticsearch is
+> not built (memory); Oracle is deferred.
+> Open question 15 (SQL Server's memory) waits for 10u. **The website** (`b035bd9`,
+> pushed) shows 18 of 50 connectors working, MongoDB the latest (both ways); its roadmap
+> names BigQuery and Snowflake as next. BigQuery stays off the working list until read
+> against real Google Cloud (decision 78). Kinesis, SQS and Pub/Sub stay off it until
 > read against the real services. The live site still needs a redeploy.
 >
 > **10d, for the record:** `src.saas.graphql` and `snk.saas.graphql`, the shared `http.rs`,
@@ -145,14 +158,14 @@ first when picking the project back up.
 >
 > | Job | Checked locally by |
 > |---|---|
-> | `gate (windows)` — fmt, clippy, 1035 tests (servers skip), samples | running it, repeatedly |
-> | `gate (ubuntu)` — fmt, clippy, **1025 tests** with Postgres, MySQL, MinIO, Kafka (four listeners), NATS (five servers), kinesis-mock, ElasticMQ, the Pub/Sub emulator, RabbitMQ and MongoDB, samples | `cargo test` in `rust:1.96-slim-bookworm` |
+> | `gate (windows)` — fmt, clippy, 1055 tests (servers skip), samples | running it, repeatedly |
+> | `gate (ubuntu)` — fmt, clippy, **1045 tests** with Postgres, MySQL, MinIO, Kafka (four listeners), NATS (five servers), kinesis-mock, ElasticMQ, the Pub/Sub emulator, RabbitMQ, MongoDB and the BigQuery emulator, samples | `cargo test` in `rust:1.96-slim-bookworm` |
 > | `artifact (both)` — bake, run from elsewhere, run in a bare container | Phase 9b and 9c |
 > | `cross-build-script` — `build-runner.ps1`, ELF check, unbaked contract, no-op rerun | each assertion run by hand |
-> | `frontend` — 146 tests, typecheck, build | running it |
+> | `frontend` — 149 tests, typecheck, build | running it |
 >
 > **The Linux job excludes `apps/desktop`** (Tauri needs WebKitGTK and GTK to compile), so
-> **1025 + 10 desktop = 1035** is the arithmetic to check if either number moves. **CI fetches
+> **1045 + 10 desktop = 1055** is the arithmetic to check if either number moves. **CI fetches
 > only the extensions the tests load** (`DUCKDB_TEST_EXTENSIONS`, hyphen-separated because
 > `actions/cache` refuses a comma in a key). **CI cannot do the Windows-to-Linux cross-build**
 > (GitHub's Windows runners run no Linux containers), so it proves the output instead: a Linux
@@ -161,13 +174,13 @@ first when picking the project back up.
 > **To check everything, from the repo root:**
 >
 > ```powershell
-> ./scripts/test-services.ps1                                       # Postgres, MySQL, MinIO, Kafka, NATS, Kinesis, SQS, Pub/Sub, RabbitMQ, MongoDB in Docker
-> cargo test --workspace                                            # expect 1035 passing
+> ./scripts/test-services.ps1                                       # Postgres, MySQL, MinIO, Kafka, NATS, Kinesis, SQS, Pub/Sub, RabbitMQ, MongoDB, BigQuery in Docker
+> cargo test --workspace                                            # expect 1055 passing
 > ./scripts/test-services.ps1 -Stop                                 # tidy up afterwards
-> npm --prefix frontend run test                                    # expect 146 passing
+> npm --prefix frontend run test                                    # expect 149 passing
 > npm --prefix frontend run typecheck                               # expect clean
 > npm --prefix frontend run build                                   # expect clean
-> .\target\debug\etl.exe components                                 # expect 74
+> .\target\debug\etl.exe components                                 # expect 76
 > .\target\debug\etl.exe run samples\pipelines\orders_enriched.json # expect 12/5/7/6/6
 > .\target\debug\etl.exe run samples\pipelines\orders_checked.json  # expect 12/10+2/9+1/9/2/1
 > .\target\debug\etl.exe run samples\pipelines\orders_guarded.json  # expect 12 through, branch taken
@@ -190,10 +203,11 @@ first when picking the project back up.
 
 ## Where things stand
 
-- **Next phase:** **10n, Redis**, planned in [PLAN_duckle_parity.md](PLAN_duckle_parity.md)
-  under *Phases 10m–10u*. Each starts when the user says so. Needs Docker running.
-- **In progress:** nothing. **Phases 0–9 and 10a–10l are done** (10a–10f on 2026-09-23,
-  10g–10l on 2026-09-24; CI green through 10l on run 35964870851).
+- **Next phase:** **10p, Snowflake**, planned in [PLAN_duckle_parity.md](PLAN_duckle_parity.md)
+  under *Phases 10m–10u*. Each starts when the user says so. **10n (Redis) is not built**
+  (decision 82).
+- **In progress:** nothing. **Phases 0–9, 10a–10m and 10o are done** (10a–10f on 2026-09-23,
+  10g–10o on 2026-09-24; CI green through 10m on run 35972853098; 10o green locally).
 - **Blocked on:** nothing.
 
 Phase 9 was split into 9a–9d on 2026-09-17 before starting, the same way 6 and 8 were:
@@ -216,7 +230,7 @@ pass), `ctl.throttle` (nothing to throttle until Phase 10 has a row cursor).
 **a scheduler that runs them**, and **a console to watch it from**. From the repo root:
 
 ```powershell
-cargo test --workspace        # 1035 tests: 323 engine, 253 connectors, 113 scheduler, 65 console, 51 e2e, 51 cli, 48 state, 35 verified, 26 runner, 23 secrets, 17 native e2e, 15 metadata, 10 desktop, 5 plugin-sdk
+cargo test --workspace        # 1055 tests: 323 engine, 269 connectors, 113 scheduler, 65 console, 51 e2e, 51 cli, 48 state, 39 verified, 26 runner, 23 secrets, 17 native e2e, 15 metadata, 10 desktop, 5 plugin-sdk
 .\target\debug\etl.exe run samples\pipelines\orders_enriched.json
 .\target\debug\etl.exe validate samples\pipelines\orders_enriched.json
 .\target\debug\etl.exe plan samples\pipelines\orders_enriched.json --script
@@ -268,26 +282,27 @@ exists — writing the report only if one does. `plan.needs_session()` decides t
 because they read something that never got created, and the failures. The exit code is 3 either
 way. Getting the report back is the entire point of asking a run to continue.
 
-**Seventy-four components exist.** Sources: `src.cloud.http`, `src.cloud.s3`, `src.db.mongodb`, `src.db.mysql`,
+**Seventy-six components exist.** Sources: `src.cloud.http`, `src.cloud.s3`, `src.db.mongodb`, `src.db.mysql`,
 `src.db.postgres`, `src.db.sqlite`, `src.file.csv`, `src.file.excel`, `src.file.json`,
 `src.file.jsonl`, `src.file.parquet`, `src.file.xml`, `src.lake.delta`, `src.lake.iceberg`,
-`src.queue.pubsub`, `src.queue.rabbitmq`, `src.queue.sqs`, `src.saas.graphql`, `src.saas.rest`, `src.stream.kafka`, `src.stream.kinesis`, `src.stream.nats`. Transforms:
+`src.queue.pubsub`, `src.queue.rabbitmq`, `src.queue.sqs`, `src.saas.graphql`, `src.saas.rest`, `src.stream.kafka`, `src.stream.kinesis`, `src.stream.nats`, `src.warehouse.bigquery`. Transforms:
 `xf.aggregate`, `xf.cast`, `xf.dedup`, `xf.derive`, `xf.distinct`, `xf.except`,
 `xf.filter`, `xf.intersect`, `xf.join`, `xf.limit`,
 `xf.pivot`, `xf.rename`, `xf.sample`, `xf.select`, `xf.sort`, `xf.sql`, `xf.union`,
 `xf.unpivot`, `xf.window`. Sinks: `snk.cloud.s3`, `snk.db.mongodb`, `snk.db.mysql`, `snk.db.postgres`,
 `snk.db.sqlite`, `snk.file.csv`, `snk.file.excel`, `snk.file.json`, `snk.file.jsonl`,
-`snk.file.parquet`, `snk.file.xml`, `snk.queue.pubsub`, `snk.queue.rabbitmq`, `snk.queue.sqs`, `snk.saas.graphql`, `snk.saas.rest`, `snk.stream.kafka`, `snk.stream.kinesis`, `snk.stream.nats`. Quality: `qa.accepted_values`, `qa.expression`, `qa.not_null`, `qa.range`,
+`snk.file.parquet`, `snk.file.xml`, `snk.queue.pubsub`, `snk.queue.rabbitmq`, `snk.queue.sqs`, `snk.saas.graphql`, `snk.saas.rest`, `snk.stream.kafka`, `snk.stream.kinesis`, `snk.stream.nats`, `snk.warehouse.bigquery`. Quality: `qa.accepted_values`, `qa.expression`, `qa.not_null`, `qa.range`,
 `qa.referential`, `qa.regex`, `qa.unique`. Quality assertions, which fail the run rather than
 partitioning rows and so have no reject port: `qa.row_count`, `qa.schema_match`. Control:
 `ctl.branch`, `ctl.fail`, `ctl.log`, `ctl.sequence`, `ctl.wait`. Everything else in the six
 namespaces compiles to `UnsupportedComponent`, by design.
 
-**Twenty of them are written in Rust, not lowered to DuckDB alone** (the list below,
+**Twenty-two of them are written in Rust, not lowered to DuckDB alone** (the list below,
 `src.stream.kinesis` and `snk.stream.kinesis` from 10h and 10i, `src.queue.sqs` and
 `snk.queue.sqs` from 10j, the first that hold messages until the run's outcome,
 `src.queue.pubsub` and `snk.queue.pubsub` from 10k, and `src.queue.rabbitmq` and
-`snk.queue.rabbitmq` from 10l, and `src.db.mongodb` and `snk.db.mongodb` from 10m). `src.file.xml` and
+`snk.queue.rabbitmq` from 10l, and `src.db.mongodb` and `snk.db.mongodb` from 10m, and `src.warehouse.bigquery` and
+`snk.warehouse.bigquery` from 10o). `src.file.xml` and
 `snk.file.xml` (Phase 10a), `src.saas.rest` and `snk.saas.rest` (Phase 10b),
 `src.saas.graphql` and `snk.saas.graphql` (Phase 10d), `src.stream.kafka` (10e),
 `snk.stream.kafka` (10f), and `src.stream.nats` and `snk.stream.nats` (10g) are the *native*
@@ -671,9 +686,9 @@ fail the run. That is `ctl.fail`'s shape and it needs 6b's execution-model decis
 | 10j | — receipts (acknowledge after success), and SQS | **done** (green in CI, run 35959734855; not checked against real AWS) | 2026-09-24 |
 | 10k | — Pub/Sub | **done** (green in CI, run 35959734855; not checked against real Google Cloud) | 2026-09-24 |
 | 10l | — RabbitMQ | **done** (`44d1aaa`; against RabbitMQ 4.3 itself) | 2026-09-24 |
-| 10m | — MongoDB | **done** (against MongoDB 8.0 itself) | 2026-09-24 |
-| 10n | — Redis (streams, held; keys) | planned | |
-| 10o | — BigQuery | planned (emulator only) | |
+| 10m | — MongoDB | **done** (green in CI, run 35972853098; against MongoDB 8.0 itself) | 2026-09-24 |
+| 10n | — Redis | **not built** (the user's choice, decision 82) | 2026-09-24 |
+| 10o | — BigQuery | **done** (against the emulator; not checked against real Google Cloud) | 2026-09-24 |
 | 10p | — Snowflake | planned (fixture only) | |
 | 10q | — MariaDB (through the MySQL components) | planned | |
 | 10r | — ClickHouse | planned | |
@@ -923,14 +938,14 @@ recommended:
 Decisions 71–81 are Phases 10m–10u's (databases and warehouses), agreed 2026-09-24: all as
 recommended, except Elasticsearch, which is not built.
 
-71. **One connector per sub-phase** (10m MongoDB, 10n Redis, 10o BigQuery, 10p Snowflake, 10q
+71. **One connector per sub-phase** (10m MongoDB, 10n Redis (dropped: decision 82), 10o BigQuery, 10p Snowflake, 10q
     MariaDB, 10r ClickHouse, 10s Cassandra, 10t Neo4j, 10u SQL Server), each committed and
     pushed when green, the website updated after each, each started only when the user says so.
 72. **"Others on the site's list"** are the rest of its Databases group: MariaDB, ClickHouse,
     Cassandra, SQL Server and Neo4j. Redshift, Databricks and DuckDB wait for a later family.
 73. **MongoDB**: a collection with filter, projection and sort, batched; incremental by a
     field through a checkpoint; insert, or upsert on key fields. Change streams later.
-74. **Redis**: a Stream through a consumer group, held with 10j's receipts (`XACK` after
+74. **Redis** (superseded by decision 82: not built): a Stream through a consumer group, held with 10j's receipts (`XACK` after
     success), and a key snapshot by pattern (`SCAN`); sinks to a stream (`XADD`) and to hashes
     by a key template.
 75. **BigQuery**: our own REST client with 10k's Google sign-in; query jobs paged for reads,
@@ -950,6 +965,9 @@ recommended, except Elasticsearch, which is not built.
 81. **Incremental native reads use 10e's checkpoints** (`incremental_field` or
     `incremental_column` with `start`), not the DuckDB sources' `incremental` block, which
     does not reach native sources.
+82. **Redis (10n) is not built** (the user, 2026-09-24, after 10m). The phase letters stay as
+    they were, so 10o BigQuery follows 10m; every later phase has four components fewer than
+    planned (86 after 10u). Its design is kept in the plan.
 
 ## Open decisions
 
@@ -1664,6 +1682,21 @@ ran*. Earlier ones were resolved 2026-09-16 (Settled decisions 5–8).
   `etl_metadata` while the crate built alone; `cargo clean -p` for two crates fixed it.
 - **Kinesis's signed client became `aws::JsonApi`** for SQS to share, proved by Kinesis's
   unchanged tests.
+
+### From Phase 10o
+
+- **The emulator was killed for memory** (exit 137) during the mutation checks: it keeps
+  what dropped datasets used, about 450 MB per full round of its tests, and a dozen rounds
+  passed the 1 GB cap. The failures that followed were the emulator's, not the connector's;
+  every mutation was also caught by a test that needs no server. One round fits, which is
+  what CI runs; locally the container is restarted between rounds.
+- **The emulator returns every row on the first page** and does not run inserted query jobs,
+  so paging and polling are proved against the fixture, and reads use `jobs.query`.
+- **`at` is a reserved word** in the emulator's SQL (ZetaSQL): a probe query with a column of
+  that name failed to parse. The tests say `loaded_at`.
+- **Three test expectations were wrong, not the code**: 1790244000 seconds is 10:00:00 UTC,
+  not 10:40:00, as the emulator itself had shown in the probe.
+- **The CI run for 10m was green** (35972853098) once the Ubuntu runner's disk was freed.
 
 ### From Phase 10m
 
@@ -2828,3 +2861,31 @@ Started by the user ("pls start 10m").
 
 **1035 Rust tests with every server up, twice, none skipped; 146 frontend; fmt and clippy
 clean; six mutations each caught.**
+
+### 2026-09-24 — 10n (Redis) dropped
+
+The user: "i dont to implement 10n, can you update in md file". Plan: 10n marked not built,
+its design kept for later; the later phases' component counts lowered by four. Tracker:
+decision 82, status row, next phase **10o, BigQuery**. No code touched.
+
+### 2026-09-24 — Phase 10o: BigQuery
+
+Started by the user ("can we start building 10o BigQuery: parallely") while 10m's CI ran;
+the same session dropped 10n (Redis) from the plan at the user's request.
+
+- A probe of `ghcr.io/goccy/bigquery-emulator:0.8.1` first: `jobs.query` with named
+  parameters, typed results, paging, load jobs by multipart upload (append and truncate),
+  a missing table, `jobs.insert` (unsupported), and every value type's text.
+- `crates/connectors` — `bigquery.rs` (`src.warehouse.bigquery`, `snk.warehouse.bigquery`)
+  with 16 tests (3 against the emulator); `http.rs`: `Settings::signed`.
+- `samples/pipelines/bigquery_orders.json`; `verified.rs` — 4 tests (both transports with
+  three incremental runs, a failed run saving no position, preview).
+- `scripts/test-services.ps1` — the emulator (59050, 1 GB); `gate.yml` — 76 components; the
+  registry test; `frontend/src/icons.ts` — `warehouse`.
+- Docs: `connectors.md` (BigQuery), the plan's as-built notes, `learnings.md`,
+  `assignments.md` (A59-A60).
+- Meanwhile 10m's CI went green (35972853098), and the website marked MongoDB working
+  (`b035bd9`).
+
+**1055 Rust tests with every server up, twice, none skipped; 149 frontend; fmt and clippy
+clean; seven mutations each caught.**
