@@ -1654,8 +1654,234 @@ with what landed; the sample extended to write back to a second stream. **66 com
 - A resent record lands after later records of its call, so per-key order holds only when
   nothing is resent. `connectors.md` says so.
 
-**Later families**, planned one at a time when reached: the rest of the streaming brokers,
-then NoSQL, warehouses over their own protocols, vector DBs.
+**Chosen 2026-09-24, after Kinesis: the acknowledgement-based brokers** (RabbitMQ, SQS,
+Pub/Sub).
+
+##### Phase 10j, 10k and 10l — the acknowledgement-based brokers: SQS, Pub/Sub, RabbitMQ
+
+**Questions answered 2026-09-24, all as recommended** (Settled decisions 57–70). No AWS
+account or Google Cloud project is used (decision 70): SQS and Pub/Sub will be recorded as
+**not yet checked against the real services**, as Kinesis is. RabbitMQ is tested against
+RabbitMQ itself.
+
+**Why these need their own design.** Kafka, NATS and Kinesis keep messages and let a
+consumer read from a position, so a run saves where it got to and nothing on the broker
+changes. A queue works the other way round: a consumer *receives* messages, *holds* them,
+and then **acknowledges** them (they are gone) or **releases** them (they come back). Until
+now a source's `read` returns before DuckDB starts, so a source has had no way to hold
+anything until the run's outcome is known. The engine already has that moment, after the
+sinks delivered (`exec.rs`, both transports), and `preview` never reaches it.
+
+**Order** (decision 57): **10j** builds the shared design and SQS, **10k** Pub/Sub, **10l**
+RabbitMQ, each with its source and sink and each green on its own. SQS goes first because it
+reuses 10h's signing and credentials; RabbitMQ, the strictest case for the design (its
+acknowledgements belong to an open connection), was checked against the design before 10j
+starts building it.
+
+###### The shared design: a receipt, settled once
+
+1. **The plugin SDK gains `Receipt`** (decision 58):
+
+   ```rust
+   pub trait Receipt: Send {
+       /// The run fully succeeded: the messages are done with.
+       fn acknowledge(self: Box<Self>) -> Result<String, ConnectorError>;
+       /// Anything else: give the messages back for another run.
+       fn release(self: Box<Self>) -> Result<String, ConnectorError>;
+   }
+   ```
+
+   and `Source` gains `read_held(...) -> Result<(Summary, Option<Box<dyn Receipt>>), _>`,
+   whose default calls `read` and holds nothing, so every existing source is unchanged. A
+   queue source implements `read_held`; its `read` receives and releases at once. The
+   receipt comes back **beside** the `Summary`, not inside it, so `Summary` keeps `Clone`
+   and `Eq`. Each method returns a line for the report.
+2. **The engine settles every receipt exactly once.** Staging collects them in a `Receipts`
+   guard, like `Staging` for files:
+   - **acknowledge** once the run fully succeeded **and** the native sinks delivered: the
+     same point checkpoints become saveable;
+   - **release** on every other path: a failed stage, a `continue_on_failure` run with
+     failures, `preview`, an error anywhere, an interrupted run. The guard's `Drop` releases
+     whatever is still held, so an early return cannot forget one.
+
+   The script path, the session path, `preview`, the runner in a built artifact, the
+   scheduler and the console all go through these two functions, so all get it.
+3. **When acknowledging fails after the sinks delivered** (decision 59): the run still counts
+   as successful (other sources' positions are saved, watermarks advance), and the report
+   gets a new `warnings` list: *"N message(s) from <node> could not be acknowledged and will
+   be delivered again: <why>"*. `etl run` prints warnings after the stages, `--json`
+   carries them, and run history keeps them. This is duplication, not loss, and marking the
+   run failed would cause more of it.
+4. **Holding long enough** (decision 60): a hold ends on its own at SQS's visibility timeout
+   (up to 12 hours), Pub/Sub's ack deadline (up to 10 minutes) or RabbitMQ's
+   `consumer_timeout` (30 minutes by default). For SQS and Pub/Sub the receipt starts a
+   **lease keeper**, a thread that extends the hold every half-period until the receipt is
+   settled; it stops when the receipt is settled or dropped. RabbitMQ holds messages as long
+   as the channel is open, so the receipt keeps it open; its timeout is documented.
+5. **A batch** (decision 61) ends at `max_records` (default **10,000**: everything read is
+   held until the run ends), when the queue answers empty (SQS: a receive with a 1-second
+   wait returns nothing; Pub/Sub: a pull returns nothing; RabbitMQ: `basic.get` says empty),
+   or at `max_wait_ms` (default 30,000) of receiving.
+6. **Rows** (decision 62): `value_format` as the other brokers (`json`/`text`/`bytes`), plus
+   each broker's underscore columns (below). Receive and redelivery counts let a pipeline
+   spot repeats.
+7. **No checkpoint.** These sources keep no position: `etl state` lists nothing for them and
+   `etl state forget` has nothing to forget. The broker holds the state.
+8. **Delivery, stated in `connectors.md`:** at-least-once. A message comes again after a
+   failed run, a failed acknowledgement, or a hold that ran out; it is never acknowledged
+   before the run succeeded. Order is the broker's: none for SQS standard queues and
+   Pub/Sub without ordering keys, per group or key otherwise.
+
+**The engine's tests** use a connector that exists only in the test (as `native/tests.rs`
+already does) with a receipt that records how it was settled: acknowledged after success on
+both transports; released after a failed stage, with `continue_on_failure`, in `preview`,
+and when a sink fails; released by `Drop` on an early error; an acknowledgement error ending
+up in `warnings` with the run successful and its checkpoints saved.
+
+###### Phase 10j — the shared design, and SQS
+
+**Files.** `crates/plugin-sdk/src/lib.rs` (`Receipt`, `read_held`);
+`crates/duckdb-engine/src/{native.rs, exec.rs}` (`Receipts`, settling, `warnings`),
+`native/tests.rs`; `crates/cli` (print warnings); `crates/connectors/src/{sqs.rs,
+sqs/tests.rs, lib.rs}`, reusing `aws.rs` and `http.rs`; `scripts/test-services.ps1`;
+`gate.yml`; `verified.rs`; `samples/pipelines/sqs_orders.json`; `docs/connectors.md`.
+
+**Do.**
+
+1. The shared design above.
+2. **`src.queue.sqs`** (decisions 63, 69): `queue_url`, or `queue` resolved with
+   `GetQueueUrl` (and `queue_owner` for another account's queue); the AWS set exactly as for
+   Kinesis (region, profile, keys, session token, `endpoint`, `timeout_ms`, `retries`);
+   `max_records`, `max_wait_ms`, `visibility_seconds` (default 300, the lease keeper's
+   period), `value_format`, `columns`. Standard and FIFO queues. `ReceiveMessage` in 10s;
+   `DeleteMessageBatch` to acknowledge, `ChangeMessageVisibilityBatch` to 0 to release, and
+   to extend. The JSON protocol (`AmazonSQS.*`, `application/x-amz-json-1.0`), signed as
+   Kinesis is. Rows: `_queue`, `_message_id`, `_sent_timestamp`, `_receive_count`,
+   `_group_id` (FIFO), `_attributes` (message attributes as JSON).
+3. **`snk.queue.sqs`** (decision 67): each row one JSON message, `SendMessageBatch` in 10s
+   and under the batch payload limit; `delay_seconds`; for FIFO, `message_group_id_column`
+   (required there) and `deduplication_id_column` (else content-based deduplication must be
+   on). Entries refused within a batch: throttling-like ones sent again with backoff, others
+   fail at once saying what was sent, as the Kinesis sink does.
+4. **Test services** (decision 68): ElasticMQ 1.7.1 (`softwaremill/elasticmq-native`, 32 MB)
+   as `ETL_TEST_SQS`, locally and in CI's Ubuntu gate.
+5. **The sample**, `sqs_orders.json`: orders from a queue, filtered, to Parquet and to a
+   second queue.
+
+**Verify.** Without a server: settings refused by property; rows; batching of sends. Against
+ElasticMQ: a run acknowledges (the queue is empty after it); a failed run releases (the next
+run reads the same messages, `_receive_count` 2); `preview` releases; `max_records` leaves
+the rest; a hold shorter than the run is kept alive by the lease keeper (a `visibility_seconds`
+of 2 and a receipt held 6 seconds, nothing redelivered meanwhile); FIFO order within a
+group; a missing queue named; the sink round trip, FIFO groups and deduplication IDs. The
+engine tests above. The sample on both transports and `preview`. The gate: **68 components**.
+
+**Done.** Receipts settled correctly on every path, SQS both ways against ElasticMQ,
+semantics documented, "not yet checked against real AWS" recorded.
+
+**As built (2026-09-24).** Done as planned, with these differences:
+
+- **The engine's tests are split.** The run functions look connectors up in the real
+  registry, so the test connector covers the guard (collecting, acknowledging, releasing,
+  `Drop`, warnings and masking, a later source's failure releasing an earlier one's hold),
+  and the transports, `preview` and `continueOnFailure` are covered with SQS against
+  ElasticMQ in `verified.rs`. An acknowledgement that fails mid-run cannot be provoked from
+  ElasticMQ; it is covered by the guard's tests.
+- **Kinesis's signed client became `aws::JsonApi`**, shared by both services, with a
+  `Protocol` naming each one's target prefix, content type and throttling.
+- **Release on a failed row decode**: the SQS receipt exists before the first message
+  arrives, so a message that will not decode gives back everything received.
+- `Receipt` settles by value (`self: Box<Self>`); each method returns a report line.
+
+###### Phase 10k — Pub/Sub
+
+**Files.** `crates/connectors/src/{gcp.rs, gcp/tests.rs, pubsub.rs, pubsub/tests.rs}`,
+`tests/fixtures/` for the RFC vector; the services script, `gate.yml`, `verified.rs`, a
+sample, `connectors.md`.
+
+**Do.**
+
+1. **Google sign-in, our own** (decision 64), in `gcp.rs`: a service-account key file (from
+   `credentials_file` or `GOOGLE_APPLICATION_CREDENTIALS`): a JWT signed RS256 with `ring`'s
+   `RsaKeyPair`, exchanged at the key's `token_uri` for an access token, cached until
+   shortly before it expires; gcloud's user login file (`authorized_user`: a refresh token
+   exchanged for an access token); none when `endpoint` names an emulator (or
+   `PUBSUB_EMULATOR_HOST` is set). The metadata server (GCE, GKE) later, like AWS roles.
+   RS256 proved by RFC 7515's appendix A.2 example, byte for byte.
+2. **`src.queue.pubsub`**: `project`, `subscription`, the sign-in set, `endpoint`;
+   `max_records`, `max_wait_ms`, `ack_deadline_seconds` (default 60, the lease keeper's
+   period, at most 600), `value_format`, `columns`. `:pull`, `:acknowledge`,
+   `:modifyAckDeadline` (0 to release, and to extend). Rows: `_subscription`,
+   `_message_id`, `_publish_time`, `_ordering_key`, `_attributes`, `_delivery_attempt`.
+3. **`snk.queue.pubsub`**: `project`, `topic`; each row one JSON message; `:publish` in
+   batches of up to 1,000 messages and 10 MB; `ordering_key_column`; `attributes_column`
+   (an object column becoming string attributes).
+4. **Test services**: the Pub/Sub emulator (`google-cloud-cli:586.0.0-emulators`, 445 MB) as
+   `ETL_TEST_PUBSUB`, locally and in CI. It does not check sign-in, so the token exchange is
+   tested against the local fixture server.
+
+**Verify.** The RFC 7515 vector; the token request's form and its caching, against the
+fixture; each credential source and its order. Against the emulator, the same receipt
+behaviours as SQS (acknowledge, release, preview, lease keeping with a short deadline),
+ordering keys, a missing subscription named; the sink round trip. The sample on both
+transports. **70 components.**
+
+**Done.** Pub/Sub both ways against the emulator, sign-in proven by the RFC vector and the
+fixture, "not yet checked against real Google Cloud" recorded.
+
+**As built (2026-09-24).** Done as planned, with these differences:
+
+- **Each pull is extended at once to `ack_deadline_seconds`.** A pull holds messages for the
+  *subscription's* deadline (10 seconds by default), not ours, so the keeper's first
+  extension at half of ours would come too late. One `:modifyAckDeadline` per pull closes it.
+- **A pull asks for an immediate answer** (`returnImmediately`). Without it Pub/Sub waits "a
+  bounded amount of time" it does not state, which could outlast `timeout_ms` on an empty
+  subscription. Google discourages the flag: a pull can come back empty while messages
+  wait, which ends a batch early. Nothing is lost, and it is written in `connectors.md`.
+- **`_delivery_attempt` is null unless the subscription has a dead-letter policy**; only
+  then does Pub/Sub count deliveries. A repeat is spotted by `_message_id`.
+- **A plain `http://` endpoint signs nothing**, whether it came from `endpoint` or
+  `PUBSUB_EMULATOR_HOST`: that is how "an emulator" is recognised, and a token is never sent
+  over plain HTTP.
+- **`project` may be left out** when the subscription or topic is a full `projects/...` path.
+- **The lease keeper moved to `lease.rs`**, shared with SQS, whose tests pass unchanged on it.
+- `credentials_file` is a path, not the key's JSON; a key as a `${SECRET:...}` value is not
+  offered yet.
+
+###### Phase 10l — RabbitMQ
+
+**Files.** `crates/connectors/src/{rabbitmq.rs, rabbitmq/tests.rs}`; `lapin` added with
+`rustls--ring` and `tokio`, default features off; the services script (a RabbitMQ container
+with a plain and a TLS listener, certificates made as Kafka's are), `gate.yml`,
+`verified.rs`, a sample, `connectors.md`.
+
+**Do.**
+
+1. **`src.queue.rabbitmq`** (decisions 65, 66): `url` (`amqp://` or `amqps://`, user and
+   password in it or as `username`/`password`), `vhost`, `queue`, `ca_cert`; `max_records`,
+   `max_wait_ms`, `value_format`, `columns`. Classic and quorum queues. `basic.get` until
+   empty or `max_records`, **without** acknowledging; the receipt owns the runtime, the
+   connection and the channel, and settles with one `basic.ack` (multiple) or `basic.nack`
+   (requeue). Rows: `_queue`, `_exchange`, `_routing_key`, `_redelivered`, `_message_id`,
+   `_timestamp`, `_headers`.
+2. **`snk.queue.rabbitmq`**: `exchange` (empty: the default exchange), `routing_key` or
+   `routing_key_column`, `persistent` (default on); publisher confirms awaited per batch.
+3. **TLS**: bundled public roots plus `ca_cert`, as Kafka and NATS. Whether `lapin` takes our
+   shared `tls.rs` configuration directly is checked first in a scratchpad probe; if not,
+   its own `rustls` configuration gets the same roots.
+4. **Test services**: `rabbitmq:4.3-alpine` (84 MB), plain and TLS listeners, as
+   `ETL_TEST_RABBITMQ` and `ETL_TEST_RABBITMQ_TLS`.
+
+**Verify.** The receipt behaviours (acknowledge, release with `_redelivered` true next time,
+preview, a connection closed while holding: the broker requeues, the next run reads them);
+`max_records`; a missing queue named; bad credentials named; TLS with `ca_cert`, and
+refused without it; the sink round trip through an exchange with routing keys, and publisher
+confirms. The sample on both transports. **72 components.**
+
+**Done.** RabbitMQ both ways, plain and TLS, semantics documented.
+
+**Later families**, planned one at a time when reached: NoSQL, warehouses over their own
+protocols, vector DBs.
 
 ### Phase 11 — AI assistant + MCP server
 

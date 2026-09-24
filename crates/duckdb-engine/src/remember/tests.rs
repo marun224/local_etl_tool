@@ -32,6 +32,7 @@ fn report() -> RunReport {
         script: String::new(),
         spilled: 0,
         notes: Vec::new(),
+        warnings: Vec::new(),
         watermarks: vec![Watermark {
             node_id: "table".into(),
             column: "order_ts".into(),

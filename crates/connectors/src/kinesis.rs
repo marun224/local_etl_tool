@@ -26,8 +26,8 @@
 //! Nothing is registered with Kinesis: no consumer, no enhanced fan-out. The
 //! position lives in this project's state file, as for Kafka and NATS.
 
-use crate::aws::{self, Credentials, Sources};
-use crate::http::{base64_bytes, base64_decode, positive, text, Client, Extra, Judged, Settings};
+use crate::aws::{self, Sources};
+use crate::http::{base64_bytes, base64_decode, positive, text};
 use crate::kafka::{key_text, timestamp_text, value_columns, Format, Start};
 use etl_metadata::{ComponentSpec, PropertySpec};
 use etl_plugin_sdk::{
@@ -63,110 +63,53 @@ const GET_RECORDS_LIMIT: u64 = 10_000;
 // The connection: a signed Kinesis API client
 // ---------------------------------------------------------------------------
 
+/// How Kinesis speaks AWS's JSON protocol.
+pub(crate) static KINESIS: aws::Protocol = aws::Protocol {
+    name: "Kinesis",
+    service: "kinesis",
+    target_prefix: "Kinesis_20131202",
+    content_type: "application/x-amz-json-1.1",
+    throttled,
+};
+
+/// A "slow down". Kinesis says `LimitExceededException` for two different
+/// things: a call rate ("Rate exceeded"), which passes, and an account's shard
+/// limit, which does not. Only the first is retried; the second fails at once
+/// with Kinesis's own words (found in 10h's tests).
+fn throttled(status: u16, body: &str) -> bool {
+    status == 400
+        && (body.contains("ProvisionedThroughputExceededException")
+            || body.contains("ThrottlingException")
+            || (body.contains("LimitExceededException")
+                && body.to_ascii_lowercase().contains("rate exceeded")))
+}
+
 /// The properties every Kinesis component has, first, then `own`.
 pub(crate) fn with_connection(own: Vec<PropertySpec>) -> Vec<PropertySpec> {
-    let mut properties =
-        vec![
-        PropertySpec::text("stream").required(),
-        PropertySpec::text("region").help(
-            "The AWS region, e.g. eu-west-1. Unset, AWS_REGION, AWS_DEFAULT_REGION or the \
-             profile's region.",
-        ),
-        PropertySpec::text("profile").help(
-            "A named profile in ~/.aws/credentials and ~/.aws/config. Unset, AWS_PROFILE or \
-             default.",
-        ),
-        PropertySpec::text("access_key_id").help(
-            "Only to override the environment and profiles. Use ${SECRET:name} rather than the \
-             value itself.",
-        ),
-        PropertySpec::text("secret_access_key")
-            .help("With access_key_id. Use ${SECRET:name} rather than the value itself."),
-        PropertySpec::text("session_token").help("For temporary credentials."),
-        PropertySpec::text("endpoint").help(
-            "Only for a VPC endpoint or a Kinesis-compatible test server. Unset, \
-             https://kinesis.<region>.amazonaws.com.",
-        ),
-        PropertySpec::integer("timeout_ms")
-            .default(JsonValue::from(30_000))
-            .help("How long one request may take."),
-        PropertySpec::integer("retries").default(JsonValue::from(5)).help(
-            "Extra attempts after throttling, a 5xx or a network failure. Kinesis throttles \
-             often, so this is higher than for REST.",
-        ),
-    ];
+    let mut properties = vec![PropertySpec::text("stream").required()];
+    properties.extend(aws::connection_properties("kinesis"));
     properties.extend(own);
     properties
 }
 
-/// What can be refused before any request: keys given by halves, an endpoint
-/// that is not one. Credentials themselves are looked for when the run starts.
-fn check_connection(properties: &JsonValue) -> Result<(), ConnectorError> {
-    let partial_keys = text(properties, "access_key_id").is_some()
-        != text(properties, "secret_access_key").is_some();
-    if partial_keys {
-        return Err(ConnectorError::property(
-            "access_key_id",
-            "and secret_access_key are set together or not at all",
-        ));
-    }
-    if let Some(endpoint) = text(properties, "endpoint") {
-        if host_of(endpoint.trim_end_matches('/')).is_none() {
-            return Err(ConnectorError::property(
-                "endpoint",
-                format!("'{endpoint}' is not http://host[:port] or https://host[:port]"),
-            ));
-        }
-    }
-    Ok(())
-}
+use crate::aws::check_connection;
+#[cfg(test)]
+use crate::aws::{host_of, Credentials};
 
 /// A signed Kinesis API client.
-pub(crate) struct Api {
-    client: Client,
-    host: String,
-    region: String,
-    credentials: Credentials,
-}
+pub(crate) struct Api(aws::JsonApi);
 
 impl Api {
     pub(crate) fn connect(
         properties: &JsonValue,
         sources: &Sources,
     ) -> Result<Self, ConnectorError> {
-        let region = aws::region(properties, sources)?;
-        let credentials = aws::credentials(properties, sources)?;
-        let endpoint = text(properties, "endpoint")
-            .map(|endpoint| endpoint.trim_end_matches('/').to_string())
-            .unwrap_or_else(|| format!("https://kinesis.{region}.amazonaws.com"));
-        let host = host_of(&endpoint).ok_or_else(|| {
-            ConnectorError::property(
-                "endpoint",
-                format!("'{endpoint}' is not http://host[:port] or https://host[:port]"),
-            )
-        })?;
-
-        let timeout = Duration::from_millis(positive(properties, "timeout_ms", 30_000)?);
-        let retries = properties
-            .get("retries")
-            .and_then(JsonValue::as_u64)
-            .unwrap_or(5) as u32;
-
-        Ok(Api {
-            client: Client::new(Settings::signed_post(
-                format!("{endpoint}/"),
-                timeout,
-                retries,
-            )),
-            host,
-            region,
-            credentials,
-        })
+        aws::JsonApi::connect(properties, sources, &KINESIS).map(Api)
     }
 
     /// Where the credentials came from, for the report. Never the secret.
     pub(crate) fn credentials_source(&self) -> &str {
-        &self.credentials.source
+        self.0.credentials_source()
     }
 
     /// One Kinesis API call: `target` is the operation, e.g. `ListShards`.
@@ -175,73 +118,7 @@ impl Api {
         target: &str,
         body: &JsonValue,
     ) -> Result<JsonValue, ConnectorError> {
-        let bytes =
-            serde_json::to_vec(body).map_err(|error| ConnectorError::Data(error.to_string()))?;
-        let amz_target = format!("Kinesis_20131202.{target}");
-        let (host, region, credentials) = (&self.host, &self.region, &self.credentials);
-
-        let headers = || {
-            let unsigned = vec![
-                ("Host".to_string(), host.clone()),
-                (
-                    "Content-Type".to_string(),
-                    "application/x-amz-json-1.1".to_string(),
-                ),
-                ("X-Amz-Target".to_string(), amz_target.clone()),
-            ];
-            let amz_date = aws::amz_date_now();
-            let signed = aws::sign(
-                &aws::Unsigned {
-                    method: "POST",
-                    target: "/",
-                    headers: &unsigned,
-                    body: &bytes,
-                },
-                &aws::Signer {
-                    credentials,
-                    region,
-                    service: "kinesis",
-                    amz_date: &amz_date,
-                    normalize: true,
-                    sign_body: false,
-                    omit_session_token: false,
-                },
-            );
-            // Host and Content-Type are sent by the client itself; the
-            // signature covers the values it sends.
-            let mut headers = vec![("X-Amz-Target".to_string(), amz_target.clone())];
-            headers.extend(signed.headers);
-            headers
-        };
-        // A "slow down". Kinesis says `LimitExceededException` for two
-        // different things: a call rate ("Rate exceeded"), which passes, and an
-        // account's shard limit, which does not. Only the first is retried; the
-        // second fails at once with Kinesis's own words (found in 10h's tests).
-        let throttled = |status: u16, body: &str| {
-            status == 400
-                && (body.contains("ProvisionedThroughputExceededException")
-                    || body.contains("ThrottlingException")
-                    || (body.contains("LimitExceededException")
-                        && body.to_ascii_lowercase().contains("rate exceeded")))
-        };
-
-        let url = self.client.settings.url.clone();
-        let extra = Extra {
-            headers: &headers,
-            content_type: "application/x-amz-json-1.1",
-            throttled: &throttled,
-        };
-        let reply = self
-            .client
-            .send_with(&url, &[], Some(&bytes), Some(&extra), Judged::Accept)
-            .map_err(|error| ConnectorError::Data(format!("Kinesis {target}: {error}")))?;
-
-        if reply.body.trim().is_empty() {
-            return Ok(JsonValue::Object(Map::new()));
-        }
-        serde_json::from_str(&reply.body).map_err(|error| {
-            ConnectorError::Data(format!("Kinesis {target}: the answer is not JSON: {error}"))
-        })
+        self.0.call(target, body)
     }
 
     /// Every shard of `stream`, following `NextToken`.
@@ -266,22 +143,6 @@ impl Api {
         }
         Ok(shards)
     }
-}
-
-/// `host[:port]` of an endpoint, as the client will send it in `Host`: the
-/// default port for the scheme is left out, as HTTP clients leave it out.
-pub(crate) fn host_of(endpoint: &str) -> Option<String> {
-    let (scheme, rest) = endpoint.split_once("://")?;
-    let authority = rest.split('/').next()?;
-    if authority.is_empty() {
-        return None;
-    }
-    let default_port = match scheme {
-        "https" => ":443",
-        "http" => ":80",
-        _ => return None,
-    };
-    Some(authority.trim_end_matches(default_port).to_string())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

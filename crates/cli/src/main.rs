@@ -2888,6 +2888,10 @@ fn command_runs(action: RunsAction, settings: &Settings) -> u8 {
                 println!("  · {note}");
             }
 
+            for warning in &record.warnings {
+                println!("  ⚠ {warning}");
+            }
+
             for failure in &record.failures {
                 println!("  ! {failure}");
             }
@@ -2952,6 +2956,7 @@ fn record_of(
             })
             .collect(),
         notes: report.notes.clone(),
+        warnings: report.warnings.clone(),
         failures: report
             .failures
             .iter()
@@ -2993,6 +2998,7 @@ fn failed_record(
         outcome: state::Outcome::Failed,
         stages: Vec::new(),
         notes: Vec::new(),
+        warnings: Vec::new(),
         failures: vec![message],
         watermarks: Vec::new(),
         extra: Default::default(),

@@ -575,3 +575,63 @@ the fuller record. From Phase 10 on, a section is added at the end of each phase
   byte-exact fixture meant the Windows gate would fail. *Mark such fixtures `-text`.*
 - **A text anchor for an edit script must be unique in the file**, and three samples share
   one test shape. *Anchor on the function that follows, or check the count first.*
+
+## Phase 10j — receipts, and SQS (2026-09-24)
+
+**Concepts**
+- **Two models of "what has been read".** A log (Kafka, Kinesis) lets the reader remember a
+  position; a queue remembers for the reader, and must be told when a message is done. The
+  first saves state after success; the second has to *act* after success.
+- **Visibility timeout.** A received SQS message is hidden, not taken. Delete it, or it comes
+  back; change its visibility to 0 to give it back now.
+- **A lease.** A hold that ends on its own is renewed while the work goes on, so a slow run
+  and a crashed one are told apart by whether renewals stop.
+- **RAII for outcomes.** A guard whose `Drop` releases means every early return, panic path
+  and preview gives messages back without anyone remembering to.
+
+**Decisions and why**
+- **Acknowledge after the sinks delivered, not before**: a failure in delivery then gives the
+  messages back. The price is that a failed acknowledgement after delivery duplicates;
+  duplication is recoverable, loss is not.
+- **A new method with a default over a new field**: every existing source compiles and
+  behaves as before.
+- **Long polling to decide "empty"**: an instant receive can miss messages that are there.
+
+**Mistakes worth not repeating**
+- **A shell heredoc is the wrong way to write Rust with `r#"..."#` and quotes** into a file
+  twice in one session. *Write the text to a file first, then append it.*
+- **When a whole-workspace build says a crate cannot be found but the crate builds alone,
+  suspect the build directory, not the code.**
+
+## Phase 10k — Pub/Sub, and signing in to Google (2026-09-24)
+
+**Concepts**
+- **An OAuth 2.0 JWT bearer grant.** A service account proves who it is by signing a short
+  JWT (issuer, scope, audience, an hour's validity) with its private key; the token endpoint
+  checks it with the public key and hands back an access token. The key never leaves the
+  machine.
+- **RS256 is deterministic.** RSASSA-PKCS1-v1_5 gives the same signature for the same key and
+  input, which is why a published example can check a signer byte for byte. (PSS and ECDSA
+  are randomised; they are checked by verifying instead.)
+- **DER and PEM.** PEM is base64 of DER between `BEGIN`/`END` lines; PKCS#8 wraps a PKCS#1
+  RSA key with an algorithm identifier. Twenty lines of DER writing turned the RFC's JWK into
+  both forms for the tests.
+- **Two deadlines.** A subscription has its own ack deadline, and a source asks for another;
+  a message is held for whichever was set last.
+
+**Decisions and why**
+- **Sign-in of our own over Google's crates**: their Rust version and async runtime cost more
+  than the ~300 lines of RS256, key files and a token cache, and the RFC proves the part that
+  is easy to get wrong.
+- **Plain http means an emulator**: the one rule both decides when to sign and guarantees a
+  token is never sent in clear.
+- **An immediate pull over a waiting one**: a run that ends early is recovered by the next
+  one; a request that outlasts its timeout on an empty subscription fails the run.
+- **One lease keeper for both queues**: the thread, the stop and the "first trouble" were the
+  same; only what "extend" means differs, so that became a closure.
+
+**Mistakes worth not repeating**
+- **Expected paths in tests are built with `Path::join`**, never with `/`, on a project that
+  runs on Windows.
+- **Documentation with Windows paths is written with the editor, not through a
+  string-escaping script**: `\a` is a bell in Python.

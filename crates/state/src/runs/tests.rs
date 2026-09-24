@@ -28,6 +28,7 @@ fn record(id: &str, outcome: Outcome) -> RunRecord {
             ..StageRecord::default()
         }],
         notes: Vec::new(),
+        warnings: Vec::new(),
         failures: Vec::new(),
         watermarks: Vec::new(),
         extra: Default::default(),

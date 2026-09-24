@@ -104,6 +104,10 @@ pub struct RunRecord {
     /// What the control nodes said.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
+    /// What went wrong without failing the run, such as messages that could
+    /// not be acknowledged and will be delivered again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
     /// What went wrong, for a run that failed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failures: Vec<String>,

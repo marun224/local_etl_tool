@@ -191,6 +191,40 @@ pub trait Source: Send + Sync {
         out: &mut dyn RecordWriter,
         context: &Context,
     ) -> Result<Summary, ConnectorError>;
+
+    /// [`Source::read`], for a source whose messages are **held** until the
+    /// run's outcome is known: a queue, which forgets a message once it is
+    /// acknowledged and gives it back once it is released.
+    ///
+    /// The engine calls this, not `read`. The default reads and holds nothing,
+    /// which is right for every source that keeps no hold. A queue source
+    /// returns a [`Receipt`], and the engine settles it exactly once:
+    /// acknowledged after the run fully succeeded and its sinks delivered,
+    /// released on every other path.
+    fn read_held(
+        &self,
+        properties: &JsonValue,
+        out: &mut dyn RecordWriter,
+        context: &Context,
+    ) -> Result<(Summary, Option<Box<dyn Receipt>>), ConnectorError> {
+        self.read(properties, out, context)
+            .map(|summary| (summary, None))
+    }
+}
+
+/// Messages a source is holding until the run's outcome is known.
+///
+/// Settled once, by value. Each method returns a line for the run report.
+/// **Dropping a receipt unsettled must release it**, as far as the source can:
+/// the engine settles every receipt it is given, but a hold that outlived its
+/// owner should come back to the queue rather than wait out a timeout.
+pub trait Receipt: Send {
+    /// The run fully succeeded and its sinks delivered: the messages are done.
+    fn acknowledge(self: Box<Self>) -> Result<String, ConnectorError>;
+
+    /// Anything else -- a failure, a preview, an interrupted run: give the
+    /// messages back for another run.
+    fn release(self: Box<Self>) -> Result<String, ConnectorError>;
 }
 
 /// A component that delivers records somewhere DuckDB cannot write.

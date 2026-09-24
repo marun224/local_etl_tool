@@ -709,6 +709,7 @@ fn report_of(stages: Vec<StageOutcome>, failures: Vec<StageFailure>) -> RunRepor
         script: "SELECT 1".to_string(),
         spilled: 0,
         notes: vec!["a note".to_string()],
+        warnings: Vec::new(),
         watermarks: Vec::new(),
         checkpoints: Vec::new(),
         failures,
@@ -735,6 +736,21 @@ fn a_report_with_no_failures_is_recorded_as_succeeded() {
     assert_eq!(record.stages[0].rows, Some(12));
     assert_eq!(record.notes, vec!["a note".to_string()]);
     assert!(record.failures.is_empty());
+}
+
+#[test]
+fn a_warning_is_kept_and_the_run_still_succeeded() {
+    let mut report = report_of(vec![stage("read", Some(12))], Vec::new());
+    report.warnings = vec!["Orders: 3 message(s) will be delivered again".to_string()];
+    let record = record_from(&report);
+
+    assert_eq!(record.outcome, state::Outcome::Succeeded);
+    assert_eq!(record.warnings, report.warnings);
+    let json = serde_json::to_value(&record).unwrap();
+    assert_eq!(
+        json["warnings"][0],
+        "Orders: 3 message(s) will be delivered again"
+    );
 }
 
 #[test]

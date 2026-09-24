@@ -28,6 +28,26 @@ records again. `etl state list` shows positions, and `etl state forget <pipeline
 <id>` makes a node start over. A built artifact keeps the same file in the directory it runs
 in (or `--workspace`). `preview` reads from the saved position and saves nothing.
 
+**A queue source holds its messages instead** (Phase 10j; SQS is the first, Pub/Sub the
+second). A queue keeps no
+position to come back to: it hands a message out, hides it, and deletes it only when told to.
+So a queue source saves nothing in `.etl/state/`; it **holds** what it received and hands the
+engine a *receipt*, which the engine settles exactly once:
+
+- **acknowledged** (the messages are deleted) after the run **fully succeeded and its native
+  sinks delivered**, the moment a streaming source's position would be saved;
+- **released** (the messages come back at once) on every other path: a failed stage, a
+  `continueOnFailure` run with failures, a sink that failed, `preview`, or any error. A
+  receipt nobody settled is released when it is dropped.
+
+The report has a line for each (*"12 message(s) deleted from queue 'orders'"*). While the run
+goes on, the hold is kept alive (see each connector), so a long run does not see its messages
+handed to someone else. **If acknowledging fails after the sinks delivered**, the run still
+succeeds and the report gets a **warning**, printed with ⚠ and kept in run history: those
+messages will be delivered again. That is duplication, not loss. Delivery from a queue is
+**at-least-once**: a message comes again after a failed run, a failed acknowledgement, or a
+hold that ran out, and is never deleted before the run that read it succeeded.
+
 **A sink delivers after DuckDB, and only after a run that succeeded.** DuckDB writes the rows
 to the staging file, and the connector delivers them once the whole run has finished without
 a failure. That includes `continueOnFailure`: a run that carried on past a failure still
@@ -564,3 +584,131 @@ Each row is put as **one JSON record**, up to `batch_size` (default and most 500
   no duplicate window like NATS's.
 - **Like every native sink, it puts only after a run that fully succeeded**, and never in
   `preview`.
+
+## `src.queue.sqs` and `snk.queue.sqs`
+
+Added in Phase 10j (2026-09-24). SQS speaks AWS's JSON protocol, so it goes through the same
+signed `ureq` client as Kinesis: no `tokio`. Credentials, region and `endpoint` work exactly as
+[for Kinesis](#credentials-and-region). **Verified against ElasticMQ 1.7.1, not against real
+AWS** (Settled decision 70): the signing is proved by AWS's published SigV4 suite, and the test
+server accepts any signature.
+
+**Which queue:** `queue_url`, or `queue` (a name, looked up with `GetQueueUrl`, with
+`queue_owner` for another account's queue). A FIFO queue's name ends in `.fifo`.
+
+### Receiving: `src.queue.sqs`
+
+- **A batch** receives up to ten messages a call until `max_records` (default **10,000**), a
+  receive with a one-second wait comes back empty, or `max_wait_ms` (default 30,000) has
+  passed. The one-second wait makes "empty" mean empty: a wait asks every server the queue
+  lives on, where an instant answer can miss messages that are there.
+- **Held, not deleted.** Each message is hidden for `visibility_seconds` (default 300, at
+  most SQS's twelve hours). A **lease keeper** thread extends every held message by that much
+  again every half-period until the run's outcome is known, then stops. Acknowledging is
+  `DeleteMessageBatch`; releasing is `ChangeMessageVisibilityBatch` to 0, so the next run sees
+  them at once, not after the timeout. If an extension fails, the settle line says so: some
+  messages may have gone to another consumer meanwhile.
+- **Rows** are the brokers' `value_format` (`json`, `text`, `bytes`) over the message body,
+  plus `_queue` (the name), `_message_id`, `_sent_timestamp` (UTC), `_receive_count` (1 the
+  first time; more means it came back), `_group_id` (FIFO) and `_attributes` (message
+  attributes as `{name: value}`, a binary one as base64).
+- **Order:** none on a standard queue. A FIFO queue keeps each group's order; while a
+  group's messages are held, SQS hands out no more of that group, so one run takes at most
+  one receive's worth (up to ten) from each group, and the next run takes the next.
+- **Nothing is saved in `.etl/state/`** and `etl state forget` has nothing to forget: the
+  queue holds the state.
+
+### Sending: `snk.queue.sqs`
+
+Each row is sent as **one JSON message**, ten to a `SendMessageBatch` and under 1 MiB a call.
+A row over 1 MiB as JSON fails the run before it is sent, naming the row.
+
+- **FIFO queues** need `message_group_id_column` (each group is kept in order), and either
+  `deduplication_id_column` or content-based deduplication switched on for the queue. A null
+  group or ID fails, naming the row.
+- **`delay_seconds`** (standard queues only, up to 900) hides each message that long.
+- **A call can send some messages and refuse others.** Those refused on SQS's side
+  (`SenderFault` false) are sent again on their own, with backoff, up to `retries`; a refusal
+  that is ours to fix fails at once. A failure says how many messages were sent before it;
+  they stay in the queue.
+- **At-least-once**, as the other sinks: a re-run sends everything again, except that a FIFO
+  queue drops a repeated deduplication ID within its five-minute window.
+- **Like every native sink, it sends only after a run that fully succeeded**, and never in
+  `preview`.
+
+## `src.queue.pubsub` and `snk.queue.pubsub`
+
+Added in Phase 10k (2026-09-24). Pub/Sub's REST API (`v1`), through the shared `ureq` layer:
+no `tokio`, and none of Google's own crates. **Verified against Google's Pub/Sub emulator
+(`google-cloud-cli:586.0.0-emulators`), not against real Google Cloud** (Settled decision 70).
+The emulator checks no sign-in, so signing in is proved separately: RS256 by RFC 7515's own
+example, byte for byte, and the token exchange against a local test server.
+
+**Which subscription or topic:** a name with `project`, or a full path,
+`projects/<project>/subscriptions/<name>` (or `.../topics/<name>`), which needs no `project`.
+
+### Signing in
+
+The first of these that has credentials wins:
+
+1. `credentials_file`: a service account's JSON key file, or a gcloud login file. It is a
+   path, not the key itself, so the key stays a file only its owner can read.
+2. `GOOGLE_APPLICATION_CREDENTIALS`, naming such a file.
+3. gcloud's application-default login (`gcloud auth application-default login`):
+   `%APPDATA%\gcloud\application_default_credentials.json` on Windows,
+   `~/.config/gcloud/...` elsewhere, or under `CLOUDSDK_CONFIG`.
+
+A **service account** signs a JWT with its key (RS256) and trades it at the key's
+`token_uri`; a **person's login** trades its refresh token. Either way the access token is
+cached until five minutes before it expires, and shared with the lease keeper. The metadata
+server on GCE and GKE, and `external_account` (workload identity federation) files, are not
+read yet. The report names the service account or login and where it came from, never the
+key.
+
+**`endpoint`**: unset, `PUBSUB_EMULATOR_HOST` if it is set, else
+`https://pubsub.googleapis.com`. A regional endpoint (`https://europe-west1-pubsub.googleapis.com`)
+works the same. **A plain `http://` endpoint is an emulator: nothing is signed, and a token
+is never sent over it.**
+
+### Pulling: `src.queue.pubsub`
+
+- **A batch** pulls up to 1,000 messages a call until `max_records` (default **10,000**), a
+  pull comes back empty, or `max_wait_ms` (default 30,000) has passed. A pull asks for an
+  immediate answer (`returnImmediately`), so an empty subscription ends the run at once
+  rather than after a server-side wait of unstated length. Google warns that such a pull
+  can come back empty while messages are waiting; then the batch ends early and the next run
+  takes them. Nothing is lost. Not yet seen against real Pub/Sub.
+- **Held, not acknowledged.** A pull holds messages for the *subscription's* ack deadline,
+  10 seconds unless it was set longer, so each pull's messages are extended at once to
+  `ack_deadline_seconds` (default 60, at most 600). A **lease keeper** extends everything held
+  by that much again every half-period until the run's outcome is known, then stops.
+  Acknowledging is `:acknowledge`; releasing is `:modifyAckDeadline` to 0, so the next run
+  gets them at once. If an extension fails, the settle line says so.
+- **Rows** are the brokers' `value_format` (`json`, `text`, `bytes`) over the message data,
+  plus `_subscription` (the name), `_message_id`, `_publish_time` (UTC, to the microsecond),
+  `_ordering_key` (null without one), `_attributes` (`{name: value}`) and
+  `_delivery_attempt`. **Pub/Sub counts deliveries only for a subscription with a dead-letter
+  policy**; otherwise `_delivery_attempt` is null, and a repeat is spotted by `_message_id`.
+  A message with attributes and no data is a row of the underscore columns alone.
+- **Order:** none, unless the subscription has message ordering on and messages were
+  published with ordering keys; then each key's messages come in order. A released message
+  comes back before the key's later ones.
+- **Nothing is saved in `.etl/state/`**: the subscription holds the state.
+
+### Publishing: `snk.queue.pubsub`
+
+Each row is published as **one JSON message**, up to 1,000 to a `:publish` call and under
+10 MB once base64-encoded. A row too large for one call fails the run before it is sent,
+naming the row.
+
+- **`ordering_key_column`**: each message's ordering key; a null value publishes without one.
+- **`attributes_column`**: a column holding an object, whose entries become the message's
+  attributes as text. A null entry is left out; a value that is not an object fails, naming
+  the row. The row, that column included, is still the message's data.
+- **A publish is taken whole or not at all.** A 429 or 5xx is retried; a call retried after
+  it had in fact landed publishes its messages twice. A failure says how many messages were
+  published before it; they stay on the topic.
+- **At-least-once**, as the other sinks: a re-run publishes everything again. Pub/Sub has no
+  duplicate window for publishing.
+- **Like every native sink, it publishes only after a run that fully succeeded**, and never
+  in `preview`.

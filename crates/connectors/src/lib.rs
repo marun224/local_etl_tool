@@ -19,12 +19,16 @@ use std::sync::OnceLock;
 mod aws;
 #[cfg(test)]
 mod fixture;
+mod gcp;
 pub mod graphql;
 mod http;
 pub mod kafka;
 pub mod kinesis;
+mod lease;
 pub mod nats;
+pub mod pubsub;
 pub mod rest;
+pub mod sqs;
 mod tls;
 pub mod xml;
 
@@ -46,6 +50,10 @@ pub fn all() -> &'static [(String, Connector)] {
             Connector::Sink(&nats::NatsSink),
             Connector::Source(&kinesis::KinesisSource),
             Connector::Sink(&kinesis::KinesisSink),
+            Connector::Source(&sqs::SqsSource),
+            Connector::Sink(&sqs::SqsSink),
+            Connector::Source(&pubsub::PubsubSource),
+            Connector::Sink(&pubsub::PubsubSink),
         ]
         .into_iter()
         .map(|connector| (connector.spec().id, connector))

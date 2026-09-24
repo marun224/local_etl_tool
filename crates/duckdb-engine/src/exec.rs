@@ -250,6 +250,11 @@ pub struct RunReport {
     /// records that run never finished with. Callers should still save it in
     /// the same write as the watermarks.
     pub checkpoints: Vec<Checkpoint>,
+    /// What went wrong without failing the run: messages a queue source read
+    /// that could not be acknowledged once the run succeeded, and so will be
+    /// delivered again. Duplication, not loss; shown apart from the notes so
+    /// it is not missed.
+    pub warnings: Vec<String>,
     /// Stages that failed while `continue_on_failure` kept the run going.
     ///
     /// **A report holding any of these is a failed run.** Every other way a
@@ -322,7 +327,9 @@ pub fn preview(
     // view over it to hold anything. Sinks are already gone from `stages`, so
     // nothing is delivered: a preview stays a read.
     let mut staging = Staging::default();
-    // Where it read to is not saved: a preview is a look, not a run.
+    // Where it read to is not saved: a preview is a look, not a run. Anything
+    // a queue source is holding goes back at once, as the staged value drops:
+    // the staging file already has the rows the preview shows.
     native::stage_sources(stages.iter().copied(), options, &mut staging)?;
 
     let mut script = String::new();
@@ -448,6 +455,8 @@ fn run_one_script(
     native::prepare_sinks(&plan.stages, options, &mut staging)?;
     let staged = native::stage_sources(&plan.stages, options, &mut staging)?;
     let mut notes = staged.notes;
+    // Every early return below drops these, which releases what they hold.
+    let receipts = staged.receipts;
 
     let mut command = Command::new(&binary);
     command.arg("-json").arg("-c").arg(&script);
@@ -500,6 +509,9 @@ fn run_one_script(
         &HashSet::new(),
         options,
     )?);
+    // Delivered, so what the queue sources held is done with.
+    let settled = receipts.acknowledge();
+    notes.extend(settled.notes);
 
     Ok(RunReport {
         stages: outcomes(plan, options.counts, &counts),
@@ -513,6 +525,7 @@ fn run_one_script(
         script: redact(&script, &options.redact),
         spilled,
         notes,
+        warnings: settled.warnings,
         failures: Vec::new(),
     })
 }
@@ -1085,15 +1098,17 @@ fn run_driven(plan: &Plan, options: &RunOptions, binary: PathBuf) -> Result<RunR
     // Deliver only what a fully successful run produced, which is the rule
     // watermarks follow too. A run that carried on past a failure still failed,
     // and delivering half of it would be the one outcome nobody could undo.
-    let checkpoints = if failures.is_empty() {
+    let (checkpoints, settled) = if failures.is_empty() {
         notes.extend(native::deliver_sinks(&plan.stages, &untaken, options)?);
-        staged.checkpoints
+        (staged.checkpoints, staged.receipts.acknowledge())
     } else {
         notes.extend(native::withheld(&plan.stages));
         // The same rule, for where the sources got to: a failed run saves no
-        // position, so the next run re-reads what this one never finished.
-        Vec::new()
+        // position, so the next run re-reads what this one never finished,
+        // and a queue source gets its messages back.
+        (Vec::new(), staged.receipts.release())
     };
+    notes.extend(settled.notes);
 
     let elapsed = started.elapsed();
     let spilled = clear_spills(plan, options);
@@ -1120,6 +1135,7 @@ fn run_driven(plan: &Plan, options: &RunOptions, binary: PathBuf) -> Result<RunR
         script: redact(&script, &options.redact),
         spilled,
         notes,
+        warnings: settled.warnings,
         failures,
     })
 }

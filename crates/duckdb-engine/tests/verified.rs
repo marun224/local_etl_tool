@@ -1284,3 +1284,584 @@ fn previewing_a_kinesis_source_reads_it() {
     let rows = preview(&plan, "read_orders", 50, &options(&workspace)).expect("previews");
     assert_eq!(rows.rows.len(), 9);
 }
+
+// ---------------------------------------------------------------------------
+// Amazon SQS, held until the run's outcome is known (Phase 10j), against ElasticMQ
+// ---------------------------------------------------------------------------
+
+/// One SQS call to the test server, which accepts any signature.
+fn sqs_call(endpoint: &str, target: &str, body: serde_json::Value) -> serde_json::Value {
+    let mut response = ureq::post(format!("{endpoint}/"))
+        .header("Content-Type", "application/x-amz-json-1.0")
+        .header("X-Amz-Target", format!("AmazonSQS.{target}"))
+        .header("X-Amz-Date", "20260101T000000Z")
+        .header(
+            "Authorization",
+            "AWS4-HMAC-SHA256 Credential=test/20260101/us-east-1/sqs/aws4_request, \
+             SignedHeaders=host, Signature=0",
+        )
+        .send(body.to_string().as_bytes())
+        .unwrap_or_else(|error| panic!("{target}: {error}"));
+    let text = response.body_mut().read_to_string().unwrap();
+    serde_json::from_str(&text).unwrap_or(serde_json::Value::Null)
+}
+
+/// A queue for one test, deleted when dropped.
+struct SqsQueue {
+    endpoint: String,
+    name: String,
+    url: String,
+}
+
+impl Drop for SqsQueue {
+    fn drop(&mut self) {
+        let _ = std::panic::catch_unwind(|| {
+            sqs_call(
+                &self.endpoint,
+                "DeleteQueue",
+                serde_json::json!({ "QueueUrl": self.url }),
+            )
+        });
+    }
+}
+
+fn sqs_queue(endpoint: &str, name: &str) -> SqsQueue {
+    let answer = sqs_call(
+        endpoint,
+        "CreateQueue",
+        serde_json::json!({ "QueueName": name }),
+    );
+    SqsQueue {
+        endpoint: endpoint.to_string(),
+        name: name.to_string(),
+        url: answer["QueueUrl"].as_str().unwrap().to_string(),
+    }
+}
+
+/// An orders queue holding `orders`, and an empty one for the large orders,
+/// named as `sqs_orders` binds them.
+fn sqs_queues(endpoint: &str, test: &str, orders: &[serde_json::Value]) -> (SqsQueue, SqsQueue) {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .subsec_nanos();
+    let name = format!("etl-verified-{test}-{nanos}");
+    let queue = sqs_queue(endpoint, &name);
+    let large = sqs_queue(endpoint, &format!("{name}-large"));
+    for chunk in orders.chunks(10) {
+        let entries: Vec<serde_json::Value> = chunk
+            .iter()
+            .enumerate()
+            .map(|(i, order)| {
+                serde_json::json!({ "Id": i.to_string(), "MessageBody": order.to_string() })
+            })
+            .collect();
+        sqs_call(
+            endpoint,
+            "SendMessageBatch",
+            serde_json::json!({ "QueueUrl": queue.url, "Entries": entries }),
+        );
+    }
+    (queue, large)
+}
+
+/// (visible, hidden) messages in a queue: waiting, and received but not yet
+/// deleted or given back.
+fn sqs_counts(queue: &SqsQueue) -> (u64, u64) {
+    let answer = sqs_call(
+        &queue.endpoint,
+        "GetQueueAttributes",
+        serde_json::json!({ "QueueUrl": queue.url, "AttributeNames": ["All"] }),
+    );
+    let count = |key: &str| {
+        answer["Attributes"][key]
+            .as_str()
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(0)
+    };
+    (
+        count("ApproximateNumberOfMessages"),
+        count("ApproximateNumberOfMessagesNotVisible"),
+    )
+}
+
+fn sqs_orders(
+    workspace: &Path,
+    endpoint: &str,
+    queue: &SqsQueue,
+    policy: Option<serde_json::Value>,
+) -> etl_duckdb_engine::Plan {
+    let text = std::fs::read_to_string(repo_root().join("samples/pipelines/sqs_orders.json"))
+        .expect("the sample is committed");
+    let mut json: serde_json::Value = serde_json::from_str(&text).unwrap();
+    if let Some(policy) = policy {
+        json["nodes"][1]["data"]["policy"] = policy;
+    }
+    let resolver = Resolver::new(workspace)
+        .bind("sqs_endpoint", endpoint)
+        .bind("queue", &queue.name)
+        .bind("large_queue", &format!("{}-large", queue.name));
+    let resolved = resolve(&document(&json.to_string()), &resolver).expect("resolves");
+    compile_with(&resolved.document, &CompileOptions::default()).expect("compiles")
+}
+
+fn the_sqs_sample_takes_what_it_read(name: &str, policy: Option<serde_json::Value>) {
+    let Some(endpoint) = server("ETL_TEST_SQS") else {
+        return;
+    };
+    let Some((workspace, binary)) = workspace(name, &[]) else {
+        return;
+    };
+    let (queue, large) = sqs_queues(&endpoint, name, &sample_orders());
+
+    let first = run(
+        &sqs_orders(&workspace, &endpoint, &queue, policy.clone()),
+        &options(&workspace),
+    )
+    .expect("runs");
+    let put = rows(&first)[3].expect("the large orders were sent");
+    assert_eq!(rows(&first)[0], Some(12));
+    assert_eq!(rows(&first)[1], Some(put));
+    assert!(first.warnings.is_empty(), "{:?}", first.warnings);
+    let acknowledged = format!(
+        "Orders queue: 12 message(s) deleted from queue '{}'",
+        queue.name
+    );
+    assert!(
+        first.notes.iter().any(|note| note == &acknowledged),
+        "{:?}",
+        first.notes
+    );
+    assert_eq!(sqs_counts(&queue), (0, 0), "acknowledged: gone");
+    assert_eq!(sqs_counts(&large), (put, 0));
+    assert_eq!(
+        query(
+            &binary,
+            &workspace,
+            "SELECT count(*) AS n, min(_receive_count) AS r \
+             FROM 'samples/out/sqs_large_orders.parquet';"
+        ),
+        format!(r#"[{{"n":{put},"r":1}}]"#)
+    );
+
+    let second = run(
+        &sqs_orders(&workspace, &endpoint, &queue, policy),
+        &options(&workspace),
+    )
+    .expect("runs");
+    assert_eq!(rows(&second), [Some(0), Some(0), Some(0), Some(0)]);
+}
+
+#[test]
+fn the_sqs_sample_takes_what_it_read_on_the_one_script_path() {
+    the_sqs_sample_takes_what_it_read("sqs_script", None);
+}
+
+#[test]
+fn the_sqs_sample_takes_what_it_read_on_the_session_path() {
+    the_sqs_sample_takes_what_it_read(
+        "sqs_session",
+        Some(serde_json::json!({ "retryAttempts": 1 })),
+    );
+}
+
+/// A pipeline reading `queue` into a filter that fails at run time.
+fn sqs_broken(endpoint: &str, queue: &str, policy: &str) -> PipelineDoc {
+    document(&format!(
+        r#"{{ "formatVersion": 1, "nodes": [
+            {{ "id": "read", "position": {{"x":0,"y":0}}, "data": {{ "label": "Queue",
+               "componentId": "src.queue.sqs",
+               "properties": {{ "queue": "{queue}", "endpoint": "{endpoint}", "region": "us-east-1",
+                                "access_key_id": "test", "secret_access_key": "test" }} }} }},
+            {{ "id": "broken", "position": {{"x":0,"y":0}}, "data": {{ "label": "Broken",
+               "componentId": "xf.filter", "properties": {{ "predicate": "no_such_column > 1" }}
+               {policy} }} }},
+            {{ "id": "out", "position": {{"x":0,"y":0}}, "data": {{ "label": "Out",
+               "componentId": "snk.file.parquet", "properties": {{ "path": "out.parquet" }} }} }}
+          ],
+          "edges": [ {{ "id": "e1", "source": "read", "target": "broken" }},
+                     {{ "id": "e2", "source": "broken", "target": "out" }} ] }}"#
+    ))
+}
+
+#[test]
+fn a_failed_sqs_run_gives_every_message_back() {
+    let Some(endpoint) = server("ETL_TEST_SQS") else {
+        return;
+    };
+    let Some((workspace, _)) = workspace("sqs_failed", &[]) else {
+        return;
+    };
+    let (queue, _large) = sqs_queues(&endpoint, "failed", &sample_orders()[..6]);
+
+    // One script: the failure is an error, and the messages are back at once,
+    // not after their visibility timeout.
+    let plan = compile_with(
+        &sqs_broken(&endpoint, &queue.name, ""),
+        &CompileOptions::default(),
+    )
+    .unwrap();
+    assert!(run(&plan, &options(&workspace)).is_err());
+    assert_eq!(sqs_counts(&queue), (6, 0), "released");
+
+    // Carrying on past the failure: still a failed run, still released, and
+    // the report says so.
+    let plan = compile_with(
+        &sqs_broken(
+            &endpoint,
+            &queue.name,
+            r#", "policy": { "continueOnFailure": true }"#,
+        ),
+        &CompileOptions::default(),
+    )
+    .unwrap();
+    let report = run(&plan, &options(&workspace)).expect("a report, not an error");
+    assert!(report.failed());
+    assert_eq!(report.stages[0].rows, Some(6), "the source did read them");
+    let released = format!(
+        "Queue: 6 message(s) released back to queue '{}'",
+        queue.name
+    );
+    assert!(
+        report.notes.iter().any(|note| note == &released),
+        "{:?}",
+        report.notes
+    );
+    assert_eq!(sqs_counts(&queue), (6, 0), "released again");
+}
+
+#[test]
+fn previewing_an_sqs_source_gives_everything_back() {
+    let Some(endpoint) = server("ETL_TEST_SQS") else {
+        return;
+    };
+    let Some((workspace, _)) = workspace("sqs_preview", &[]) else {
+        return;
+    };
+    let (queue, _large) = sqs_queues(&endpoint, "preview", &sample_orders()[..9]);
+    let plan = sqs_orders(&workspace, &endpoint, &queue, None);
+    let shown = preview(&plan, "read_orders", 50, &options(&workspace)).expect("previews");
+    assert_eq!(shown.rows.len(), 9);
+    assert_eq!(
+        sqs_counts(&queue),
+        (9, 0),
+        "a preview is a look, not a take"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Google Pub/Sub, held until the run's outcome is known (Phase 10k), against its emulator
+// ---------------------------------------------------------------------------
+
+/// The project the emulator tests work in; the emulator takes any.
+const PUBSUB_PROJECT: &str = "etl-test";
+
+/// One call to the emulator, which checks no sign-in: `PUT` to create,
+/// `POST` for a verb, `DELETE` to remove.
+fn pubsub_call(
+    endpoint: &str,
+    method: &str,
+    path: &str,
+    body: serde_json::Value,
+) -> serde_json::Value {
+    let url = format!("{endpoint}/v1/projects/{PUBSUB_PROJECT}/{path}");
+    let sent = match method {
+        "PUT" => ureq::put(&url)
+            .header("Content-Type", "application/json")
+            .send(body.to_string().as_bytes()),
+        "POST" => ureq::post(&url)
+            .header("Content-Type", "application/json")
+            .send(body.to_string().as_bytes()),
+        _ => ureq::delete(&url).call(),
+    };
+    let mut response = sent.unwrap_or_else(|error| panic!("{method} {path}: {error}"));
+    let text = response.body_mut().read_to_string().unwrap();
+    serde_json::from_str(&text).unwrap_or(serde_json::Value::Null)
+}
+
+/// A topic and its subscription, `<name>-sub`, deleted when dropped.
+struct PubsubTopic {
+    endpoint: String,
+    name: String,
+}
+
+impl PubsubTopic {
+    fn new(endpoint: &str, name: &str) -> Self {
+        pubsub_call(
+            endpoint,
+            "PUT",
+            &format!("topics/{name}"),
+            serde_json::json!({}),
+        );
+        pubsub_call(
+            endpoint,
+            "PUT",
+            &format!("subscriptions/{name}-sub"),
+            serde_json::json!({
+                "topic": format!("projects/{PUBSUB_PROJECT}/topics/{name}"),
+                "ackDeadlineSeconds": 10,
+            }),
+        );
+        PubsubTopic {
+            endpoint: endpoint.to_string(),
+            name: name.to_string(),
+        }
+    }
+
+    /// How many messages the subscription would hand out now. Each is pulled,
+    /// counted and given straight back.
+    fn waiting(&self) -> u64 {
+        let subscription = format!("subscriptions/{}-sub", self.name);
+        let mut ids: Vec<serde_json::Value> = Vec::new();
+        loop {
+            let answer = pubsub_call(
+                &self.endpoint,
+                "POST",
+                &format!("{subscription}:pull"),
+                serde_json::json!({ "maxMessages": 1000, "returnImmediately": true }),
+            );
+            let got: Vec<serde_json::Value> = answer["receivedMessages"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .iter()
+                .map(|message| message["ackId"].clone())
+                .collect();
+            if got.is_empty() {
+                break;
+            }
+            ids.extend(got);
+        }
+        if !ids.is_empty() {
+            pubsub_call(
+                &self.endpoint,
+                "POST",
+                &format!("{subscription}:modifyAckDeadline"),
+                serde_json::json!({ "ackIds": ids, "ackDeadlineSeconds": 0 }),
+            );
+        }
+        ids.len() as u64
+    }
+}
+
+impl Drop for PubsubTopic {
+    fn drop(&mut self) {
+        let _ = std::panic::catch_unwind(|| {
+            let subscription = format!("subscriptions/{}-sub", self.name);
+            let topic = format!("topics/{}", self.name);
+            pubsub_call(
+                &self.endpoint,
+                "DELETE",
+                &subscription,
+                serde_json::Value::Null,
+            );
+            pubsub_call(&self.endpoint, "DELETE", &topic, serde_json::Value::Null);
+        });
+    }
+}
+
+/// Standard base64, to publish with.
+fn base64_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let n = (u32::from(chunk[0]) << 16)
+            | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*chunk.get(2).unwrap_or(&0));
+        for (index, shift) in [18, 12, 6, 0].into_iter().enumerate() {
+            if index <= chunk.len() {
+                out.push(ALPHABET[(n >> shift) as usize & 63] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// An orders topic holding `orders`, and an empty one for the large orders,
+/// named as `pubsub_orders` binds them.
+fn pubsub_topics(
+    endpoint: &str,
+    test: &str,
+    orders: &[serde_json::Value],
+) -> (PubsubTopic, PubsubTopic) {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .subsec_nanos();
+    let name = format!("etl-verified-{test}-{nanos}");
+    let topic = PubsubTopic::new(endpoint, &name);
+    let large = PubsubTopic::new(endpoint, &format!("{name}-large"));
+    let messages: Vec<serde_json::Value> = orders
+        .iter()
+        .map(|order| serde_json::json!({ "data": base64_encode(order.to_string().as_bytes()) }))
+        .collect();
+    pubsub_call(
+        endpoint,
+        "POST",
+        &format!("topics/{name}:publish"),
+        serde_json::json!({ "messages": messages }),
+    );
+    (topic, large)
+}
+
+fn pubsub_orders(
+    workspace: &Path,
+    endpoint: &str,
+    topic: &PubsubTopic,
+    policy: Option<serde_json::Value>,
+) -> etl_duckdb_engine::Plan {
+    let text = std::fs::read_to_string(repo_root().join("samples/pipelines/pubsub_orders.json"))
+        .expect("the sample is committed");
+    let mut json: serde_json::Value = serde_json::from_str(&text).unwrap();
+    if let Some(policy) = policy {
+        json["nodes"][1]["data"]["policy"] = policy;
+    }
+    let resolver = Resolver::new(workspace)
+        .bind("pubsub_endpoint", endpoint)
+        .bind("subscription", &format!("{}-sub", topic.name))
+        .bind("large_topic", &format!("{}-large", topic.name));
+    let resolved = resolve(&document(&json.to_string()), &resolver).expect("resolves");
+    compile_with(&resolved.document, &CompileOptions::default()).expect("compiles")
+}
+
+fn the_pubsub_sample_takes_what_it_read(name: &str, policy: Option<serde_json::Value>) {
+    let Some(endpoint) = server("ETL_TEST_PUBSUB") else {
+        return;
+    };
+    let Some((workspace, binary)) = workspace(name, &[]) else {
+        return;
+    };
+    let (topic, large) = pubsub_topics(&endpoint, name, &sample_orders());
+
+    let first = run(
+        &pubsub_orders(&workspace, &endpoint, &topic, policy.clone()),
+        &options(&workspace),
+    )
+    .expect("runs");
+    let put = rows(&first)[3].expect("the large orders were published");
+    assert_eq!(rows(&first)[0], Some(12));
+    assert_eq!(rows(&first)[1], Some(put));
+    assert!(first.warnings.is_empty(), "{:?}", first.warnings);
+    let acknowledged = format!(
+        "Orders subscription: 12 message(s) acknowledged on subscription '{}-sub'",
+        topic.name
+    );
+    assert!(
+        first.notes.iter().any(|note| note == &acknowledged),
+        "{:?}",
+        first.notes
+    );
+    assert_eq!(topic.waiting(), 0, "acknowledged: gone");
+    assert_eq!(large.waiting(), put);
+    assert_eq!(
+        query(
+            &binary,
+            &workspace,
+            "SELECT count(*) AS n, count(DISTINCT _message_id) AS m, \
+                    min(_publish_time) IS NOT NULL AS t \
+             FROM 'samples/out/pubsub_large_orders.parquet';"
+        ),
+        format!(r#"[{{"n":{put},"m":{put},"t":true}}]"#)
+    );
+
+    let second = run(
+        &pubsub_orders(&workspace, &endpoint, &topic, policy),
+        &options(&workspace),
+    )
+    .expect("runs");
+    assert_eq!(rows(&second), [Some(0), Some(0), Some(0), Some(0)]);
+}
+
+#[test]
+fn the_pubsub_sample_takes_what_it_read_on_the_one_script_path() {
+    the_pubsub_sample_takes_what_it_read("pubsub_script", None);
+}
+
+#[test]
+fn the_pubsub_sample_takes_what_it_read_on_the_session_path() {
+    the_pubsub_sample_takes_what_it_read(
+        "pubsub_session",
+        Some(serde_json::json!({ "retryAttempts": 1 })),
+    );
+}
+
+/// A pipeline reading `subscription` into a filter that fails at run time.
+fn pubsub_broken(endpoint: &str, subscription: &str, policy: &str) -> PipelineDoc {
+    document(&format!(
+        r#"{{ "formatVersion": 1, "nodes": [
+            {{ "id": "read", "position": {{"x":0,"y":0}}, "data": {{ "label": "Subscription",
+               "componentId": "src.queue.pubsub",
+               "properties": {{ "subscription": "{subscription}", "project": "{PUBSUB_PROJECT}",
+                                "endpoint": "{endpoint}" }} }} }},
+            {{ "id": "broken", "position": {{"x":0,"y":0}}, "data": {{ "label": "Broken",
+               "componentId": "xf.filter", "properties": {{ "predicate": "no_such_column > 1" }}
+               {policy} }} }},
+            {{ "id": "out", "position": {{"x":0,"y":0}}, "data": {{ "label": "Out",
+               "componentId": "snk.file.parquet", "properties": {{ "path": "out.parquet" }} }} }}
+          ],
+          "edges": [ {{ "id": "e1", "source": "read", "target": "broken" }},
+                     {{ "id": "e2", "source": "broken", "target": "out" }} ] }}"#
+    ))
+}
+
+#[test]
+fn a_failed_pubsub_run_gives_every_message_back() {
+    let Some(endpoint) = server("ETL_TEST_PUBSUB") else {
+        return;
+    };
+    let Some((workspace, _)) = workspace("pubsub_failed", &[]) else {
+        return;
+    };
+    let (topic, _large) = pubsub_topics(&endpoint, "failed", &sample_orders()[..6]);
+    let subscription = format!("{}-sub", topic.name);
+
+    // One script: the failure is an error, and the messages are back at once,
+    // not after their ack deadline.
+    let plan = compile_with(
+        &pubsub_broken(&endpoint, &subscription, ""),
+        &CompileOptions::default(),
+    )
+    .unwrap();
+    assert!(run(&plan, &options(&workspace)).is_err());
+    assert_eq!(topic.waiting(), 6, "released");
+
+    // Carrying on past the failure: still a failed run, still released, and
+    // the report says so.
+    let plan = compile_with(
+        &pubsub_broken(
+            &endpoint,
+            &subscription,
+            r#", "policy": { "continueOnFailure": true }"#,
+        ),
+        &CompileOptions::default(),
+    )
+    .unwrap();
+    let report = run(&plan, &options(&workspace)).expect("a report, not an error");
+    assert!(report.failed());
+    assert_eq!(report.stages[0].rows, Some(6), "the source did read them");
+    let released =
+        format!("Subscription: 6 message(s) released back to subscription '{subscription}'");
+    assert!(
+        report.notes.iter().any(|note| note == &released),
+        "{:?}",
+        report.notes
+    );
+    assert_eq!(topic.waiting(), 6, "released again");
+}
+
+#[test]
+fn previewing_a_pubsub_source_gives_everything_back() {
+    let Some(endpoint) = server("ETL_TEST_PUBSUB") else {
+        return;
+    };
+    let Some((workspace, _)) = workspace("pubsub_preview", &[]) else {
+        return;
+    };
+    let (topic, _large) = pubsub_topics(&endpoint, "preview", &sample_orders()[..9]);
+    let plan = pubsub_orders(&workspace, &endpoint, &topic, None);
+    let shown = preview(&plan, "read_orders", 50, &options(&workspace)).expect("previews");
+    assert_eq!(shown.rows.len(), 9);
+    assert_eq!(topic.waiting(), 9, "a preview is a look, not a take");
+}

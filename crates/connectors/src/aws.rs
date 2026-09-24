@@ -19,12 +19,19 @@
 //! `AWS_DEFAULT_REGION`, then the profile's. Both are looked up when the
 //! connector runs, so an artifact takes them from where it runs, and bakes
 //! nothing in unless a property holds it.
+//!
+//! **The JSON protocol** ([`JsonApi`]): Kinesis and SQS are each one signed
+//! `POST` per operation, named in `X-Amz-Target`, signed afresh on every
+//! attempt so a retry carries its own time.
 
+use crate::http::{positive, Client, Extra, Judged, Settings};
+use etl_metadata::PropertySpec;
 use etl_plugin_sdk::ConnectorError;
 use ring::{digest, hmac};
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::time::Duration;
 
 #[cfg(test)]
 mod tests;
@@ -320,7 +327,7 @@ impl Sources<'_> {
         }
     }
 
-    fn get(&self, name: &str) -> Option<String> {
+    pub(crate) fn get(&self, name: &str) -> Option<String> {
         (self.var)(name).filter(|value| !value.trim().is_empty())
     }
 
@@ -498,4 +505,238 @@ fn text<'a>(properties: &'a JsonValue, key: &str) -> Option<&'a str> {
         .and_then(JsonValue::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
+}
+
+// ---------------------------------------------------------------------------
+// AWS's JSON protocol: one signed POST per operation
+// ---------------------------------------------------------------------------
+
+/// One AWS service spoken over its JSON protocol, as Kinesis and SQS are.
+pub(crate) struct Protocol {
+    /// For messages: "Kinesis", "SQS".
+    pub(crate) name: &'static str,
+    /// The signing name, and the first label of the default host.
+    pub(crate) service: &'static str,
+    /// What `X-Amz-Target` puts before the operation's name.
+    pub(crate) target_prefix: &'static str,
+    pub(crate) content_type: &'static str,
+    /// Whether an error answer is a "slow down", retried with backoff.
+    pub(crate) throttled: fn(u16, &str) -> bool,
+}
+
+/// The properties every AWS component has, after its own identifying ones.
+pub(crate) fn connection_properties(service: &str) -> Vec<PropertySpec> {
+    vec![
+        PropertySpec::text("region").help(
+            "The AWS region, e.g. eu-west-1. Unset, AWS_REGION, AWS_DEFAULT_REGION or the \
+             profile's region.",
+        ),
+        PropertySpec::text("profile").help(
+            "A named profile in ~/.aws/credentials and ~/.aws/config. Unset, AWS_PROFILE or \
+             default.",
+        ),
+        PropertySpec::text("access_key_id").help(
+            "Only to override the environment and profiles. Use ${SECRET:name} rather than the \
+             value itself.",
+        ),
+        PropertySpec::text("secret_access_key")
+            .help("With access_key_id. Use ${SECRET:name} rather than the value itself."),
+        PropertySpec::text("session_token").help("For temporary credentials."),
+        PropertySpec::text("endpoint").help(&format!(
+            "Only for a VPC endpoint or a {service}-compatible test server. Unset, \
+             https://{service}.<region>.amazonaws.com."
+        )),
+        PropertySpec::integer("timeout_ms")
+            .default(JsonValue::from(30_000))
+            .help("How long one request may take."),
+        PropertySpec::integer("retries").default(JsonValue::from(5)).help(
+            "Extra attempts after throttling, a 5xx or a network failure. AWS throttles often, \
+             so this is higher than for REST.",
+        ),
+    ]
+}
+
+/// What can be refused before any request: keys given by halves, an endpoint
+/// that is not one. Credentials themselves are looked for when the run starts.
+pub(crate) fn check_connection(properties: &JsonValue) -> Result<(), ConnectorError> {
+    let partial_keys = text(properties, "access_key_id").is_some()
+        != text(properties, "secret_access_key").is_some();
+    if partial_keys {
+        return Err(ConnectorError::property(
+            "access_key_id",
+            "and secret_access_key are set together or not at all",
+        ));
+    }
+    if let Some(endpoint) = text(properties, "endpoint") {
+        if host_of(endpoint.trim_end_matches('/')).is_none() {
+            return Err(ConnectorError::property(
+                "endpoint",
+                format!("'{endpoint}' is not http://host[:port] or https://host[:port]"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// `host[:port]` of an endpoint, as the client will send it in `Host`: the
+/// default port for the scheme is left out, as HTTP clients leave it out.
+pub(crate) fn host_of(endpoint: &str) -> Option<String> {
+    let (scheme, rest) = endpoint.split_once("://")?;
+    let authority = rest.split('/').next()?;
+    if authority.is_empty() {
+        return None;
+    }
+    let default_port = match scheme {
+        "https" => ":443",
+        "http" => ":80",
+        _ => return None,
+    };
+    Some(authority.trim_end_matches(default_port).to_string())
+}
+
+/// A signed client for one AWS JSON-protocol service.
+pub(crate) struct JsonApi {
+    protocol: &'static Protocol,
+    client: Client,
+    endpoint: String,
+    host: String,
+    region: String,
+    credentials: Credentials,
+    timeout: Duration,
+    retries: u32,
+}
+
+impl JsonApi {
+    pub(crate) fn connect(
+        properties: &JsonValue,
+        sources: &Sources,
+        protocol: &'static Protocol,
+    ) -> Result<Self, ConnectorError> {
+        let region = region(properties, sources)?;
+        let credentials = credentials(properties, sources)?;
+        let endpoint = text(properties, "endpoint")
+            .map(|endpoint| endpoint.trim_end_matches('/').to_string())
+            .unwrap_or_else(|| format!("https://{}.{region}.amazonaws.com", protocol.service));
+        let host = host_of(&endpoint).ok_or_else(|| {
+            ConnectorError::property(
+                "endpoint",
+                format!("'{endpoint}' is not http://host[:port] or https://host[:port]"),
+            )
+        })?;
+
+        let timeout = Duration::from_millis(positive(properties, "timeout_ms", 30_000)?);
+        let retries = properties
+            .get("retries")
+            .and_then(JsonValue::as_u64)
+            .unwrap_or(5) as u32;
+
+        Ok(JsonApi {
+            protocol,
+            client: Client::new(Settings::signed_post(
+                format!("{endpoint}/"),
+                timeout,
+                retries,
+            )),
+            endpoint,
+            host,
+            region,
+            credentials,
+            timeout,
+            retries,
+        })
+    }
+
+    /// Another client to the same place with the same credentials, for a
+    /// thread of its own: a lease keeper extending a hold while the run goes on.
+    pub(crate) fn duplicate(&self) -> JsonApi {
+        JsonApi {
+            protocol: self.protocol,
+            client: Client::new(Settings::signed_post(
+                format!("{}/", self.endpoint),
+                self.timeout,
+                self.retries,
+            )),
+            endpoint: self.endpoint.clone(),
+            host: self.host.clone(),
+            region: self.region.clone(),
+            credentials: self.credentials.clone(),
+            timeout: self.timeout,
+            retries: self.retries,
+        }
+    }
+
+    /// Where the credentials came from, for the report. Never the secret.
+    pub(crate) fn credentials_source(&self) -> &str {
+        &self.credentials.source
+    }
+
+    /// One call: `target` is the operation, e.g. `ListShards`.
+    pub(crate) fn call(
+        &mut self,
+        target: &str,
+        body: &JsonValue,
+    ) -> Result<JsonValue, ConnectorError> {
+        let protocol = self.protocol;
+        let bytes =
+            serde_json::to_vec(body).map_err(|error| ConnectorError::Data(error.to_string()))?;
+        let amz_target = format!("{}.{target}", protocol.target_prefix);
+        let (host, region, credentials) = (&self.host, &self.region, &self.credentials);
+
+        let headers = || {
+            let unsigned = vec![
+                ("Host".to_string(), host.clone()),
+                (
+                    "Content-Type".to_string(),
+                    protocol.content_type.to_string(),
+                ),
+                ("X-Amz-Target".to_string(), amz_target.clone()),
+            ];
+            let amz_date = amz_date_now();
+            let signed = sign(
+                &Unsigned {
+                    method: "POST",
+                    target: "/",
+                    headers: &unsigned,
+                    body: &bytes,
+                },
+                &Signer {
+                    credentials,
+                    region,
+                    service: protocol.service,
+                    amz_date: &amz_date,
+                    normalize: true,
+                    sign_body: false,
+                    omit_session_token: false,
+                },
+            );
+            // Host and Content-Type are sent by the client itself; the
+            // signature covers the values it sends.
+            let mut headers = vec![("X-Amz-Target".to_string(), amz_target.clone())];
+            headers.extend(signed.headers);
+            headers
+        };
+
+        let url = self.client.settings.url.clone();
+        let extra = Extra {
+            headers: &headers,
+            content_type: protocol.content_type,
+            throttled: &protocol.throttled,
+        };
+        let reply = self
+            .client
+            .send_with(&url, &[], Some(&bytes), Some(&extra), Judged::Accept)
+            .map_err(|error| {
+                ConnectorError::Data(format!("{} {target}: {error}", protocol.name))
+            })?;
+
+        if reply.body.trim().is_empty() {
+            return Ok(JsonValue::Object(serde_json::Map::new()));
+        }
+        serde_json::from_str(&reply.body).map_err(|error| {
+            ConnectorError::Data(format!(
+                "{} {target}: the answer is not JSON: {error}",
+                protocol.name
+            ))
+        })
+    }
 }

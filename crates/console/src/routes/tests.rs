@@ -47,6 +47,7 @@ fn record(id: &str, pipeline: &str) -> RunRecord {
         outcome: Outcome::Succeeded,
         stages: Vec::new(),
         notes: Vec::new(),
+        warnings: Vec::new(),
         failures: Vec::new(),
         watermarks: Vec::new(),
         extra: Default::default(),

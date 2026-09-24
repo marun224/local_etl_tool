@@ -1,8 +1,9 @@
 <#
 .SYNOPSIS
     Start the servers the verification tests run against: PostgreSQL, MySQL
-    and MinIO (S3) from Phase 10c, Kafka from 10e, NATS from 10g and a Kinesis
-    stand-in from 10h, each in a throwaway container.
+    and MinIO (S3) from Phase 10c, Kafka from 10e, NATS from 10g, a Kinesis
+    stand-in from 10h, an SQS stand-in from 10j and Google's Pub/Sub emulator
+    from 10k, each in a throwaway container.
 
 .DESCRIPTION
     The verification tests read these environment variables and skip each
@@ -31,6 +32,12 @@
       ETL_TEST_KINESIS    http://host:port of kinesis-mock, a Kinesis stand-in
                           that does not check signatures (the SigV4 unit tests
                           do); any credentials and region are accepted
+      ETL_TEST_SQS        http://host:port of ElasticMQ, an SQS stand-in that
+                          speaks SQS's JSON protocol and, like kinesis-mock,
+                          accepts any signature
+      ETL_TEST_PUBSUB     http://host:port of Google's Pub/Sub emulator, which
+                          takes any project and checks no sign-in (the RS256
+                          and token tests do, without it)
 
     This script starts the containers on a private network, waits until each
     one answers, creates the bucket with MinIO's own `mc` client, and then
@@ -60,7 +67,7 @@ $kafkaSecrets = 'etl-test-kafka-secrets'
 $natsCreds = 'etl-test-nats-creds'
 $containers = @('etl-test-postgres', 'etl-test-mysql', 'etl-test-minio', 'etl-test-kafka',
     'etl-test-nats', 'etl-test-nats-users', 'etl-test-nats-token', 'etl-test-nats-tls',
-    'etl-test-nats-creds', 'etl-test-kinesis')
+    'etl-test-nats-creds', 'etl-test-kinesis', 'etl-test-sqs', 'etl-test-pubsub')
 
 function Invoke-Docker {
     $output = & docker @args 2>&1
@@ -95,7 +102,7 @@ if ($LASTEXITCODE -ne 0) {
 Remove-Everything
 Invoke-Docker network create $network
 
-Write-Host 'Starting PostgreSQL, MySQL, MinIO, Kafka, NATS and Kinesis (the first run pulls the images)'
+Write-Host 'Starting PostgreSQL, MySQL, MinIO, Kafka, NATS, Kinesis, SQS and Pub/Sub (the first run pulls the images)'
 
 Invoke-Docker run -d --name etl-test-postgres --network $network -p 55432:5432 `
     -e POSTGRES_PASSWORD=etl postgres:16
@@ -184,6 +191,18 @@ Invoke-Docker run -d --name etl-test-kinesis --network $network -p 54568:4568 `
     -e MERGE_SHARDS_DURATION=200ms -e SHARD_LIMIT=1000 -e LOG_LEVEL=WARN `
     ghcr.io/etspaceman/kinesis-mock:0.4.13
 
+# ElasticMQ, an SQS implementation in one small native binary. It answers the
+# JSON protocol the connector speaks; queues are created by the tests.
+Invoke-Docker run -d --name etl-test-sqs --network $network -p 59324:9324 `
+    softwaremill/elasticmq-native:1.7.1
+
+# Google's Pub/Sub emulator, from the gcloud image that carries the emulators
+# (445 MB). It keeps everything in memory, takes any project, and checks no
+# sign-in; topics and subscriptions are created by the tests.
+Invoke-Docker run -d --name etl-test-pubsub --network $network -p 58085:8085 `
+    gcr.io/google.com/cloudsdktool/google-cloud-cli:586.0.0-emulators `
+    gcloud beta emulators pubsub start --host-port=0.0.0.0:8085 --project=etl-test
+
 function Wait-For([string] $what, [scriptblock] $probe, [int] $seconds = 180) {
     $deadline = (Get-Date).AddSeconds($seconds)
     while ((Get-Date) -lt $deadline) {
@@ -243,6 +262,27 @@ Wait-For 'Kinesis' {
     try { Invoke-WebRequest @request | Out-Null; $global:LASTEXITCODE = 0 } catch { $global:LASTEXITCODE = 1 }
 }
 
+# The same for SQS: a queue list means it is up.
+Wait-For 'SQS' {
+    $request = @{
+        Uri = 'http://127.0.0.1:59324/'; Method = 'Post'; UseBasicParsing = $true
+        ContentType = 'application/x-amz-json-1.0'; Body = '{}'; TimeoutSec = 5
+        Headers = @{ 'X-Amz-Target' = 'AmazonSQS.ListQueues'
+                     'Authorization' = 'AWS4-HMAC-SHA256 Credential=test/20260101/us-east-1/sqs/aws4_request, SignedHeaders=host, Signature=0'
+                     'X-Amz-Date' = '20260101T000000Z' }
+    }
+    try { Invoke-WebRequest @request | Out-Null; $global:LASTEXITCODE = 0 } catch { $global:LASTEXITCODE = 1 }
+}
+
+# The emulator answers a topic list once it is up.
+Wait-For 'Pub/Sub' {
+    try {
+        Invoke-WebRequest -Uri 'http://127.0.0.1:58085/v1/projects/etl-test/topics' `
+            -UseBasicParsing -TimeoutSec 5 | Out-Null
+        $global:LASTEXITCODE = 0
+    } catch { $global:LASTEXITCODE = 1 }
+}
+
 # The CA certificate, for the tests' `ca_cert`. Under target/, which git ignores.
 $caDirectory = Join-Path $PSScriptRoot '../target/test-services'
 New-Item -ItemType Directory -Force $caDirectory | Out-Null
@@ -267,6 +307,8 @@ $variables = [ordered]@{
     ETL_TEST_NATS_CREDS     = 'nats://127.0.0.1:54226'
     ETL_TEST_NATS_CREDS_FILE = $natsCredsFile
     ETL_TEST_KINESIS        = 'http://127.0.0.1:54568'
+    ETL_TEST_SQS            = 'http://127.0.0.1:59324'
+    ETL_TEST_PUBSUB         = 'http://127.0.0.1:58085'
 }
 
 if ($env:GITHUB_ENV) {

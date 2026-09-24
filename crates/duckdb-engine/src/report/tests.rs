@@ -29,6 +29,7 @@ fn report(stages: Vec<StageOutcome>) -> RunReport {
         script: String::new(),
         spilled: 0,
         notes: Vec::new(),
+        warnings: Vec::new(),
         watermarks: Vec::new(),
         checkpoints: Vec::new(),
         failures: Vec::new(),
@@ -134,6 +135,18 @@ fn failures_and_notes_follow_the_stages_in_that_order() {
         lines[1]
     );
     assert!(lines[2].starts_with("  · branch taken"), "{}", lines[2]);
+}
+
+#[test]
+fn warnings_come_last_and_marked_so_they_are_not_missed() {
+    let mut warned = report(vec![stage("Orders CSV")]);
+    warned.notes = vec!["Orders: 3 message(s) acknowledged".to_string()];
+    warned.warnings = vec!["Refunds: could not be acknowledged".to_string()];
+
+    let lines = report_lines(&warned);
+
+    assert_eq!(lines.len(), 3);
+    assert_eq!(lines[2], "  ⚠ Refunds: could not be acknowledged");
 }
 
 #[test]

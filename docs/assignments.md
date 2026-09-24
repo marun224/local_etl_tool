@@ -392,3 +392,35 @@ Copy-Item samples\pipelines\orders_enriched.json samples\out\scratch\
   *Hint:* the records after it in the same call have already landed. What would have to
   happen before the call, not after it?
   *Check:* a written answer comparing its cost (calls, throughput) with the default.
+
+## Phase 10j — receipts, and SQS
+
+- [ ] **A51. Watch a receipt settle.**
+  *Do:* with the services up, send twelve orders to a queue and run
+  `samples/pipelines/sqs_orders.json` with a filter predicate that fails (say
+  `no_such_column > 1`), then with the real one.
+  *Check:* after the failed run, `GetQueueAttributes` shows twelve visible and none hidden;
+  after the good one, none. Which report lines told you each time?
+
+- [ ] **A52. 🦀 A receipt for a file.**
+  *Do:* sketch a source that reads files from an "inbox" directory and, as its receipt,
+  moves them to "done" on acknowledge and leaves them on release.
+  *Hint:* what should `Drop` do, and what if two runs share the inbox?
+  *Check:* a written answer comparing it with SQS's visibility timeout: what plays the part
+  of the hold?
+
+## Phase 10k — Pub/Sub
+
+- [ ] **A53. Read a JWT by hand.**
+  *Do:* in `gcp/tests.rs`, print the `assertion` the service-account test sends, split it at
+  the dots, and base64url-decode the first two parts.
+  *Hint:* base64url has `-` and `_` for `+` and `/`, and no padding.
+  *Check:* you can name every claim and say which one stops the same JWT being replayed a
+  day later, and which one stops it being sent to a different token endpoint.
+
+- [ ] **A54. Watch two deadlines.**
+  *Do:* with the services up, create a subscription with `ackDeadlineSeconds` 10 and run
+  `pubsub_orders.json` with `ack_deadline_seconds` 60 and a filter that sleeps (or a large
+  `max_wait_ms` on an empty topic).
+  *Check:* explain, from `pubsub.rs`, what would happen to the held messages at second 10 if
+  `receive` did not call `modify_deadline` after each pull, and which test would catch it.

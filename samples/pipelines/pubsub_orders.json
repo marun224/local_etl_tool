@@ -1,0 +1,132 @@
+{
+  "formatVersion": 1,
+  "name": "pubsub_orders",
+  "nodes": [
+    {
+      "id": "read_orders",
+      "type": "source",
+      "position": {
+        "x": 0.0,
+        "y": 0.0
+      },
+      "data": {
+        "label": "Orders subscription",
+        "componentId": "src.queue.pubsub",
+        "properties": {
+          "subscription": "${subscription}",
+          "project": "${gcp_project}",
+          "endpoint": "${pubsub_endpoint}",
+          "max_records": 1000,
+          "columns": {
+            "order_id": "INTEGER",
+            "customer_id": "VARCHAR",
+            "order_ts": "TIMESTAMP",
+            "amount": "DECIMAL(10,2)",
+            "status": "VARCHAR",
+            "_message_id": "VARCHAR",
+            "_publish_time": "TIMESTAMP"
+          }
+        },
+        "alias": "orders"
+      }
+    },
+    {
+      "id": "large_only",
+      "type": "transform",
+      "position": {
+        "x": 280.0,
+        "y": 0.0
+      },
+      "data": {
+        "label": "Over 100",
+        "componentId": "xf.filter",
+        "properties": {
+          "predicate": "amount > 100"
+        }
+      }
+    },
+    {
+      "id": "write_large",
+      "type": "sink",
+      "position": {
+        "x": 560.0,
+        "y": 0.0
+      },
+      "data": {
+        "label": "Large orders",
+        "componentId": "snk.file.parquet",
+        "properties": {
+          "path": "${workspace}/samples/out/pubsub_large_orders.parquet",
+          "mode": "overwrite"
+        }
+      }
+    },
+    {
+      "id": "put_large",
+      "type": "sink",
+      "position": {
+        "x": 560.0,
+        "y": 160.0
+      },
+      "data": {
+        "label": "Large orders topic",
+        "componentId": "snk.queue.pubsub",
+        "properties": {
+          "topic": "${large_topic}",
+          "project": "${gcp_project}",
+          "endpoint": "${pubsub_endpoint}",
+          "ordering_key_column": "customer_id"
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "source": "read_orders",
+      "target": "large_only",
+      "sourceHandle": "main",
+      "targetHandle": "in"
+    },
+    {
+      "id": "e2",
+      "source": "large_only",
+      "target": "write_large",
+      "sourceHandle": "main",
+      "targetHandle": "in"
+    },
+    {
+      "id": "e3",
+      "source": "large_only",
+      "target": "put_large",
+      "sourceHandle": "main",
+      "targetHandle": "in"
+    }
+  ],
+  "parameters": {
+    "subscription": {
+      "type": "string",
+      "required": true,
+      "default": "etl-sample-orders-sub",
+      "description": "The Pub/Sub subscription to pull from. A run's messages are acknowledged only when the whole run succeeds; otherwise they are handed out again."
+    },
+    "large_topic": {
+      "type": "string",
+      "required": true,
+      "default": "etl-sample-large-orders",
+      "description": "The topic the large orders are published to, keyed by customer. It must already exist."
+    },
+    "gcp_project": {
+      "type": "string",
+      "required": true,
+      "default": "etl-test",
+      "description": "The Google Cloud project."
+    },
+    "pubsub_endpoint": {
+      "type": "string",
+      "required": false,
+      "default": "http://127.0.0.1:58085",
+      "description": "The committed default is the Pub/Sub emulator scripts/test-services.ps1 starts, over plain http, which signs nothing. Set it empty for Google Cloud, which signs in with GOOGLE_APPLICATION_CREDENTIALS or gcloud's login."
+    }
+  }
+}

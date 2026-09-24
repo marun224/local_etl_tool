@@ -1,0 +1,148 @@
+{
+  "formatVersion": 1,
+  "name": "sqs_orders",
+  "nodes": [
+    {
+      "id": "read_orders",
+      "type": "source",
+      "position": {
+        "x": 0.0,
+        "y": 0.0
+      },
+      "data": {
+        "label": "Orders queue",
+        "componentId": "src.queue.sqs",
+        "properties": {
+          "queue": "${queue}",
+          "region": "${aws_region}",
+          "endpoint": "${sqs_endpoint}",
+          "access_key_id": "${aws_access_key_id}",
+          "secret_access_key": "${aws_secret_access_key}",
+          "max_records": 1000,
+          "columns": {
+            "order_id": "INTEGER",
+            "customer_id": "VARCHAR",
+            "order_ts": "TIMESTAMP",
+            "amount": "DECIMAL(10,2)",
+            "status": "VARCHAR",
+            "_message_id": "VARCHAR",
+            "_receive_count": "INTEGER",
+            "_sent_timestamp": "TIMESTAMP"
+          }
+        },
+        "alias": "orders"
+      }
+    },
+    {
+      "id": "large_only",
+      "type": "transform",
+      "position": {
+        "x": 280.0,
+        "y": 0.0
+      },
+      "data": {
+        "label": "Over 100",
+        "componentId": "xf.filter",
+        "properties": {
+          "predicate": "amount > 100"
+        }
+      }
+    },
+    {
+      "id": "write_large",
+      "type": "sink",
+      "position": {
+        "x": 560.0,
+        "y": 0.0
+      },
+      "data": {
+        "label": "Large orders",
+        "componentId": "snk.file.parquet",
+        "properties": {
+          "path": "${workspace}/samples/out/sqs_large_orders.parquet",
+          "mode": "overwrite"
+        }
+      }
+    },
+    {
+      "id": "put_large",
+      "type": "sink",
+      "position": {
+        "x": 560.0,
+        "y": 160.0
+      },
+      "data": {
+        "label": "Large orders queue",
+        "componentId": "snk.queue.sqs",
+        "properties": {
+          "queue": "${large_queue}",
+          "region": "${aws_region}",
+          "endpoint": "${sqs_endpoint}",
+          "access_key_id": "${aws_access_key_id}",
+          "secret_access_key": "${aws_secret_access_key}"
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "source": "read_orders",
+      "target": "large_only",
+      "sourceHandle": "main",
+      "targetHandle": "in"
+    },
+    {
+      "id": "e2",
+      "source": "large_only",
+      "target": "write_large",
+      "sourceHandle": "main",
+      "targetHandle": "in"
+    },
+    {
+      "id": "e3",
+      "source": "large_only",
+      "target": "put_large",
+      "sourceHandle": "main",
+      "targetHandle": "in"
+    }
+  ],
+  "parameters": {
+    "queue": {
+      "type": "string",
+      "required": true,
+      "default": "etl-sample-orders",
+      "description": "The SQS queue to receive from. A run's messages are deleted only when the whole run succeeds; otherwise they go back to the queue."
+    },
+    "large_queue": {
+      "type": "string",
+      "required": true,
+      "default": "etl-sample-large-orders",
+      "description": "Where the large orders are sent. It must already exist."
+    },
+    "aws_region": {
+      "type": "string",
+      "required": true,
+      "default": "us-east-1",
+      "description": "The AWS region."
+    },
+    "sqs_endpoint": {
+      "type": "string",
+      "required": false,
+      "default": "http://127.0.0.1:59324",
+      "description": "The committed default is the ElasticMQ test server scripts/test-services.ps1 starts. Set it empty for real AWS."
+    },
+    "aws_access_key_id": {
+      "type": "string",
+      "required": false,
+      "default": "test",
+      "description": "Test-only: ElasticMQ accepts any key. For real AWS set this and aws_secret_access_key empty, and the environment or ~/.aws is used."
+    },
+    "aws_secret_access_key": {
+      "type": "string",
+      "required": false,
+      "default": "test",
+      "description": "Test-only, as aws_access_key_id."
+    }
+  }
+}

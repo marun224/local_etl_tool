@@ -72,5 +72,9 @@ pub fn report_lines(report: &RunReport) -> Vec<String> {
         lines.push(format!("  · {note}"));
     }
 
+    for warning in &report.warnings {
+        lines.push(format!("  ⚠ {warning}"));
+    }
+
     lines
 }

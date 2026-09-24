@@ -3,15 +3,39 @@
 **State only.** Design lives in [PLAN_duckle_parity.md](PLAN_duckle_parity.md). Read this file
 first when picking the project back up.
 
-> ## ✅ Phase 10i (the Kinesis sink) — built 2026-09-24, green locally, **pushed with `[skip ci]`**
+> ## ✅ Phase 10k (Pub/Sub) — built 2026-09-24, green locally with every server up, **uncommitted**
+>
+> **What 10k built:** `src.queue.pubsub` and `snk.queue.pubsub` on 10j's receipts, and
+> Google sign-in of our own (`gcp.rs`): service-account keys (an RS256 JWT through `ring`),
+> gcloud's user login, a shared token cache, and no sign-in for a plain-`http://` emulator.
+> **RS256 signs RFC 7515's A.2 example byte for byte**; the token exchange, its cache and the
+> credential order are tested against the local fixture. Each pull is extended at once from
+> the subscription's deadline to `ack_deadline_seconds`, and the lease keeper (now shared,
+> `lease.rs`, SQS moved onto it) extends it from there. The Pub/Sub emulator is in the test
+> services. **70 components, 1005 Rust tests** (995 on Linux) with every server up, twice,
+> none skipped; **140 frontend**; fmt and clippy clean; five mutations each caught. Not
+> checked against real Google Cloud. What it found is under *From Phase 10k*.
+>
+> ## ✅ Phase 10j (receipts, and SQS) — built 2026-09-24, green locally, **uncommitted**
+>
+> **What 10j built:** the design for queues (Settled decisions 57–62), and SQS both ways.
+> A source may now hand the engine a **receipt** (`Source::read_held`); the engine
+> **acknowledges** it after the run fully succeeded and its sinks delivered, and **releases**
+> it on every other path, `preview` and `Drop` included. A failed acknowledgement is a new
+> report **warning** (⚠, kept in run history), not a failure. `src.queue.sqs` and
+> `snk.queue.sqs`: standard and FIFO, a **lease keeper** extending the hold while the run
+> goes on, ElasticMQ in the test services. Kinesis's signed client moved into
+> `aws::JsonApi` for both. **68 components, 971 Rust tests** (961 on Linux) with every
+> server up, twice, **137 frontend** (three more for the new sample). Not checked against real AWS.
+>
+> ## ✅ Phase 10i (the Kinesis sink) — `e4fb0a4`, pushed with `[skip ci]`
 >
 > **What 10i built:** `snk.stream.kinesis`: each row one JSON record, up to 500 to a
 > `PutRecords` call and under 5 MiB; `partition_key_column` (unset, the row number spreads
 > rows across shards); records Kinesis refuses for throughput sent again on their own, with
 > backoff, and any other refusal failing at once, saying how many records were put before
-> it. The sample now also puts its large orders into a second stream. **66 components, 942
-> Rust tests** (932 on Linux) with every server up, twice, **134 frontend**. Not checked
-> against real AWS, like the source.
+> it. The sample now also puts its large orders into a second stream. 66 components, 942
+> Rust tests. Not checked against real AWS, like the source.
 >
 > ## ✅ Phase 10h (Kinesis: signing, credentials, the source) — `ce2db9c`, pushed with `[skip ci]`
 >
@@ -51,12 +75,11 @@ first when picking the project back up.
 > nor 10i**; the first run on or after the 10i commit covers both, and pulls the 1.6 GB
 > `kinesis-mock` image in the Ubuntu gate.
 >
-> **Next:** Phase 10's next family, chosen by the user: a design for the
-> acknowledgement-based brokers (RabbitMQ, SQS, Pub/Sub), or NoSQL. Still open on the website: GraphQL, Kafka and now NATS can be marked working
-> there, naming `the_graphql_sample_reads_two_relay_pages_filters_and_mutates_in_batches`,
-> `the_kafka_sample_carries_on_between_runs_on_the_one_script_path` and
-> `the_nats_sample_carries_on_between_runs_on_the_one_script_path` in its `CLAIMS.md`.
-> Kinesis should not be marked working there until it has been read against real AWS.
+> **Next:** **10l, RabbitMQ**, as planned in the plan's *Phase 10j, 10k and 10l*. 10j and
+> 10k are uncommitted (the user chose to leave 10j so); CI has run on none of 10h–10k. **The
+> website** marked GraphQL, Kafka and NATS JetStream working on 2026-09-24 (uncommitted
+> there; 16 of 50); Kinesis, SQS and Pub/Sub stay off it until read against the real
+> services.
 >
 > **10d, for the record:** `src.saas.graphql` and `snk.saas.graphql`, the shared `http.rs`,
 > the `code` property kind. CI warnings seen on its run, neither failing anything: the `@v4`
@@ -88,14 +111,14 @@ first when picking the project back up.
 >
 > | Job | Checked locally by |
 > |---|---|
-> | `gate (windows)` — fmt, clippy, 942 tests (servers skip), samples | running it, repeatedly |
-> | `gate (ubuntu)` — fmt, clippy, **932 tests** with Postgres, MySQL, MinIO, Kafka (four listeners), NATS (five servers) and kinesis-mock, samples | `cargo test` in `rust:1.96-slim-bookworm` |
+> | `gate (windows)` — fmt, clippy, 1005 tests (servers skip), samples | running it, repeatedly |
+> | `gate (ubuntu)` — fmt, clippy, **995 tests** with Postgres, MySQL, MinIO, Kafka (four listeners), NATS (five servers), kinesis-mock, ElasticMQ and the Pub/Sub emulator, samples | `cargo test` in `rust:1.96-slim-bookworm` |
 > | `artifact (both)` — bake, run from elsewhere, run in a bare container | Phase 9b and 9c |
 > | `cross-build-script` — `build-runner.ps1`, ELF check, unbaked contract, no-op rerun | each assertion run by hand |
-> | `frontend` — 134 tests, typecheck, build | running it |
+> | `frontend` — 140 tests, typecheck, build | running it |
 >
 > **The Linux job excludes `apps/desktop`** (Tauri needs WebKitGTK and GTK to compile), so
-> **932 + 10 desktop = 942** is the arithmetic to check if either number moves. **CI fetches
+> **995 + 10 desktop = 1005** is the arithmetic to check if either number moves. **CI fetches
 > only the extensions the tests load** (`DUCKDB_TEST_EXTENSIONS`, hyphen-separated because
 > `actions/cache` refuses a comma in a key). **CI cannot do the Windows-to-Linux cross-build**
 > (GitHub's Windows runners run no Linux containers), so it proves the output instead: a Linux
@@ -104,13 +127,13 @@ first when picking the project back up.
 > **To check everything, from the repo root:**
 >
 > ```powershell
-> ./scripts/test-services.ps1                                       # Postgres, MySQL, MinIO, Kafka, NATS, Kinesis in Docker
-> cargo test --workspace                                            # expect 942 passing
+> ./scripts/test-services.ps1                                       # Postgres, MySQL, MinIO, Kafka, NATS, Kinesis, SQS, Pub/Sub in Docker
+> cargo test --workspace                                            # expect 1005 passing
 > ./scripts/test-services.ps1 -Stop                                 # tidy up afterwards
-> npm --prefix frontend run test                                    # expect 134 passing
+> npm --prefix frontend run test                                    # expect 140 passing
 > npm --prefix frontend run typecheck                               # expect clean
 > npm --prefix frontend run build                                   # expect clean
-> .\target\debug\etl.exe components                                 # expect 66
+> .\target\debug\etl.exe components                                 # expect 70
 > .\target\debug\etl.exe run samples\pipelines\orders_enriched.json # expect 12/5/7/6/6
 > .\target\debug\etl.exe run samples\pipelines\orders_checked.json  # expect 12/10+2/9+1/9/2/1
 > .\target\debug\etl.exe run samples\pipelines\orders_guarded.json  # expect 12 through, branch taken
@@ -133,11 +156,11 @@ first when picking the project back up.
 
 ## Where things stand
 
-- **Next phase:** Phase 10's next family, the user's choice: the acknowledgement-based
-  brokers' design, or NoSQL. Questions first, as for every family.
-- **In progress:** nothing. **Phases 0–9 and 10a–10i are done** (10a–10f on 2026-09-23,
-  10g–10i on 2026-09-24; CI green through 10g on run 35904782091; 10h and 10i, with the
-  `.gitattributes` fix, pushed with `[skip ci]`, so not yet run in CI).
+- **Next phase:** **10l, RabbitMQ**, planned in [PLAN_duckle_parity.md](PLAN_duckle_parity.md)
+  under *Phase 10j, 10k and 10l*. Needs Docker running.
+- **In progress:** nothing. **10k is built and green locally**, uncommitted, as 10j is. **Phases 0–9 and 10a–10j are done** (10a–10f on 2026-09-23,
+  10g–10j on 2026-09-24; CI green through 10g on run 35904782091; 10h and 10i, with the
+  `.gitattributes` fix, pushed with `[skip ci]`; 10j uncommitted).
 - **Blocked on:** nothing.
 
 Phase 9 was split into 9a–9d on 2026-09-17 before starting, the same way 6 and 8 were:
@@ -160,7 +183,7 @@ pass), `ctl.throttle` (nothing to throttle until Phase 10 has a row cursor).
 **a scheduler that runs them**, and **a console to watch it from**. From the repo root:
 
 ```powershell
-cargo test --workspace        # 942 tests: 317 engine, 183 connectors, 113 scheduler, 65 console, 51 e2e, 50 cli, 48 state, 26 runner, 23 secrets, 19 verified, 17 native e2e, 15 metadata, 10 desktop, 5 plugin-sdk
+cargo test --workspace        # 1005 tests: 323 engine, 231 connectors, 113 scheduler, 65 console, 51 e2e, 51 cli, 48 state, 27 verified, 26 runner, 23 secrets, 17 native e2e, 15 metadata, 10 desktop, 5 plugin-sdk
 .\target\debug\etl.exe run samples\pipelines\orders_enriched.json
 .\target\debug\etl.exe validate samples\pipelines\orders_enriched.json
 .\target\debug\etl.exe plan samples\pipelines\orders_enriched.json --script
@@ -212,23 +235,25 @@ exists — writing the report only if one does. `plan.needs_session()` decides t
 because they read something that never got created, and the failures. The exit code is 3 either
 way. Getting the report back is the entire point of asking a run to continue.
 
-**Sixty-six components exist.** Sources: `src.cloud.http`, `src.cloud.s3`, `src.db.mysql`,
+**Seventy components exist.** Sources: `src.cloud.http`, `src.cloud.s3`, `src.db.mysql`,
 `src.db.postgres`, `src.db.sqlite`, `src.file.csv`, `src.file.excel`, `src.file.json`,
 `src.file.jsonl`, `src.file.parquet`, `src.file.xml`, `src.lake.delta`, `src.lake.iceberg`,
-`src.saas.graphql`, `src.saas.rest`, `src.stream.kafka`, `src.stream.kinesis`, `src.stream.nats`. Transforms:
+`src.queue.pubsub`, `src.queue.sqs`, `src.saas.graphql`, `src.saas.rest`, `src.stream.kafka`, `src.stream.kinesis`, `src.stream.nats`. Transforms:
 `xf.aggregate`, `xf.cast`, `xf.dedup`, `xf.derive`, `xf.distinct`, `xf.except`,
 `xf.filter`, `xf.intersect`, `xf.join`, `xf.limit`,
 `xf.pivot`, `xf.rename`, `xf.sample`, `xf.select`, `xf.sort`, `xf.sql`, `xf.union`,
 `xf.unpivot`, `xf.window`. Sinks: `snk.cloud.s3`, `snk.db.mysql`, `snk.db.postgres`,
 `snk.db.sqlite`, `snk.file.csv`, `snk.file.excel`, `snk.file.json`, `snk.file.jsonl`,
-`snk.file.parquet`, `snk.file.xml`, `snk.saas.graphql`, `snk.saas.rest`, `snk.stream.kafka`, `snk.stream.kinesis`, `snk.stream.nats`. Quality: `qa.accepted_values`, `qa.expression`, `qa.not_null`, `qa.range`,
+`snk.file.parquet`, `snk.file.xml`, `snk.queue.pubsub`, `snk.queue.sqs`, `snk.saas.graphql`, `snk.saas.rest`, `snk.stream.kafka`, `snk.stream.kinesis`, `snk.stream.nats`. Quality: `qa.accepted_values`, `qa.expression`, `qa.not_null`, `qa.range`,
 `qa.referential`, `qa.regex`, `qa.unique`. Quality assertions, which fail the run rather than
 partitioning rows and so have no reject port: `qa.row_count`, `qa.schema_match`. Control:
 `ctl.branch`, `ctl.fail`, `ctl.log`, `ctl.sequence`, `ctl.wait`. Everything else in the six
 namespaces compiles to `UnsupportedComponent`, by design.
 
-**Twelve of them are written in Rust, not lowered to DuckDB alone** (the list below, and
-`src.stream.kinesis` and `snk.stream.kinesis` from 10h and 10i). `src.file.xml` and
+**Sixteen of them are written in Rust, not lowered to DuckDB alone** (the list below,
+`src.stream.kinesis` and `snk.stream.kinesis` from 10h and 10i, `src.queue.sqs` and
+`snk.queue.sqs` from 10j, the first that hold messages until the run's outcome, and
+`src.queue.pubsub` and `snk.queue.pubsub` from 10k). `src.file.xml` and
 `snk.file.xml` (Phase 10a), `src.saas.rest` and `snk.saas.rest` (Phase 10b),
 `src.saas.graphql` and `snk.saas.graphql` (Phase 10d), `src.stream.kafka` (10e),
 `snk.stream.kafka` (10f), and `src.stream.nats` and `snk.stream.nats` (10g) are the *native*
@@ -609,6 +634,9 @@ fail the run. That is `ctl.fail`'s shape and it needs 6b's execution-model decis
 | 10g | — NATS JetStream, source and sink | **done** (green in CI, run 35904782091) | 2026-09-24 |
 | 10h | — Kinesis: SigV4, AWS credentials, the source | **done** (pushed with `[skip ci]`; not checked against real AWS) | 2026-09-24 |
 | 10i | — the Kinesis sink | **done** (pushed with `[skip ci]`; not checked against real AWS) | 2026-09-24 |
+| 10j | — receipts (acknowledge after success), and SQS | **done** (uncommitted; not checked against real AWS) | 2026-09-24 |
+| 10k | — Pub/Sub | **done** (uncommitted; not checked against real Google Cloud) | 2026-09-24 |
+| 10l | — RabbitMQ | planned | |
 | 11 | AI assistant + MCP server | not started | |
 | 12 | Benchmarks + parity audit | not started | |
 
@@ -810,6 +838,44 @@ recommended:
     AWS's SigV4 vectors as unit tests.
 56. **No check against real AWS** (question 9, answer (b)): no account is used, so Kinesis
     stays "not yet checked against real AWS" until someone runs one.
+
+Decisions 57–70 are Phases 10j–10l's (SQS, Pub/Sub, RabbitMQ), all agreed 2026-09-24 as
+recommended:
+
+57. **SQS first, then Pub/Sub, then RabbitMQ**, one sub-phase each (10j, 10k, 10l) with
+    source and sink; the shared design is built with SQS (the SDK and engine change first,
+    proved with a test connector) and planned against all three.
+58. **A receipt, settled once.** A source may return a `Receipt` beside its summary
+    (`Source::read_held`); the engine acknowledges it after the run fully succeeded and the
+    sinks delivered, and releases it on every other path, `Drop` included. Saving tokens in
+    the state file, or acknowledging at read time, were the alternatives.
+59. **A failed acknowledgement after the sinks delivered is a warning**, not a failure: the
+    run succeeds, positions are saved, and a new `warnings` list says how many messages will
+    come again.
+60. **A lease keeper** extends SQS's visibility and Pub/Sub's ack deadline every half-period
+    until the receipt is settled; RabbitMQ's hold is the open channel.
+61. **A batch ends at `max_records` (default 10,000), when the queue answers empty, or at
+    `max_wait_ms`.**
+62. **Rows as the other brokers' plus each broker's underscore columns**, receive and
+    redelivery counts included.
+63. **SQS: standard and FIFO; `queue_url` or `queue`; AWS credentials and signing as
+    Kinesis's; tested against ElasticMQ.**
+64. **Pub/Sub sign-in is ours**: service-account keys (RS256 JWT with `ring`), gcloud's user
+    login, none for the emulator; proved by RFC 7515's RS256 example. The metadata server
+    later. `gcp_auth` and `google-cloud-pubsub` (Rust 1.90) were the alternatives.
+65. **RabbitMQ: AMQP 0-9-1 classic and quorum queues through `lapin`**, the channel held
+    open until settled. Streams later.
+66. **RabbitMQ sign-in: user and password, TLS with bundled roots plus `ca_cert`.** Client
+    certificates later.
+67. **Sinks for all three**, at-least-once per batch: SQS batches of 10 with FIFO group and
+    deduplication columns; Pub/Sub batches with ordering keys and attributes; RabbitMQ
+    publish with confirms.
+68. **Test services in CI too**: ElasticMQ, the Pub/Sub emulator and RabbitMQ, each added in
+    its own sub-phase; tests skip without them.
+69. **A new `queue` group**: `src.queue.sqs`, `src.queue.pubsub`, `src.queue.rabbitmq` and
+    their sinks. 66 components become 72.
+70. **No real AWS or Google Cloud** (question 14): SQS and Pub/Sub are recorded as not yet
+    checked against the real services, as Kinesis is.
 
 ## Open decisions
 
@@ -1503,6 +1569,42 @@ ran*. Earlier ones were resolved 2026-09-16 (Settled decisions 5–8).
   unkeyed rows spread over both shards.
 - **Size limits are checked before sending**: a record over 1 MiB, or a key outside 1 to 256
   characters, fails naming the row, rather than failing a whole call of 500.
+
+### From Phase 10j
+
+- **The receipt comes back beside the summary, not inside it.** `Summary` derives `Clone`
+  and `Eq`, which a boxed receipt cannot; a new trait method with a default kept every
+  existing source unchanged.
+- **The engine's whole-run paths look connectors up in the real registry**, so a test-only
+  connector cannot reach them. The guard (collect, acknowledge, release, `Drop`, warnings,
+  masking) is tested with a test connector; the transports, `preview` and
+  `continueOnFailure` with SQS against ElasticMQ. Five mutations (each settle point, the
+  guard's `Drop`, the lease keeper, the SQS receipt's `Drop`) each break a test.
+- **Preview releases by dropping.** The staged rows are already in the file the preview
+  reads, so the messages go back before DuckDB even starts.
+- **SQS's "The specified queue does not exist." names no queue**; the connector now does.
+- **A corrupted build artifact** made a workspace-wide `cargo check` say it could not find
+  `etl_metadata` while the crate built alone; `cargo clean -p` for two crates fixed it.
+- **Kinesis's signed client became `aws::JsonApi`** for SQS to share, proved by Kinesis's
+  unchanged tests.
+
+### From Phase 10k
+
+- **RS256 matched RFC 7515's example at the first attempt**, and every emulator test passed at
+  its first run: the fixture tests had already pinned down what the emulator then did.
+- **A pull holds for the subscription's deadline, not the one the source was given.** The
+  plan had the keeper alone keeping the hold; its first extension, at half of 60 seconds,
+  would come after a default 10-second deadline ran out. Each pull is now extended at once.
+- **`returnImmediately` is deprecated and still the safer choice here**: without it an empty
+  subscription waits server-side for an unstated time. Recorded in `connectors.md` as a
+  trade-off, unseen against real Pub/Sub.
+- **Pub/Sub counts deliveries only with a dead-letter policy**, so "a receive count" (decision
+  62) is null for most subscriptions.
+- **Two test assertions built Windows paths with `/`**; comparing to `Path::join` fixed them.
+- **A Python string wrote `\a` in a Windows path as a bell character** into `connectors.md`.
+  Found by reading the file back; fixed with an edit, not another script.
+- **The heredoc mistake from 10j came back** (a long block of Rust with `r#"`); written to a
+  file and appended instead, as 10j's learning says.
 
 ## Session log
 
@@ -2516,3 +2618,48 @@ uncommitted.
 **942 Rust tests with every server up, twice, none skipped; 134 frontend.** Committed and
 pushed with `.gitattributes` at the user's request, with `[skip ci]`: CI has not run on 10h
 or 10i.
+
+### 2026-09-24 — Phase 10j: receipts, and SQS
+
+Started by the user ("pls start 10j") after questions 57–70 were answered all as recommended
+and the plan written.
+
+- `crates/plugin-sdk` — `Receipt`, `Source::read_held` (default: hold nothing).
+- `crates/duckdb-engine` — `native::Receipts` (settled once; `Drop` releases), acknowledged
+  after delivery on both transports, released otherwise; `RunReport::warnings`, printed with
+  ⚠. 5 tests in `native/tests.rs`, 1 in `report/tests.rs`.
+- `crates/state` and `crates/cli` — `RunRecord::warnings`, kept in history and shown by
+  `etl runs show`; 1 test.
+- `crates/connectors` — `aws::JsonApi` (from Kinesis's client), `sqs.rs`: `src.queue.sqs`,
+  `snk.queue.sqs`, the lease keeper; 18 tests (6 against ElasticMQ).
+- `samples/pipelines/sqs_orders.json`; `verified.rs` — 4 tests (both transports, a failed run
+  with and without `continueOnFailure`, preview).
+- `scripts/test-services.ps1` — ElasticMQ 1.7.1; `gate.yml` — 68 components;
+  `frontend/src/icons.ts` — `inbox`.
+- Docs: `connectors.md` (queues in general, SQS), the plan's as-built notes, `learnings.md`,
+  `assignments.md` (A51–A52).
+
+**971 Rust tests with every server up, twice, none skipped; 137 frontend** (each sample
+pipeline is three frontend tests). Not committed.
+
+### 2026-09-24 — Phase 10k: Pub/Sub (built; emulator checks pending)
+
+Started by the user ("2 --> b": start 10k now, beside the uncommitted 10j), in the same
+session that marked GraphQL, Kafka and NATS JetStream working on the website.
+
+- `crates/connectors` — `gcp.rs` (RS256, JWTs, key files, gcloud's login, the token cache)
+  with 9 tests; `pubsub.rs` (`src.queue.pubsub`, `snk.queue.pubsub`) with 21 tests (15 against
+  the fixture, 6 against the emulator); `lease.rs`, the lease keeper SQS and Pub/Sub share;
+  `aws::Sources::get` made crate-visible for the Google lookups.
+- `tests/fixtures/rfc7515/` — RFC 7515's A.2 example and its source.
+- `samples/pipelines/pubsub_orders.json`; `verified.rs` — 4 tests (both transports, a failed
+  run with and without `continueOnFailure`, preview).
+- `scripts/test-services.ps1` — the Pub/Sub emulator as `ETL_TEST_PUBSUB` (port 58085);
+  `gate.yml` — 70 components; the registry test.
+- Docs: `connectors.md` (Pub/Sub).
+
+**1005 Rust tests with no servers, 140 frontend, fmt and clippy clean.** Docker's daemon was
+not running at first. Once the user started it: the emulator in the test services, the 21
+Pub/Sub tests and the 4 in `verified.rs` passed at their first run; five mutations (the
+keeper, `Drop`, acknowledging, the per-pull extension, the token cache) each broke a test;
+**1005 with every server up, twice, none skipped**. Not committed.

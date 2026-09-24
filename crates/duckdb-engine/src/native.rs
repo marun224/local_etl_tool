@@ -15,10 +15,18 @@
 //!
 //! Staging files are scratch. [`Staging`] deletes them when it goes out of
 //! scope, which covers every early return without each one remembering to.
+//!
+//! A source that **holds** its messages until the run's outcome is known (a
+//! queue) hands back a [`Receipt`]. [`Receipts`] keeps them, and the run
+//! settles them once: acknowledged after it fully succeeded and its sinks
+//! delivered, released on every other path. Its `Drop` releases whatever is
+//! still held, so an early return cannot leave messages waiting out a timeout.
 
 use crate::exec::{redact, resolve_against, Checkpoint, ExecError, RunOptions};
 use crate::plan::{Direction, NativeStep, Stage};
-use etl_plugin_sdk::{Connector, ConnectorError, Context, Record, RecordReader, RecordWriter};
+use etl_plugin_sdk::{
+    Connector, ConnectorError, Context, Receipt, Record, RecordReader, RecordWriter,
+};
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
@@ -50,14 +58,93 @@ impl Drop for Staging {
     }
 }
 
-/// What staging the sources produced: a report line each, and where each
-/// source that keeps a position got to.
+/// What staging the sources produced: a report line each, where each source
+/// that keeps a position got to, and what the sources that hold are holding.
 #[derive(Debug, Default)]
 pub(crate) struct Staged {
     pub(crate) notes: Vec<String>,
     /// Advisory until the run succeeds, like a watermark: the caller keeps
     /// these only for a run that fully succeeded.
     pub(crate) checkpoints: Vec<Checkpoint>,
+    /// Released when dropped; acknowledged only by a run that succeeded.
+    pub(crate) receipts: Receipts,
+}
+
+/// Messages the native sources are holding, one receipt per source node.
+///
+/// Settled once: [`Receipts::acknowledge`] after a run that fully succeeded
+/// and delivered, [`Receipts::release`] otherwise. Dropping it unsettled
+/// releases, best-effort, which is what an early return or a preview wants.
+#[derive(Default)]
+pub(crate) struct Receipts {
+    held: Vec<(String, Box<dyn Receipt>)>,
+    redact: Vec<String>,
+}
+
+/// What settling said: lines for the report, and warnings for what could not
+/// be acknowledged.
+#[derive(Debug, Default)]
+pub(crate) struct Settled {
+    pub(crate) notes: Vec<String>,
+    pub(crate) warnings: Vec<String>,
+}
+
+impl std::fmt::Debug for Receipts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list()
+            .entries(self.held.iter().map(|(label, _)| label))
+            .finish()
+    }
+}
+
+impl Receipts {
+    fn hold(&mut self, label: &str, receipt: Box<dyn Receipt>, options: &RunOptions) {
+        self.redact = options.redact.clone();
+        self.held.push((label.to_string(), receipt));
+    }
+
+    /// The run fully succeeded and its sinks delivered. A receipt that cannot
+    /// be acknowledged is a **warning**, not a failure: the output is already
+    /// delivered, and the messages will only come again (Settled decision 59).
+    pub(crate) fn acknowledge(mut self) -> Settled {
+        let mut settled = Settled::default();
+        for (label, receipt) in std::mem::take(&mut self.held) {
+            match receipt.acknowledge() {
+                Ok(line) => settled.notes.push(format!("{label}: {line}")),
+                Err(error) => settled.warnings.push(format!(
+                    "{label}: the messages read could not be acknowledged and will be \
+                     delivered again: {}",
+                    redact(&error.to_string(), &self.redact)
+                )),
+            }
+        }
+        settled
+    }
+
+    /// Anything but a full success: give every message back.
+    pub(crate) fn release(mut self) -> Settled {
+        let mut settled = Settled::default();
+        for (label, receipt) in std::mem::take(&mut self.held) {
+            match receipt.release() {
+                Ok(line) => settled.notes.push(format!("{label}: {line}")),
+                // The messages come back when their hold runs out instead.
+                Err(error) => settled.warnings.push(format!(
+                    "{label}: the messages read could not be released, so they come back only \
+                     when their hold runs out: {}",
+                    redact(&error.to_string(), &self.redact)
+                )),
+            }
+        }
+        settled
+    }
+}
+
+impl Drop for Receipts {
+    fn drop(&mut self) {
+        for (_, receipt) in std::mem::take(&mut self.held) {
+            let _ = receipt.release();
+        }
+    }
 }
 
 /// Run every native source among `stages`, writing each one's staging file.
@@ -94,13 +181,17 @@ pub(crate) fn stage_sources_using<'a>(
         let mut writer = JsonlWriter {
             out: BufWriter::new(file),
         };
-        let summary = source
-            .read(
+        let (summary, receipt) = source
+            .read_held(
                 &step.properties,
                 &mut writer,
                 &context(options, step.checkpoint.clone()),
             )
             .map_err(|error| failed(stage, error, options))?;
+        if let Some(receipt) = receipt {
+            // Held before anything else can fail, so the guard releases it.
+            staged.receipts.hold(&stage.label, receipt, options);
+        }
         writer
             .out
             .flush()

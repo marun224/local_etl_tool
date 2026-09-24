@@ -194,3 +194,252 @@ fn a_checkpoint_goes_only_to_the_node_it_was_saved_for() {
         Some(json!(99))
     );
 }
+
+// ---------------------------------------------------------------------------
+// Receipts: what a queue source holds until the run's outcome is known
+// ---------------------------------------------------------------------------
+
+/// How each receipt ended, in order, shared with the test that made them.
+type Ledger = std::sync::Arc<Mutex<Vec<String>>>;
+
+/// A receipt that writes down how it was settled. `fail` makes it refuse to
+/// acknowledge, quoting a secret the engine must mask.
+struct Noted {
+    name: &'static str,
+    ledger: Ledger,
+    fail: bool,
+    settled: bool,
+}
+
+impl Noted {
+    fn boxed(name: &'static str, ledger: &Ledger, fail: bool) -> Box<dyn etl_plugin_sdk::Receipt> {
+        Box::new(Noted {
+            name,
+            ledger: ledger.clone(),
+            fail,
+            settled: false,
+        })
+    }
+}
+
+impl etl_plugin_sdk::Receipt for Noted {
+    fn acknowledge(mut self: Box<Self>) -> Result<String, ConnectorError> {
+        self.settled = true;
+        if self.fail {
+            self.ledger
+                .lock()
+                .unwrap()
+                .push(format!("{} refused", self.name));
+            return Err(ConnectorError::Data("token hunter2 expired".into()));
+        }
+        self.ledger
+            .lock()
+            .unwrap()
+            .push(format!("{} acknowledged", self.name));
+        Ok("3 message(s) acknowledged".into())
+    }
+
+    fn release(mut self: Box<Self>) -> Result<String, ConnectorError> {
+        self.settled = true;
+        self.ledger
+            .lock()
+            .unwrap()
+            .push(format!("{} released", self.name));
+        Ok("3 message(s) released".into())
+    }
+}
+
+impl Drop for Noted {
+    fn drop(&mut self) {
+        if !self.settled {
+            self.ledger
+                .lock()
+                .unwrap()
+                .push(format!("{} dropped unsettled", self.name));
+        }
+    }
+}
+
+fn masking(secret: &str) -> RunOptions {
+    RunOptions {
+        redact: vec![secret.to_string()],
+        ..Default::default()
+    }
+}
+
+#[test]
+fn a_success_acknowledges_every_receipt_and_a_refusal_is_a_masked_warning() {
+    let ledger = Ledger::default();
+    let mut receipts = Receipts::default();
+    let options = masking("hunter2");
+    receipts.hold("Orders", Noted::boxed("orders", &ledger, false), &options);
+    receipts.hold("Refunds", Noted::boxed("refunds", &ledger, true), &options);
+
+    let settled = receipts.acknowledge();
+    assert_eq!(settled.notes, ["Orders: 3 message(s) acknowledged"]);
+    assert_eq!(settled.warnings.len(), 1);
+    let warning = &settled.warnings[0];
+    assert!(
+        warning.starts_with(
+            "Refunds: the messages read could not be acknowledged and will be delivered again"
+        ),
+        "{warning}"
+    );
+    assert!(!warning.contains("hunter2"), "masked: {warning}");
+    assert_eq!(
+        *ledger.lock().unwrap(),
+        ["orders acknowledged", "refunds refused"]
+    );
+}
+
+#[test]
+fn a_failure_releases_every_receipt_and_says_so() {
+    let ledger = Ledger::default();
+    let mut receipts = Receipts::default();
+    receipts.hold(
+        "Orders",
+        Noted::boxed("orders", &ledger, false),
+        &RunOptions::default(),
+    );
+    receipts.hold(
+        "Refunds",
+        Noted::boxed("refunds", &ledger, false),
+        &RunOptions::default(),
+    );
+
+    let settled = receipts.release();
+    assert_eq!(
+        settled.notes,
+        [
+            "Orders: 3 message(s) released",
+            "Refunds: 3 message(s) released"
+        ]
+    );
+    assert!(settled.warnings.is_empty());
+    assert_eq!(
+        *ledger.lock().unwrap(),
+        ["orders released", "refunds released"]
+    );
+}
+
+#[test]
+fn receipts_dropped_unsettled_are_released_not_forgotten() {
+    let ledger = Ledger::default();
+    {
+        let mut receipts = Receipts::default();
+        receipts.hold(
+            "Orders",
+            Noted::boxed("orders", &ledger, false),
+            &RunOptions::default(),
+        );
+        // An early return: nobody settles it.
+    }
+    assert_eq!(*ledger.lock().unwrap(), ["orders released"]);
+}
+
+/// A queue source that exists only here: three rows, held under a receipt.
+struct Queue {
+    ledger: Ledger,
+}
+
+impl Source for Queue {
+    fn spec(&self) -> ComponentSpec {
+        ComponentSpec::new("src.file.xml", "Queue")
+    }
+
+    fn read(
+        &self,
+        properties: &serde_json::Value,
+        out: &mut dyn RecordWriter,
+        context: &Context,
+    ) -> Result<Summary, ConnectorError> {
+        let (summary, receipt) = self.read_held(properties, out, context)?;
+        if let Some(receipt) = receipt {
+            receipt.release()?;
+        }
+        Ok(summary)
+    }
+
+    fn read_held(
+        &self,
+        _properties: &serde_json::Value,
+        out: &mut dyn RecordWriter,
+        _context: &Context,
+    ) -> Result<(Summary, Option<Box<dyn etl_plugin_sdk::Receipt>>), ConnectorError> {
+        for n in 1..=3 {
+            out.write(record(json!({ "n": n })))?;
+        }
+        Ok((
+            Summary::new(3, "received 3"),
+            Some(Noted::boxed("queue", &self.ledger, false)),
+        ))
+    }
+}
+
+/// Two native sources: `first` then `second`, in that order.
+fn two_source_plan() -> crate::Plan {
+    let document = PipelineDoc::from_json(
+        r#"{ "formatVersion": 1, "nodes": [
+            { "id": "first", "position": {"x":0,"y":0},
+              "data": { "label": "First", "componentId": "src.file.xml",
+                        "properties": { "path": "never-read.xml", "record": "r" } } },
+            { "id": "second", "position": {"x":0,"y":0},
+              "data": { "label": "Second", "componentId": "src.saas.rest",
+                        "properties": { "url": "http://127.0.0.1:9/never" } } }
+          ], "edges": [] }"#,
+    )
+    .unwrap();
+    crate::plan::compile_with(&document, &crate::CompileOptions::default()).expect("compiles")
+}
+
+#[test]
+fn staging_collects_what_a_source_holds() {
+    let ledger = Ledger::default();
+    let queue: &'static Queue = Box::leak(Box::new(Queue {
+        ledger: ledger.clone(),
+    }));
+    let staged = stage_with_source(queue, &counted_plan(&[]));
+    assert_eq!(format!("{:?}", staged.receipts), r#"["Count"]"#);
+    assert_eq!(staged.notes, ["Count: received 3"]);
+
+    let settled = staged.receipts.acknowledge();
+    assert_eq!(settled.notes, ["Count: 3 message(s) acknowledged"]);
+    assert_eq!(*ledger.lock().unwrap(), ["queue acknowledged"]);
+}
+
+#[test]
+fn a_later_source_failing_releases_what_an_earlier_one_holds() {
+    let ledger = Ledger::default();
+    let queue: &'static Queue = Box::leak(Box::new(Queue {
+        ledger: ledger.clone(),
+    }));
+    let directory = std::env::temp_dir().join(format!("etl-native-held-{}", std::process::id()));
+    let options = RunOptions {
+        working_dir: Some(directory),
+        ..Default::default()
+    };
+    let mut staging = Staging::default();
+    let error = stage_sources_using(&two_source_plan().stages, &options, &mut staging, |id| {
+        // The first source holds; the second is not registered, so it fails.
+        (id == "src.file.xml").then_some(Connector::Source(queue))
+    })
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("no connector is registered"),
+        "{error}"
+    );
+    assert_eq!(*ledger.lock().unwrap(), ["queue released"]);
+}
+
+fn stage_with_source(source: &'static dyn Source, plan: &crate::Plan) -> Staged {
+    let directory = std::env::temp_dir().join(format!("etl-native-queue-{}", std::process::id()));
+    let options = RunOptions {
+        working_dir: Some(directory),
+        ..Default::default()
+    };
+    let mut staging = Staging::default();
+    stage_sources_using(&plan.stages, &options, &mut staging, |id| {
+        (id == "src.file.xml").then_some(Connector::Source(source))
+    })
+    .expect("stages")
+}

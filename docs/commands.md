@@ -2153,3 +2153,90 @@ git add -A     # 10i and .gitattributes: the tree held nothing else
 git -c user.name="Arun M" -c user.email=marun.mahadevu@gmail.com commit -F <message file>   # "[skip ci]"
 git push origin main
 ```
+
+## 2026-09-24 — Acknowledgement-based brokers (RabbitMQ, SQS, Pub/Sub): research and questions
+
+```bash
+# read-only: docs (decisions 25, 38, A45), crates/duckdb-engine/src/{native.rs,remember.rs,exec.rs},
+#   crates/plugin-sdk/src/lib.rs (Summary)
+curl https://crates.io/api/v1/crates/{lapin,amiquip,rabbitmq-stream-client,fe2o3-amqp,google-cloud-pubsub,gcp_auth}
+#   lapin 4.12.0 MSRV 1.88 (features rustls--ring, tokio); google-cloud-pubsub MSRV 1.90; amiquip last 2022
+curl https://crates.io/api/v1/crates/lapin/4.12.0/dependencies
+curl https://hub.docker.com/v2/repositories/{library/rabbitmq,softwaremill/elasticmq-native}/tags
+#   rabbitmq 4.3.6-alpine 84 MB; elasticmq-native 1.7.1 32 MB
+curl https://gcr.io/v2/google.com/cloudsdktool/google-cloud-cli/{tags/list,manifests/...}
+#   586.0.0-emulators: 445 MB compressed (amd64)
+docker run -d --rm --name etl-probe-sqs -p 59324:9324 softwaremill/elasticmq-native:1.7.1
+docker run -d --rm --name etl-probe-pubsub -p 58085:8085 gcr.io/google.com/cloudsdktool/google-cloud-cli:586.0.0-emulators \
+  gcloud beta emulators pubsub start --host-port=0.0.0.0:8085 --project=etl-test
+python probe_queues.py    # scratchpad; SQS JSON protocol (AmazonSQS.*) and Pub/Sub REST both answer:
+                          #   send, receive, release (visibility / ack deadline 0), redelivered, delete / ack
+docker rm -f etl-probe-sqs etl-probe-pubsub
+```
+
+Both images stay pulled locally. No project files written except this log.
+
+```text
+# Answered "all as recommended". Edits: PLAN (Phase 10j, 10k and 10l), tracker (decisions
+#   57-70, status rows 10j-10l, next). Awaiting approval of the plan.
+```
+
+## 2026-09-24 — Phase 10j: receipts, and SQS
+
+```powershell
+cargo check --workspace --all-targets     # "can't find crate for etl_metadata", yet it built alone:
+cargo clean -p etl-metadata; cargo clean -p etl-plugin-sdk   # a corrupted build artifact; then clean
+cargo test -p etl-duckdb-engine --lib native::tests report::tests
+cargo test -p etl-cli --bin etl a_warning
+./scripts/test-services.ps1               # now also etl-test-sqs (ElasticMQ 1.7.1, port 59324)
+cargo test -p etl-connectors --lib sqs::tests                   # ETL_TEST_SQS set; 5 runs, then 5 in parallel
+cargo test -p etl-duckdb-engine --test verified sqs
+python mutate_10j.py                      # scratchpad: 5 mutations, each failing a test, each reverted
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace                    # every ETL_TEST_* set, twice: 971 and 971, none skipped
+cargo build -p etl-cli; ./target/debug/etl components | tail -1   # 68 component(s)
+cd frontend; npx tsc --noEmit -p .; npm test; npm run typecheck; npm run build   # 137: sqs_orders.json adds 3
+./scripts/test-services.ps1 -Stop
+```
+
+Not committed.
+
+## 2026-09-24 — Website: GraphQL, Kafka and NATS JetStream marked working
+
+Logged in full in the website's own `docs/COMMANDS.md`: its connector list, counts (16 of 50
+working), roadmap and `CLAIMS.md` edited; `npm run build` clean. Uncommitted there.
+
+## 2026-09-24 — Phase 10k: Pub/Sub
+
+```bash
+docker info                                # FAILED: the daemon is not running (checked 5 times)
+curl -o <scratchpad>/rfc7515.txt https://www.rfc-editor.org/rfc/rfc7515.txt
+python <extract A.2>                       # -> crates/connectors/tests/fixtures/rfc7515/a2.json;
+                                           #    cross-checked: signature bytes = its base64url
+cargo check -p etl-connectors --all-targets
+cargo test -p etl-connectors --lib         # 231 (gcp 9; pubsub 15 + 6 skipping); 2 path fixes in tests
+cargo test -p etl-duckdb-engine --test verified pubsub   # 4, skipping without ETL_TEST_PUBSUB
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings    # one is_multiple_of fix in a test
+cargo build -p etl-cli; ./target/debug/etl components | tail -1   # 70 component(s)
+cd frontend; npm test; npm run typecheck   # 140 (pubsub_orders.json adds 3)
+cargo test --workspace                     # 1005 passed, no servers up
+```
+
+Not committed.
+
+
+```powershell
+# Docker started by the user
+./scripts/test-services.ps1               # now also etl-test-pubsub (google-cloud-cli:586.0.0-emulators, port 58085): all ready
+cargo test -p etl-connectors --lib pubsub::tests          # ETL_TEST_PUBSUB set: 21 passed, first run
+cargo test -p etl-duckdb-engine --test verified pubsub    # 4 passed, first run
+python mutate_10k.py                      # scratchpad: 5 mutations (keeper, Drop, acknowledge, per-pull extension,
+                                          #   token cache), each caught, each reverted
+cargo test --workspace                    # every ETL_TEST_* set, twice: 1005 and 1005, none skipped
+python docs_10k.py                        # scratchpad: plan as-built, tracker, learnings, assignments (A53-A54)
+./scripts/test-services.ps1 -Stop
+```
+
+Not committed.
