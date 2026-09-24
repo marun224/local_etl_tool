@@ -135,7 +135,7 @@ jobs:
       # tests/verified.rs; since 10e a Kafka broker, since 10g five NATS servers and
       # since 10h kinesis-mock, since 10j ElasticMQ (SQS), since 10k the Pub/Sub
       # emulator, since 10l RabbitMQ, since 10m MongoDB, since 10o a BigQuery
-      # emulator and since 10q MariaDB, for the streaming, queue, database and warehouse connectors'
+      # emulator, since 10q MariaDB and since 10r ClickHouse, for the streaming, queue, database and warehouse connectors'
       # tests and samples. Linux only, because
       # Windows runners cannot run Linux containers; on Windows those tests
       # skip, and the lake ones still run.
@@ -161,7 +161,7 @@ jobs:
         run: |
           count=$(${{ matrix.etl }} components | tail -1 | grep -oE '^[0-9]+')
           echo "components: $count"
-          test "$count" = "78"
+          test "$count" = "80"
 
       - name: The samples still print what they printed
         shell: bash

@@ -3,6 +3,16 @@
 **State only.** Design lives in [PLAN_duckle_parity.md](PLAN_duckle_parity.md). Read this file
 first when picking the project back up.
 
+> ## ✅ Phase 10r (ClickHouse) — built 2026-09-24, green locally; **pushed without CI** at the user's request
+>
+> **What 10r built:** `src.db.clickhouse` and `snk.db.clickhouse` over the HTTP interface:
+> reads streamed a line at a time with names and types, wide integers exact, an error after
+> a `200` recognised; incremental by a **query parameter**; inserts of 100,000 rows or 16 MB.
+> ClickHouse 25.8 in the test services, 1 GB. **And question 16 is fixed**: a table
+> `snk.db.mysql` creates keeps sub-second timestamps (`DATETIME(6)`), on MySQL and MariaDB.
+> **80 components, 1086 Rust tests** (1076 on Linux) with every server up, twice, none
+> skipped; **155 frontend**; six ClickHouse and two MySQL mutations each caught.
+>
 > ## ✅ Phase 10q (MariaDB) — built 2026-09-24, green locally
 >
 > **What 10q did:** proved MariaDB 11.8 through the existing MySQL components: no new
@@ -137,8 +147,8 @@ first when picking the project back up.
 > minutes). Everything through 10l is committed and pushed; the plan for 10m–10u is not yet
 > committed.
 >
-> **Next:** **10r, ClickHouse**, when the user says so: one connector each (MongoDB,
-> BigQuery, Snowflake and MariaDB done; ClickHouse, Cassandra, Neo4j, SQL Server),
+> **Next:** **10s, Cassandra**, when the user says so: one connector each (MongoDB,
+> BigQuery, Snowflake, MariaDB and ClickHouse done; Cassandra, Neo4j, SQL Server),
 > planned 2026-09-24. **Redis (10n) is not built** (the user, 2026-09-24); Elasticsearch is
 > not built (memory); Oracle is deferred.
 > Open question 15 (SQL Server's memory) waits for 10u. **The website** (`b035bd9`,
@@ -177,14 +187,14 @@ first when picking the project back up.
 >
 > | Job | Checked locally by |
 > |---|---|
-> | `gate (windows)` — fmt, clippy, 1072 tests (servers skip), samples | running it, repeatedly |
-> | `gate (ubuntu)` — fmt, clippy, **1062 tests** with Postgres, MySQL, MariaDB, MinIO, Kafka (four listeners), NATS (five servers), kinesis-mock, ElasticMQ, the Pub/Sub emulator, RabbitMQ, MongoDB and the BigQuery emulator, samples | `cargo test` in `rust:1.96-slim-bookworm` |
+> | `gate (windows)` — fmt, clippy, 1086 tests (servers skip), samples | running it, repeatedly |
+> | `gate (ubuntu)` — fmt, clippy, **1076 tests** with Postgres, MySQL, MariaDB, ClickHouse, MinIO, Kafka (four listeners), NATS (five servers), kinesis-mock, ElasticMQ, the Pub/Sub emulator, RabbitMQ, MongoDB and the BigQuery emulator, samples | `cargo test` in `rust:1.96-slim-bookworm` |
 > | `artifact (both)` — bake, run from elsewhere, run in a bare container | Phase 9b and 9c |
 > | `cross-build-script` — `build-runner.ps1`, ELF check, unbaked contract, no-op rerun | each assertion run by hand |
-> | `frontend` — 152 tests, typecheck, build | running it |
+> | `frontend` — 155 tests, typecheck, build | running it |
 >
 > **The Linux job excludes `apps/desktop`** (Tauri needs WebKitGTK and GTK to compile), so
-> **1062 + 10 desktop = 1072** is the arithmetic to check if either number moves. **CI fetches
+> **1076 + 10 desktop = 1086** is the arithmetic to check if either number moves. **CI fetches
 > only the extensions the tests load** (`DUCKDB_TEST_EXTENSIONS`, hyphen-separated because
 > `actions/cache` refuses a comma in a key). **CI cannot do the Windows-to-Linux cross-build**
 > (GitHub's Windows runners run no Linux containers), so it proves the output instead: a Linux
@@ -194,12 +204,12 @@ first when picking the project back up.
 >
 > ```powershell
 > ./scripts/test-services.ps1                                       # Postgres, MySQL, MinIO, Kafka, NATS, Kinesis, SQS, Pub/Sub, RabbitMQ, MongoDB, BigQuery in Docker
-> cargo test --workspace                                            # expect 1072 passing
+> cargo test --workspace                                            # expect 1086 passing
 > ./scripts/test-services.ps1 -Stop                                 # tidy up afterwards
-> npm --prefix frontend run test                                    # expect 152 passing
+> npm --prefix frontend run test                                    # expect 155 passing
 > npm --prefix frontend run typecheck                               # expect clean
 > npm --prefix frontend run build                                   # expect clean
-> .\target\debug\etl.exe components                                 # expect 78
+> .\target\debug\etl.exe components                                 # expect 80
 > .\target\debug\etl.exe run samples\pipelines\orders_enriched.json # expect 12/5/7/6/6
 > .\target\debug\etl.exe run samples\pipelines\orders_checked.json  # expect 12/10+2/9+1/9/2/1
 > .\target\debug\etl.exe run samples\pipelines\orders_guarded.json  # expect 12 through, branch taken
@@ -222,12 +232,15 @@ first when picking the project back up.
 
 ## Where things stand
 
-- **Next phase:** **10r, ClickHouse**, planned in [PLAN_duckle_parity.md](PLAN_duckle_parity.md)
+- **Next phase:** **10s, Cassandra**, planned in [PLAN_duckle_parity.md](PLAN_duckle_parity.md)
   under *Phases 10m–10u*. Each starts when the user says so. **10n (Redis) is not built**
   (decision 82).
-- **In progress:** nothing. **Phases 0–9, 10a–10m and 10o–10q are done** (10a–10f on
-  2026-09-23, 10g–10q on 2026-09-24; CI green through 10o on run 35976507434; 10p pushed,
-  its CI running; 10q green locally).
+- **In progress:** nothing. **Phases 0–9, 10a–10m and 10o–10r are done** (10a–10f on
+  2026-09-23, 10g–10q on 2026-09-24; CI green through 10o on run 35976507434). **10p
+  (`2a474a1`) and 10q (`9073352`) are pushed, but their CI never finished**: 10p's run
+  (35983333700) passed both gates before the 10q push cancelled its artifact jobs, and 10q's
+  (35984538505) was cancelled at the user's request ("Stop CI runs", 2026-09-24). **10r is
+  pushed with `[skip ci]`** (the user: "do not run CI for 10r").
 - **Blocked on:** nothing.
 
 Phase 9 was split into 9a–9d on 2026-09-17 before starting, the same way 6 and 8 were:
@@ -250,7 +263,7 @@ pass), `ctl.throttle` (nothing to throttle until Phase 10 has a row cursor).
 **a scheduler that runs them**, and **a console to watch it from**. From the repo root:
 
 ```powershell
-cargo test --workspace        # 1072 tests: 323 engine, 281 connectors, 113 scheduler, 65 console, 51 e2e, 51 cli, 48 state, 44 verified, 26 runner, 23 secrets, 17 native e2e, 15 metadata, 10 desktop, 5 plugin-sdk
+cargo test --workspace        # 1086 tests: 324 engine, 290 connectors, 113 scheduler, 65 console, 51 e2e, 51 cli, 48 state, 48 verified, 26 runner, 23 secrets, 17 native e2e, 15 metadata, 10 desktop, 5 plugin-sdk
 .\target\debug\etl.exe run samples\pipelines\orders_enriched.json
 .\target\debug\etl.exe validate samples\pipelines\orders_enriched.json
 .\target\debug\etl.exe plan samples\pipelines\orders_enriched.json --script
@@ -302,14 +315,14 @@ exists — writing the report only if one does. `plan.needs_session()` decides t
 because they read something that never got created, and the failures. The exit code is 3 either
 way. Getting the report back is the entire point of asking a run to continue.
 
-**Seventy-eight components exist.** Sources: `src.cloud.http`, `src.cloud.s3`, `src.db.mongodb`, `src.db.mysql`,
+**Eighty components exist.** Sources: `src.cloud.http`, `src.cloud.s3`, `src.db.clickhouse`, `src.db.mongodb`, `src.db.mysql`,
 `src.db.postgres`, `src.db.sqlite`, `src.file.csv`, `src.file.excel`, `src.file.json`,
 `src.file.jsonl`, `src.file.parquet`, `src.file.xml`, `src.lake.delta`, `src.lake.iceberg`,
 `src.queue.pubsub`, `src.queue.rabbitmq`, `src.queue.sqs`, `src.saas.graphql`, `src.saas.rest`, `src.stream.kafka`, `src.stream.kinesis`, `src.stream.nats`, `src.warehouse.bigquery`, `src.warehouse.snowflake`. Transforms:
 `xf.aggregate`, `xf.cast`, `xf.dedup`, `xf.derive`, `xf.distinct`, `xf.except`,
 `xf.filter`, `xf.intersect`, `xf.join`, `xf.limit`,
 `xf.pivot`, `xf.rename`, `xf.sample`, `xf.select`, `xf.sort`, `xf.sql`, `xf.union`,
-`xf.unpivot`, `xf.window`. Sinks: `snk.cloud.s3`, `snk.db.mongodb`, `snk.db.mysql`, `snk.db.postgres`,
+`xf.unpivot`, `xf.window`. Sinks: `snk.cloud.s3`, `snk.db.clickhouse`, `snk.db.mongodb`, `snk.db.mysql`, `snk.db.postgres`,
 `snk.db.sqlite`, `snk.file.csv`, `snk.file.excel`, `snk.file.json`, `snk.file.jsonl`,
 `snk.file.parquet`, `snk.file.xml`, `snk.queue.pubsub`, `snk.queue.rabbitmq`, `snk.queue.sqs`, `snk.saas.graphql`, `snk.saas.rest`, `snk.stream.kafka`, `snk.stream.kinesis`, `snk.stream.nats`, `snk.warehouse.bigquery`, `snk.warehouse.snowflake`. Quality: `qa.accepted_values`, `qa.expression`, `qa.not_null`, `qa.range`,
 `qa.referential`, `qa.regex`, `qa.unique`. Quality assertions, which fail the run rather than
@@ -317,13 +330,14 @@ partitioning rows and so have no reject port: `qa.row_count`, `qa.schema_match`.
 `ctl.branch`, `ctl.fail`, `ctl.log`, `ctl.sequence`, `ctl.wait`. Everything else in the six
 namespaces compiles to `UnsupportedComponent`, by design.
 
-**Twenty-four of them are written in Rust, not lowered to DuckDB alone** (the list below,
+**Twenty-six of them are written in Rust, not lowered to DuckDB alone** (the list below,
 `src.stream.kinesis` and `snk.stream.kinesis` from 10h and 10i, `src.queue.sqs` and
 `snk.queue.sqs` from 10j, the first that hold messages until the run's outcome,
 `src.queue.pubsub` and `snk.queue.pubsub` from 10k, and `src.queue.rabbitmq` and
 `snk.queue.rabbitmq` from 10l, and `src.db.mongodb` and `snk.db.mongodb` from 10m, and `src.warehouse.bigquery` and
 `snk.warehouse.bigquery` from 10o, and `src.warehouse.snowflake` and
-`snk.warehouse.snowflake` from 10p). `src.file.xml` and
+`snk.warehouse.snowflake` from 10p, and `src.db.clickhouse` and `snk.db.clickhouse` from
+10r). `src.file.xml` and
 `snk.file.xml` (Phase 10a), `src.saas.rest` and `snk.saas.rest` (Phase 10b),
 `src.saas.graphql` and `snk.saas.graphql` (Phase 10d), `src.stream.kafka` (10e),
 `snk.stream.kafka` (10f), and `src.stream.nats` and `snk.stream.nats` (10g) are the *native*
@@ -711,8 +725,8 @@ fail the run. That is `ctl.fail`'s shape and it needs 6b's execution-model decis
 | 10n | — Redis | **not built** (the user's choice, decision 82) | 2026-09-24 |
 | 10o | — BigQuery | **done** (green in CI, run 35976507434; against the emulator; not checked against real Google Cloud) | 2026-09-24 |
 | 10p | — Snowflake | **done** (against the fixture only; not checked against real Snowflake) | 2026-09-24 |
-| 10q | — MariaDB (through the MySQL components) | **done** (against MariaDB 11.8 itself; open question 16) | 2026-09-24 |
-| 10r | — ClickHouse | planned | |
+| 10q | — MariaDB (through the MySQL components) | **done** (against MariaDB 11.8 itself; question 16 fixed with 10r) | 2026-09-24 |
+| 10r | — ClickHouse | **done** (against ClickHouse 25.8 itself; pushed without CI) | 2026-09-24 |
 | 10s | — Cassandra | planned | |
 | 10t | — Neo4j | planned | |
 | 10u | — SQL Server | planned; **open question 15** first | |
@@ -989,15 +1003,15 @@ recommended, except Elasticsearch, which is not built.
 82. **Redis (10n) is not built** (the user, 2026-09-24, after 10m). The phase letters stay as
     they were, so 10o BigQuery follows 10m; every later phase has four components fewer than
     planned (86 after 10u). Its design is kept in the plan.
+83. **Sub-second timestamps in tables `snk.db.mysql` creates are kept** (question 16,
+    answered as recommended with 10r): created empty, widened to `DATETIME(6)` by an `ALTER`
+    written at run time, then filled; a table already there is left alone.
+84. **MariaDB is marked working on the website** (question 17, as recommended), with
+    ClickHouse, both tested against the real servers; CI ran for neither (the user stopped
+    it, then asked for none for 10r), which `CLAIMS.md` says.
+85. **No CI for 10r** (the user): pushed with `[skip ci]`.
 
 ## Open decisions
-
-16. **Sub-second timestamps in tables `snk.db.mysql` creates** (found in 10q, true since
-    Phase 4, on MySQL and MariaDB): the DuckDB extension creates `DATETIME`, so fractions are
-    dropped silently. (a) Fix it: the sink creates the table itself, from the upstream's
-    schema, with `DATETIME(6)` for timestamps, through `mysql_execute`, then appends
-    **(recommended: silent loss of precision is the worst kind of wrong)**; (b) refuse a
-    sub-second value when the sink would create the table; (c) leave it documented, as now.
 
 15. **SQL Server's test server** (before Phase 10u): it needs at least 2 GB of memory, more
     than decision 79's 1 GB cap that ruled out Elasticsearch. (a) defer it, as Elasticsearch;
@@ -1710,6 +1724,20 @@ ran*. Earlier ones were resolved 2026-09-16 (Settled decisions 5–8).
   `etl_metadata` while the crate built alone; `cargo clean -p` for two crates fixed it.
 - **Kinesis's signed client became `aws::JsonApi`** for SQS to share, proved by Kinesis's
   unchanged tests.
+
+### From Phase 10r
+
+- **ClickHouse sends an error after the first rows with status 200**, as a last row holding
+  the exception: found in the probe before any code, and now a test.
+- **Wide integers had to be asked for quoted**: unquoted, `Int128` arrived as a bare number
+  that no `f64` holds; quoted, they are made numbers by type where they fit.
+- **The deduplication token does nothing on a plain MergeTree** (the probe inserted a batch
+  twice under one token); documented rather than promised.
+- **A mutation (an incremental first run from `start` sorted the wrong way) was not caught
+  at first**: the unit test used `contains`, and no server test used `start`. Both fixed.
+- **The MySQL fix (question 16) works through `SET VARIABLE` and `getvariable()`**: DuckDB
+  folds the variable at bind time, so `CALL mysql_execute(...)` receives SQL computed from
+  the upstream's `DESCRIBE`.
 
 ### From Phase 10q
 
@@ -2970,3 +2998,21 @@ Started by the user ("pls start 10q").
 
 **1072 Rust tests with every server up, twice, none skipped; 152 frontend; fmt and clippy
 clean.**
+
+### 2026-09-24 — Question 16 fixed; Phase 10r: ClickHouse
+
+The user: questions 16 and 17 as recommended, "start 10r, do not run CI for 10r"; earlier
+"Stop CI runs" (10q's run cancelled).
+
+- **Question 16**: a probe on both servers of `SET VARIABLE` + `mysql_execute` + a run-time
+  `ALTER ... MODIFY ... DATETIME(6)`; then `builders.rs`' `sink_mysql`, a builder test, and
+  `verified.rs`' timestamp test turned round (created tables keep fractions; an owner's
+  `DATETIME` is left alone). Two mutations each caught.
+- **10r**: a probe of ClickHouse 25.8's HTTP interface (types, parameters, a missing table, a
+  wrong password, an error after a 200, the deduplication token); `clickhouse.rs` with 9
+  tests; the sample; `verified.rs` 4 tests; ClickHouse in the test services (58123, 1 GB);
+  80 components. Six mutations, one missed and fixed.
+- The website: MariaDB and ClickHouse marked working (question 17, decision 71).
+
+**1086 Rust tests with every server up, twice, none skipped; 155 frontend.** Pushed with
+`[skip ci]`.

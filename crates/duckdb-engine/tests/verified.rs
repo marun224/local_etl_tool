@@ -2706,12 +2706,13 @@ fn mariadbs_own_types_are_read_as_their_values() {
     );
 }
 
-/// Found in 10q, on MySQL 8.4 as on MariaDB 11.8: a table the sink creates
-/// holds its timestamps as `DATETIME`, whole seconds, because DuckDB's mysql
-/// extension creates the column so; a table made beforehand with `DATETIME(6)`
-/// keeps the microseconds through an append. Pinned here so the documented
-/// behaviour is the tested one (open question 16 asks whether to change it).
-fn sub_second_timestamps_survive_only_a_datetime_6_column(variable: &str, label: &str) {
+/// Found in 10q, on MySQL 8.4 as on MariaDB 11.8: DuckDB's mysql extension
+/// creates a TIMESTAMP column as `DATETIME`, whole seconds, so a table the
+/// sink created dropped every fraction. Fixed in 10q (open question 16): a
+/// table the sink creates, by `overwrite` or by a first `append`, keeps the
+/// microseconds; a table its owner made keeps its own column types, even
+/// `DATETIME` without a fraction.
+fn sub_second_timestamps_survive_a_table_the_sink_creates(variable: &str, label: &str) {
     let Some(connection) = server(variable) else {
         return;
     };
@@ -2725,15 +2726,20 @@ fn sub_second_timestamps_survive_only_a_datetime_6_column(variable: &str, label:
     )
     .unwrap();
     let created = table(&format!("{label}_created"));
+    let appended = table(&format!("{label}_appended"));
     let prepared = table(&format!("{label}_prepared"));
+    let whole = table(&format!("{label}_whole"));
     on_server(
         &binary,
         &workspace,
         &connection,
         &[
             &format!("DROP TABLE IF EXISTS {created}"),
+            &format!("DROP TABLE IF EXISTS {appended}"),
             &format!("DROP TABLE IF EXISTS {prepared}"),
+            &format!("DROP TABLE IF EXISTS {whole}"),
             &format!("CREATE TABLE {prepared} (id BIGINT, stamp DATETIME(6))"),
+            &format!("CREATE TABLE {whole} (id BIGINT, stamp DATETIME)"),
         ],
     );
 
@@ -2768,11 +2774,30 @@ fn sub_second_timestamps_survive_only_a_datetime_6_column(variable: &str, label:
         )
     };
 
+    let fraction = r#"[{"stamp":"2026-09-24 10:00:00.123456"}]"#;
     write(&created, "overwrite");
+    assert_eq!(read(&created), fraction, "{label}: created by overwrite");
+    write(&created, "overwrite");
+    assert_eq!(read(&created), fraction, "{label}: replaced by overwrite");
+    write(&appended, "append");
+    write(&appended, "append");
+    read(&appended);
     assert_eq!(
-        read(&created),
+        query(
+            &binary,
+            &workspace,
+            &format!(
+                "SELECT count(*) AS n, count(DISTINCT stamp)::INTEGER AS d,                  min(stamp)::VARCHAR AS stamp FROM 'out/{appended}.parquet';"
+            ),
+        ),
+        r#"[{"n":2,"d":1,"stamp":"2026-09-24 10:00:00.123456"}]"#,
+        "{label}: created by the first append, kept by the second"
+    );
+    write(&whole, "append");
+    assert_eq!(
+        read(&whole),
         r#"[{"stamp":"2026-09-24 10:00:00"}]"#,
-        "{label}: created"
+        "{label}: the owner's DATETIME is left as the owner made it"
     );
     write(&prepared, "append");
     assert_eq!(
@@ -2783,13 +2808,13 @@ fn sub_second_timestamps_survive_only_a_datetime_6_column(variable: &str, label:
 }
 
 #[test]
-fn sub_second_timestamps_survive_only_a_datetime_6_column_on_mysql() {
-    sub_second_timestamps_survive_only_a_datetime_6_column("ETL_TEST_MYSQL", "mysql");
+fn sub_second_timestamps_survive_a_table_the_sink_creates_on_mysql() {
+    sub_second_timestamps_survive_a_table_the_sink_creates("ETL_TEST_MYSQL", "mysql");
 }
 
 #[test]
-fn sub_second_timestamps_survive_only_a_datetime_6_column_on_mariadb() {
-    sub_second_timestamps_survive_only_a_datetime_6_column("ETL_TEST_MARIADB", "mariadb");
+fn sub_second_timestamps_survive_a_table_the_sink_creates_on_mariadb() {
+    sub_second_timestamps_survive_a_table_the_sink_creates("ETL_TEST_MARIADB", "mariadb");
 }
 
 #[test]
@@ -2818,4 +2843,249 @@ fn a_wrong_mariadb_password_fails_and_is_masked() {
         .to_string();
     assert!(!error.contains("wrong-hunter2"), "{error}");
     assert!(error.contains("Access denied"), "{error}");
+}
+
+// ---------------------------------------------------------------------------
+// ClickHouse, incremental by a checkpoint (Phase 10r)
+// ---------------------------------------------------------------------------
+
+/// One statement to the test server's HTTP interface, as its test user.
+fn clickhouse_sql(url: &str, sql: &str) -> String {
+    let mut response = ureq::post(&format!("{url}/"))
+        .header("Authorization", "Basic ZXRsOmV0bC1zZWNyZXQ=") // etl:etl-secret
+        .send(sql.as_bytes())
+        .unwrap_or_else(|error| panic!("{sql}: {error}"));
+    response
+        .body_mut()
+        .read_to_string()
+        .unwrap()
+        .trim()
+        .to_string()
+}
+
+/// A database with empty `orders` and `large_orders` tables, dropped when dropped.
+struct ClickhouseDatabase {
+    url: String,
+    name: String,
+}
+
+impl ClickhouseDatabase {
+    fn new(url: &str, test: &str) -> Self {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .subsec_nanos();
+        let name = format!("etl_verified_{test}_{nanos}");
+        clickhouse_sql(url, &format!("CREATE DATABASE {name}"));
+        for table in ["orders", "large_orders"] {
+            clickhouse_sql(
+                url,
+                &format!(
+                    "CREATE TABLE {name}.{table} (order_id Int64, customer_id String, \
+                     order_ts DateTime64(6, 'UTC'), amount Decimal(10, 2), status String) \
+                     ENGINE = MergeTree ORDER BY order_id"
+                ),
+            );
+        }
+        ClickhouseDatabase {
+            url: url.to_string(),
+            name,
+        }
+    }
+
+    fn insert_orders(&self, orders: &[serde_json::Value]) {
+        use etl_plugin_sdk::Sink;
+        let rows: Vec<etl_plugin_sdk::Record> = orders
+            .iter()
+            .map(|order| order.as_object().unwrap().clone())
+            .collect();
+        etl_connectors::clickhouse::ClickhouseSink
+            .write(
+                &serde_json::json!({
+                    "url": self.url, "username": "etl", "password": "etl-secret",
+                    "database": self.name, "table": "orders",
+                }),
+                &mut etl_plugin_sdk::Records(rows.into_iter()),
+                &etl_plugin_sdk::Context::default(),
+            )
+            .expect("inserts");
+    }
+
+    fn count(&self, table: &str) -> u64 {
+        clickhouse_sql(
+            &self.url,
+            &format!("SELECT count() FROM {}.{table}", self.name),
+        )
+        .parse()
+        .unwrap()
+    }
+}
+
+impl Drop for ClickhouseDatabase {
+    fn drop(&mut self) {
+        let _ = std::panic::catch_unwind(|| {
+            clickhouse_sql(&self.url, &format!("DROP DATABASE IF EXISTS {}", self.name))
+        });
+    }
+}
+
+fn clickhouse_orders(
+    workspace: &Path,
+    url: &str,
+    database: &ClickhouseDatabase,
+    checkpoints: &BTreeMap<String, serde_json::Value>,
+    policy: Option<serde_json::Value>,
+) -> etl_duckdb_engine::Plan {
+    let text =
+        std::fs::read_to_string(repo_root().join("samples/pipelines/clickhouse_orders.json"))
+            .expect("the sample is committed");
+    let mut json: serde_json::Value = serde_json::from_str(&text).unwrap();
+    if let Some(policy) = policy {
+        json["nodes"][1]["data"]["policy"] = policy;
+    }
+    let resolver = Resolver::new(workspace)
+        .bind("clickhouse_url", url)
+        .bind("database", &database.name);
+    let resolved = resolve(&document(&json.to_string()), &resolver).expect("resolves");
+    compile_with(
+        &resolved.document,
+        &CompileOptions {
+            checkpoints: checkpoints.clone(),
+            ..CompileOptions::default()
+        },
+    )
+    .expect("compiles")
+}
+
+/// The sample, three runs: everything, nothing new, then only what arrived.
+fn the_clickhouse_sample_carries_on(name: &str, policy: Option<serde_json::Value>) {
+    let Some(url) = server("ETL_TEST_CLICKHOUSE") else {
+        return;
+    };
+    let Some((workspace, binary)) = workspace(name, &[]) else {
+        return;
+    };
+    let orders = sample_orders();
+    let database = ClickhouseDatabase::new(&url, name);
+    database.insert_orders(&orders[..10]);
+
+    let first = run(
+        &clickhouse_orders(
+            &workspace,
+            &url,
+            &database,
+            &BTreeMap::new(),
+            policy.clone(),
+        ),
+        &options(&workspace),
+    )
+    .expect("runs");
+    let put = rows(&first)[3].expect("the large orders were inserted");
+    assert_eq!(rows(&first)[0], Some(10));
+    assert_eq!(database.count("large_orders"), put);
+    let saved = positions(&first);
+    let highest = orders[..10]
+        .iter()
+        .map(|order| order["order_id"].as_i64().unwrap())
+        .max()
+        .unwrap();
+    assert_eq!(saved["read_orders"]["type"], "Int64", "{saved:?}");
+    assert_eq!(
+        saved["read_orders"]["value"],
+        highest.to_string(),
+        "{saved:?}"
+    );
+    assert_eq!(
+        query(
+            &binary,
+            &workspace,
+            "SELECT count(*) AS n, typeof(any_value(order_ts)) AS t, typeof(any_value(amount)) AS a \
+             FROM 'samples/out/clickhouse_large_orders.parquet';"
+        ),
+        format!(r#"[{{"n":{put},"t":"TIMESTAMP","a":"DECIMAL(10,2)"}}]"#)
+    );
+
+    let second = run(
+        &clickhouse_orders(&workspace, &url, &database, &saved, policy.clone()),
+        &options(&workspace),
+    )
+    .expect("runs");
+    assert_eq!(rows(&second), [Some(0), Some(0), Some(0), Some(0)]);
+    assert_eq!(
+        database.count("large_orders"),
+        put,
+        "nothing inserted twice"
+    );
+
+    database.insert_orders(&orders[10..]);
+    let third = run(
+        &clickhouse_orders(&workspace, &url, &database, &saved, policy),
+        &options(&workspace),
+    )
+    .expect("runs");
+    assert_eq!(rows(&third)[0], Some(2));
+}
+
+#[test]
+fn the_clickhouse_sample_carries_on_between_runs_on_the_one_script_path() {
+    the_clickhouse_sample_carries_on("clickhouse_script", None);
+}
+
+#[test]
+fn the_clickhouse_sample_carries_on_between_runs_on_the_session_path() {
+    the_clickhouse_sample_carries_on(
+        "clickhouse_session",
+        Some(serde_json::json!({ "retryAttempts": 1 })),
+    );
+}
+
+#[test]
+fn a_failed_clickhouse_run_saves_no_position_and_inserts_nothing() {
+    let Some(url) = server("ETL_TEST_CLICKHOUSE") else {
+        return;
+    };
+    let Some((workspace, _)) = workspace("clickhouse_failed", &[]) else {
+        return;
+    };
+    let database = ClickhouseDatabase::new(&url, "failed");
+    database.insert_orders(&sample_orders()[..6]);
+
+    let mut json: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(repo_root().join("samples/pipelines/clickhouse_orders.json"))
+            .unwrap(),
+    )
+    .unwrap();
+    json["nodes"][1]["data"]["properties"]["predicate"] = serde_json::json!("no_such_column > 1");
+    json["nodes"][1]["data"]["policy"] = serde_json::json!({ "continueOnFailure": true });
+    let resolver = Resolver::new(&workspace)
+        .bind("clickhouse_url", &url)
+        .bind("database", &database.name);
+    let resolved = resolve(&document(&json.to_string()), &resolver).expect("resolves");
+    let plan = compile_with(&resolved.document, &CompileOptions::default()).unwrap();
+
+    let report = run(&plan, &options(&workspace)).expect("a report, not an error");
+    assert!(report.failed());
+    assert_eq!(report.stages[0].rows, Some(6), "the source did read them");
+    assert!(report.checkpoints.is_empty(), "{:?}", report.checkpoints);
+    assert_eq!(database.count("large_orders"), 0);
+}
+
+#[test]
+fn previewing_a_clickhouse_source_reads_without_remembering() {
+    let Some(url) = server("ETL_TEST_CLICKHOUSE") else {
+        return;
+    };
+    let Some((workspace, _)) = workspace("clickhouse_preview", &[]) else {
+        return;
+    };
+    let database = ClickhouseDatabase::new(&url, "preview");
+    database.insert_orders(&sample_orders()[..9]);
+    let plan = clickhouse_orders(&workspace, &url, &database, &BTreeMap::new(), None);
+    let shown = preview(&plan, "read_orders", 50, &options(&workspace)).expect("previews");
+    assert_eq!(shown.rows.len(), 9);
+    assert_eq!(
+        database.count("large_orders"),
+        0,
+        "a preview inserts nothing"
+    );
 }

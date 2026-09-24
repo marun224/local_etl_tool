@@ -947,11 +947,58 @@ either.
   `DECIMAL` exact, `DATETIME(6)` to the microsecond.
 - **Writing** is `overwrite` (`CREATE OR REPLACE TABLE ... AS SELECT`) or `append` (the table
   made on first use, then `INSERT`).
-- **A table the sink creates keeps timestamps to the whole second.** The extension creates a
-  TIMESTAMP column as `DATETIME`, which MySQL and MariaDB store without fractions, so
-  `10:00:00.123456` lands as `10:00:00`, silently. Found in 10q on both servers, and true since
-  Phase 4. **To keep fractions, create the table yourself with `DATETIME(6)` and write with
-  `mode: append`**; an existing table's column types are kept. Whether the sink should create
-  `DATETIME(6)` itself is open question 16.
+- **A table the sink creates keeps timestamps to the microsecond** (since 10q). The
+  extension creates a TIMESTAMP column as `DATETIME`, whole seconds, which dropped every
+  fraction silently until 10q found it (true since Phase 4, on both servers). Now, when the
+  sink creates the table, by `overwrite` or by a first `append`, it creates it empty, has the
+  server widen each timestamp column to `DATETIME(6)` (the `ALTER` is written at run time from
+  the upstream's columns and sent with `mysql_execute`), and then inserts. **A table that was
+  already there keeps the types its owner gave it**, a `DATETIME` without fractions included.
+- A `TIMESTAMP WITH TIME ZONE` is written as this machine's local wall-clock time, as DuckDB
+  and the extension do; cast it to `TIMESTAMP` in UTC first to store UTC.
 - A wrong password fails naming MySQL's own refusal ("Access denied"), with the password
   masked.
+
+## `src.db.clickhouse` and `snk.db.clickhouse`
+
+Added in Phase 10r (2026-09-24), over ClickHouse's **HTTP interface** through `ureq` (the
+`clickhouse` crate wants a newer Rust than the project's). **Verified against ClickHouse 25.8
+itself.**
+
+**Where:** `url` (`http://host:8123`, or `https://...:8443`, trusting the bundled public
+roots), `username` (default `default`), `password` (a `${SECRET:...}`), `database`. Every
+request runs with the session time zone **UTC**. Reports and errors name the URL and the user,
+never the password; ClickHouse's own message (`Code: 60. DB::Exception: ... (UNKNOWN_TABLE)`)
+is kept, the version stripped.
+
+### Reading: `src.db.clickhouse`
+
+- **A `table`** (`table` or `database.table`) **or a `query`** (without its own `FORMAT`).
+  One request, answered as `JSONCompactEachRowWithNamesAndTypes` and **read a line at a time**,
+  so memory stays flat however large the result. `max_records` becomes a `LIMIT`.
+- **Values**: integers of 64 bits and wider come quoted and are made numbers by their type
+  where they fit, so an `Int128` or a `UInt256` beyond 64 bits stays exact text instead of a
+  rounded double; `Decimal` its exact text; `DateTime64` its text to its own precision;
+  `Nullable` null, `Array`, `Map` and `Tuple` JSON; `Enum` its name; `UUID` its text.
+- **An error part-way through a result fails the read.** ClickHouse has already said `200`
+  by then and writes the exception as a last row; the reader recognises it and fails with
+  its message rather than taking it for data.
+- **Only what is new**: `incremental_column` wraps the read as `SELECT * FROM (<read>) WHERE
+  col > {etl_after:<type>} ORDER BY col`, the last successful run's highest value a **query
+  parameter**, never pasted into the SQL; the first run starts at `start`, a SQL literal you
+  write (`toDateTime64('2026-01-01 00:00:00', 6)`, `1000`). Saved only when the whole run
+  succeeds; set aside, and said so, when the table, query or column changed. The column must
+  only go up. Choose one in the table's sorting key, or the wrapped query scans everything.
+
+### Writing: `snk.db.clickhouse`
+
+- **`INSERT INTO <table> FORMAT JSONEachRow`**, 100,000 rows or 16 MB a request; the table
+  must exist, and a row with a column it does not have fails, naming ClickHouse's reason. A
+  failure says how many rows were inserted before it.
+- **`mode: truncate`** runs `TRUNCATE TABLE` first; not one transaction with the inserts.
+- **Each batch carries an `insert_deduplication_token`**, so a batch sent twice is kept once,
+  **but only on a table that deduplicates inserts** (a `Replicated*` engine, or a MergeTree
+  with `non_replicated_deduplication_window`); on a plain MergeTree a retried batch is
+  inserted twice (seen in the probe). At-least-once otherwise.
+- **Like every native sink, it inserts only after a run that fully succeeded**, and never in
+  `preview`.

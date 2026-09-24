@@ -751,3 +751,24 @@ the fuller record. From Phase 10 on, a section is added at the end of each phase
 **Mistakes worth not repeating**
 - **Round-trip tests on coarse data hide precision loss**: include a value at the finest
   precision the type allows.
+
+## Question 16 and Phase 10r — ClickHouse (2026-09-24)
+
+**Concepts**
+- **Run-time SQL from a compiled plan**: DuckDB's `SET VARIABLE x = (query)` and
+  `getvariable('x')` let a statement fixed at compile time carry text computed at run time,
+  here an `ALTER` built from the upstream's columns.
+- **Streaming results over HTTP** mean the status is sent before the result is complete; an
+  error discovered later can only arrive in the body. A reader must look for it.
+- **Deduplication is a table property** in ClickHouse, not a request's: a token asks, the
+  engine decides.
+
+**Decisions and why**
+- **Fix the MySQL sink by widening only tables it creates**: never alter a table someone else
+  made.
+- **HTTP over a driver** for ClickHouse: fewer dependencies, one Rust version, and streaming
+  under our own control.
+
+**Mistakes worth not repeating**
+- **`contains` in a test of generated SQL** lets a wrong clause through; compare the whole
+  statement.

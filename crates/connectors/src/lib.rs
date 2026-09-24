@@ -18,6 +18,7 @@ use std::sync::OnceLock;
 
 mod aws;
 pub mod bigquery;
+pub mod clickhouse;
 #[cfg(test)]
 mod fixture;
 mod gcp;
@@ -66,6 +67,8 @@ pub fn all() -> &'static [(String, Connector)] {
             Connector::Sink(&bigquery::BigquerySink),
             Connector::Source(&snowflake::SnowflakeSource),
             Connector::Sink(&snowflake::SnowflakeSink),
+            Connector::Source(&clickhouse::ClickhouseSource),
+            Connector::Sink(&clickhouse::ClickhouseSink),
         ]
         .into_iter()
         .map(|connector| (connector.spec().id, connector))

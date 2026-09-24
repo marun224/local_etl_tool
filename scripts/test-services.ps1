@@ -4,7 +4,8 @@
     and MinIO (S3) from Phase 10c, Kafka from 10e, NATS from 10g, a Kinesis
     stand-in from 10h, an SQS stand-in from 10j, Google's Pub/Sub emulator
     from 10k, RabbitMQ from 10l, MongoDB from 10m and a BigQuery emulator from
-    10o and MariaDB from 10q, each in a throwaway container.
+    10o, MariaDB from 10q and ClickHouse from 10r, each in a throwaway
+    container.
 
 .DESCRIPTION
     The verification tests read these environment variables and skip each
@@ -50,6 +51,8 @@
                           engine's tests use to make queues and count them
       ETL_TEST_BIGQUERY   http://host:port of goccy's BigQuery emulator, project
                           etl-test; it checks no sign-in (10k's tests do)
+      ETL_TEST_CLICKHOUSE http://host:port of ClickHouse 25.8's HTTP interface,
+                          user etl / etl-secret
       ETL_TEST_MONGODB    mongodb://etl:etl-secret@host:port/?authSource=admin of
                           MongoDB 8.0
       ETL_TEST_MONGODB_TLS
@@ -85,7 +88,8 @@ $natsCreds = 'etl-test-nats-creds'
 $containers = @('etl-test-postgres', 'etl-test-mysql', 'etl-test-minio', 'etl-test-kafka',
     'etl-test-nats', 'etl-test-nats-users', 'etl-test-nats-token', 'etl-test-nats-tls',
     'etl-test-nats-creds', 'etl-test-kinesis', 'etl-test-sqs', 'etl-test-pubsub',
-    'etl-test-rabbitmq', 'etl-test-mongodb', 'etl-test-bigquery', 'etl-test-mariadb')
+    'etl-test-rabbitmq', 'etl-test-mongodb', 'etl-test-bigquery', 'etl-test-mariadb',
+    'etl-test-clickhouse')
 
 function Invoke-Docker {
     $output = & docker @args 2>&1
@@ -120,7 +124,7 @@ if ($LASTEXITCODE -ne 0) {
 Remove-Everything
 Invoke-Docker network create $network
 
-Write-Host 'Starting PostgreSQL, MySQL, MinIO, Kafka, NATS, Kinesis, SQS, Pub/Sub, RabbitMQ, MongoDB, BigQuery and MariaDB (the first run pulls the images)'
+Write-Host 'Starting PostgreSQL, MySQL, MinIO, Kafka, NATS, Kinesis, SQS, Pub/Sub, RabbitMQ, MongoDB, BigQuery, MariaDB and ClickHouse (the first run pulls the images)'
 
 Invoke-Docker run -d --name etl-test-postgres --network $network -p 55432:5432 `
     -e POSTGRES_PASSWORD=etl postgres:16
@@ -263,6 +267,11 @@ Invoke-Docker run -d --name etl-test-mongodb --network $network --memory 1g `
 Invoke-Docker run -d --name etl-test-bigquery --network $network --memory 1g `
     -p 59050:9050 ghcr.io/goccy/bigquery-emulator:0.8.1 --project=etl-test
 
+# ClickHouse 25.8, capped at 1 GB, over its HTTP interface (Phase 10r).
+Invoke-Docker run -d --name etl-test-clickhouse --network $network --memory 1g -p 58123:8123 `
+    -e CLICKHOUSE_USER=etl -e CLICKHOUSE_PASSWORD=etl-secret `
+    -e CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1 clickhouse:25.8
+
 function Wait-For([string] $what, [scriptblock] $probe, [int] $seconds = 180) {
     $deadline = (Get-Date).AddSeconds($seconds)
     while ((Get-Date) -lt $deadline) {
@@ -367,6 +376,13 @@ Wait-For 'BigQuery' {
     } catch { $global:LASTEXITCODE = 1 }
 }
 
+Wait-For 'ClickHouse' {
+    try {
+        Invoke-WebRequest -Uri 'http://127.0.0.1:58123/ping' -UseBasicParsing -TimeoutSec 5 | Out-Null
+        $global:LASTEXITCODE = 0
+    } catch { $global:LASTEXITCODE = 1 }
+}
+
 # The CA certificate, for the tests' `ca_cert`. Under target/, which git ignores.
 $caDirectory = Join-Path $PSScriptRoot '../target/test-services'
 New-Item -ItemType Directory -Force $caDirectory | Out-Null
@@ -400,6 +416,7 @@ $variables = [ordered]@{
     ETL_TEST_MONGODB        = 'mongodb://etl:etl-secret@127.0.0.1:57017/?authSource=admin'
     ETL_TEST_MONGODB_TLS    = 'mongodb://etl:etl-secret@127.0.0.1:57017/?authSource=admin&tls=true'
     ETL_TEST_BIGQUERY       = 'http://127.0.0.1:59050'
+    ETL_TEST_CLICKHOUSE     = 'http://127.0.0.1:58123'
 }
 
 if ($env:GITHUB_ENV) {

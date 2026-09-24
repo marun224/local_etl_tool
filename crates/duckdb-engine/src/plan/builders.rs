@@ -532,8 +532,72 @@ pub(crate) fn sink_postgres(node: &Lowering<'_>) -> Result<String, EngineError> 
     sink_database(node, "postgres")
 }
 
+/// Found in Phase 10q, on MySQL 8.4 and MariaDB 11.8 alike: DuckDB's mysql
+/// extension creates a TIMESTAMP column as `DATETIME`, whole seconds, so a
+/// table the sink created dropped every timestamp's fraction without a word.
+/// So when the sink creates the table, it creates it empty, has MySQL widen
+/// each timestamp column to `DATETIME(6)`, and then inserts. The `ALTER` is
+/// written by DuckDB at run time, from the upstream's own columns, and sent
+/// with `mysql_execute`; a table that was already there is left exactly as its
+/// owner made it (Open question 16, answered: fix it).
 pub(crate) fn sink_mysql(node: &Lowering<'_>) -> Result<String, EngineError> {
-    sink_database(node, "mysql")
+    let upstream = exactly_one_input(node)?;
+    let (attach, alias) = attach_database(node, "mysql", false)?;
+    let table = qualified_table(node, &alias)?;
+    let source = quote_identifier(&upstream);
+
+    let backticked = |name: &str| format!("`{}`", name.replace('`', "``"));
+    let name = required_str(node, "table")?;
+    let schema = optional_str(node, "schema")?;
+    let mysql_table = match schema {
+        Some(schema) => format!("{}.{}", backticked(schema), backticked(name)),
+        None => backticked(name),
+    };
+    let widen = |already_there: &str| {
+        format!(
+            "SET VARIABLE etl_fractions = (SELECT CASE WHEN {already_there} THEN 'DO 0' ELSE \
+             coalesce({} || string_agg('MODIFY `' || replace(column_name, '`', '``') || '` \
+             DATETIME(6)', ', '), 'DO 0') END FROM (DESCRIBE {source}) WHERE column_type LIKE \
+             'TIMESTAMP%');\n\
+             CALL mysql_execute({}, getvariable('etl_fractions'));\n\
+             CALL mysql_clear_cache();",
+            quote_literal(&format!("ALTER TABLE {mysql_table} ")),
+            quote_literal(&alias),
+        )
+    };
+
+    let write = match resolved_str(node, "mode")? {
+        "overwrite" => format!(
+            "CREATE OR REPLACE TABLE {table} AS SELECT * FROM {source} WHERE false;\n{}\n\
+             INSERT INTO {table} SELECT * FROM {source};",
+            widen("false")
+        ),
+        "append" => {
+            let mut there = format!(
+                "database_name = {} AND table_name = {}",
+                quote_literal(&alias),
+                quote_literal(name)
+            );
+            if let Some(schema) = schema {
+                there.push_str(&format!(" AND schema_name = {}", quote_literal(schema)));
+            }
+            format!(
+                "SET VARIABLE etl_existed = (SELECT count(*) > 0 FROM duckdb_tables() WHERE {there});\n\
+                 CREATE TABLE IF NOT EXISTS {table} AS SELECT * FROM {source} WHERE false;\n{}\n\
+                 INSERT INTO {table} SELECT * FROM {source};",
+                widen("getvariable('etl_existed')")
+            )
+        }
+        other => {
+            return Err(EngineError::InvalidProperty {
+                id: node.node_id.to_string(),
+                property: "mode".to_string(),
+                reason: format!("'{other}' is not a write mode; use overwrite or append"),
+            })
+        }
+    };
+
+    Ok(format!("{attach}\n{write}"))
 }
 
 pub(crate) fn sink_sqlite(node: &Lowering<'_>) -> Result<String, EngineError> {

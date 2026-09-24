@@ -491,5 +491,21 @@ Copy-Item samples\pipelines\orders_enriched.json samples\out\scratch\
   *Do:* with the services up, write a CSV with a timestamp like `10:00:00.123456` to MariaDB
   twice with `snk.db.mysql`: once letting the sink create the table, once into a table you
   created with `DATETIME(6)` (`mode: append`).
-  *Check:* read both back and explain the difference with `SHOW CREATE TABLE`. Which of open
-  question 16's options would you pick, and what would it cost the sink?
+  *Check:* since the fix (question 16), both keep the microseconds; `SHOW CREATE TABLE`
+  shows `datetime(6)` for the one the sink made. Now make a table with plain `DATETIME` and
+  append to it: why does the sink leave it alone?
+
+## Phase 10r — ClickHouse
+
+- [ ] **A64. Catch the late error.**
+  *Do:* read `SELECT number, throwIf(number = 50000, 'boom') FROM numbers(100000) SETTINGS
+  max_block_size = 1000` with `src.db.clickhouse`, then the same with `curl` against the HTTP
+  interface.
+  *Check:* `curl` shows status 200 and a last line holding the exception; the connector fails.
+  Which function in `clickhouse.rs` tells the two apart?
+
+- [ ] **A65. 🦀 Make deduplication real.**
+  *Do:* create a MergeTree table with `SETTINGS non_replicated_deduplication_window = 100`,
+  and send one batch twice with the same `insert_deduplication_token`.
+  *Check:* the second insert adds nothing; on a table without the setting it adds the rows
+  again. What does that mean for a retried batch in `snk.db.clickhouse`?

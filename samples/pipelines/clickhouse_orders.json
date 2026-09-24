@@ -1,0 +1,134 @@
+{
+  "formatVersion": 1,
+  "name": "clickhouse_orders",
+  "nodes": [
+    {
+      "id": "read_orders",
+      "type": "source",
+      "position": {
+        "x": 0.0,
+        "y": 0.0
+      },
+      "data": {
+        "label": "Orders table",
+        "componentId": "src.db.clickhouse",
+        "properties": {
+          "url": "${clickhouse_url}",
+          "username": "${clickhouse_user}",
+          "password": "${clickhouse_password}",
+          "database": "${database}",
+          "table": "orders",
+          "incremental_column": "order_id",
+          "columns": {
+            "order_id": "INTEGER",
+            "customer_id": "VARCHAR",
+            "order_ts": "TIMESTAMP",
+            "amount": "DECIMAL(10,2)",
+            "status": "VARCHAR"
+          }
+        },
+        "alias": "orders"
+      }
+    },
+    {
+      "id": "large_only",
+      "type": "transform",
+      "position": {
+        "x": 280.0,
+        "y": 0.0
+      },
+      "data": {
+        "label": "Over 100",
+        "componentId": "xf.filter",
+        "properties": {
+          "predicate": "amount > 100"
+        }
+      }
+    },
+    {
+      "id": "write_large",
+      "type": "sink",
+      "position": {
+        "x": 560.0,
+        "y": 0.0
+      },
+      "data": {
+        "label": "Large orders",
+        "componentId": "snk.file.parquet",
+        "properties": {
+          "path": "${workspace}/samples/out/clickhouse_large_orders.parquet",
+          "mode": "overwrite"
+        }
+      }
+    },
+    {
+      "id": "put_large",
+      "type": "sink",
+      "position": {
+        "x": 560.0,
+        "y": 160.0
+      },
+      "data": {
+        "label": "Large orders table",
+        "componentId": "snk.db.clickhouse",
+        "properties": {
+          "url": "${clickhouse_url}",
+          "username": "${clickhouse_user}",
+          "password": "${clickhouse_password}",
+          "database": "${database}",
+          "table": "large_orders",
+          "mode": "append"
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "source": "read_orders",
+      "target": "large_only",
+      "sourceHandle": "main",
+      "targetHandle": "in"
+    },
+    {
+      "id": "e2",
+      "source": "large_only",
+      "target": "write_large",
+      "sourceHandle": "main",
+      "targetHandle": "in"
+    },
+    {
+      "id": "e3",
+      "source": "large_only",
+      "target": "put_large",
+      "sourceHandle": "main",
+      "targetHandle": "in"
+    }
+  ],
+  "parameters": {
+    "clickhouse_url": {
+      "type": "string",
+      "required": true,
+      "default": "http://127.0.0.1:58123",
+      "description": "The HTTP interface. The committed default is the ClickHouse scripts/test-services.ps1 starts."
+    },
+    "clickhouse_user": {
+      "type": "string",
+      "required": false,
+      "default": "etl",
+      "description": "The user to sign in as."
+    },
+    "clickhouse_password": {
+      "type": "string",
+      "required": false,
+      "default": "etl-secret",
+      "description": "Test-only: the test server's password. For a real server, keep the password in a secret (etl secret set) and reference that instead."
+    },
+    "database": {
+      "type": "string",
+      "required": true,
+      "default": "default",
+      "description": "The database holding orders and large_orders, which must exist."
+    }
+  }
+}

@@ -1091,6 +1091,64 @@ fn a_database_sink_replaces_the_table_by_default_and_can_append() {
 }
 
 #[test]
+fn a_mysql_sink_widens_the_timestamps_of_a_table_it_creates() {
+    // Open question 16: the mysql extension creates DATETIME, whole seconds.
+    let replace = compile_two(
+        ("src.file.csv", json!({ "path": "in.csv" })),
+        (
+            "snk.db.mysql",
+            json!({ "connection": "host=h", "table": "orders" }),
+        ),
+    );
+    let sql = sql_of(&replace, "b");
+    assert!(
+        sql.contains(
+            "CREATE OR REPLACE TABLE \"b_db\".\"orders\" AS SELECT * FROM \"a\" WHERE false;"
+        ),
+        "{sql}"
+    );
+    assert!(
+        sql.contains("CASE WHEN false THEN 'DO 0'"),
+        "a new table is always widened: {sql}"
+    );
+    assert!(sql.contains("'ALTER TABLE `orders` '"), "{sql}");
+    assert!(sql.contains("DATETIME(6)"), "{sql}");
+    assert!(
+        sql.contains("FROM (DESCRIBE \"a\") WHERE column_type LIKE 'TIMESTAMP%'"),
+        "{sql}"
+    );
+    assert!(
+        sql.contains("CALL mysql_execute('b_db', getvariable('etl_fractions'));"),
+        "{sql}"
+    );
+    assert!(
+        sql.ends_with("INSERT INTO \"b_db\".\"orders\" SELECT * FROM \"a\";"),
+        "{sql}"
+    );
+
+    let append = compile_two(
+        ("src.file.csv", json!({ "path": "in.csv" })),
+        (
+            "snk.db.mysql",
+            json!({ "connection": "host=h", "schema": "sales", "table": "or`ders", "mode": "append" }),
+        ),
+    );
+    let sql = sql_of(&append, "b");
+    assert!(
+        sql.contains("SET VARIABLE etl_existed = (SELECT count(*) > 0 FROM duckdb_tables() WHERE database_name = 'b_db' AND table_name = 'or`ders' AND schema_name = 'sales');"),
+        "{sql}"
+    );
+    assert!(
+        sql.contains("CASE WHEN getvariable('etl_existed') THEN 'DO 0'"),
+        "an existing table is left alone: {sql}"
+    );
+    assert!(
+        sql.contains("'ALTER TABLE `sales`.`or``ders` '"),
+        "backticks doubled: {sql}"
+    );
+}
+
+#[test]
 fn a_database_sink_is_not_write_protected() {
     // READ_ONLY on a sink would fail at run time, well after the point where it
     // could be explained.

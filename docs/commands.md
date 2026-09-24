@@ -2377,3 +2377,23 @@ cargo test --workspace                     # twice (BigQuery restarted between):
 python docs_10q.py                         # connectors.md, plan, tracker (open question 16), learnings, A63
 ./scripts/test-services.ps1 -Stop
 ```
+
+## 2026-09-24 — CI stopped; question 16 fixed; Phase 10r: ClickHouse
+
+```bash
+gh run cancel 35984538505                  # the user: "Stop CI runs" (10q's run); 10p's showed cancelled artifact jobs
+# question 16: probe on mysql:8.4 and mariadb:11.8 of SET VARIABLE + mysql_execute + a run-time ALTER ... DATETIME(6)
+cargo test -p etl-duckdb-engine --lib a_mysql_sink
+cargo test -p etl-duckdb-engine --test verified -- mariadb mysql   # after a JSON line-break fix in one assertion: 6 of 6
+python mutate_16.py                        # 2 mutations, each caught
+docker run -d --rm --name etl-probe-ch --memory 1g -p 58123:8123 ... clickhouse:25.8
+python ch_probe.py (scratchpad)            # types, parameters, 404, 403, an error after a 200, dedup token on MergeTree
+cargo test -p etl-connectors --lib clickhouse::tests       # 9, first run
+cargo test -p etl-duckdb-engine --test verified clickhouse # 4
+python mutate_10r.py                       # 6; "not ordered" missed, tests tightened, then caught
+cargo fmt --all --check; cargo clippy ... -D warnings; etl components   # 80;  npm test  # 155
+./scripts/test-services.ps1; cargo test --workspace        # twice: 1086 and 1086, none skipped
+python docs_10r.py                         # connectors.md, plan, tracker (decisions 83-85), learnings, A64-A65
+./scripts/test-services.ps1 -Stop
+git commit ... "[skip ci]"; git push      # the user: no CI for 10r
+```

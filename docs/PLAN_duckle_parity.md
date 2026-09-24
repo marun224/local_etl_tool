@@ -2112,8 +2112,11 @@ MariaDB 11.8 unchanged, its own types included (`UUID`, `INET6`, `JSON`, `ENUM`,
 timestamp test run against it in `verified.rs`, set up through the extension's
 `mysql_execute`. **Found, on MySQL 8.4 as on MariaDB: a table `snk.db.mysql` creates holds
 timestamps as `DATETIME`, whole seconds**, because the extension creates the column so; a
-table made with `DATETIME(6)` keeps microseconds through `append`. Pinned by a test on both
-servers and documented; changing it is open question 16. `at` is a reserved word in DuckDB's
+table made with `DATETIME(6)` keeps microseconds through `append`. **Fixed the same day**
+(open question 16, answered "fix it"): a table the sink creates is created empty, widened to
+`DATETIME(6)` by an `ALTER` DuckDB writes at run time from the upstream's `DESCRIBE` (held in
+a `SET VARIABLE`, sent with `mysql_execute`), then filled; a table that was already there is
+left alone. Proved on both servers, with two mutations each caught. `at` is a reserved word in DuckDB's
 SQL too; the tests say `stamp`.
 
 ###### Phase 10r — ClickHouse
@@ -2137,6 +2140,20 @@ SQL too; the tests say `stamp`.
 password named; the sink round trip and a retried batch deduplicated. **84 components.**
 
 **Done.** ClickHouse both ways, semantics documented.
+
+**As built (2026-09-24).** Done as planned, with these differences:
+
+- **Reads use `JSONCompactEachRowWithNamesAndTypes`**, not `JSONEachRow`: the types line is
+  what makes wide integers exact and gives an incremental parameter its type.
+- **64-bit and wider integers are asked for quoted** (`output_format_json_quote_64bit_integers`)
+  and made numbers by type where they fit: unquoted, a 128-bit value arrived as a number no
+  `f64` can hold.
+- **An error after the first rows arrives with status 200** as a last row holding the
+  exception (the probe's `throwIf` at row 50,000); the reader recognises it and fails.
+- **The deduplication token is sent but is not a promise**: a plain MergeTree keeps a
+  retried batch twice (seen in the probe); `connectors.md` says which tables deduplicate.
+- **`max_records` is a `LIMIT`**, and `start` a SQL literal as for the warehouses.
+- **Pushed without CI** (`[skip ci]`), at the user's request.
 
 ###### Phase 10s — Cassandra
 
