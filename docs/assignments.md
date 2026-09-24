@@ -484,3 +484,12 @@ Copy-Item samples\pipelines\orders_enriched.json samples\out\scratch\
   and run it twice.
   *Check:* the second run reads nothing; `DESC USER` shows `RSA_PUBLIC_KEY_FP` equal to the
   JWT's `iss` suffix. This is the check the project still owes.
+
+## Phase 10q — MariaDB
+
+- [ ] **A63. Lose a microsecond, then keep it.**
+  *Do:* with the services up, write a CSV with a timestamp like `10:00:00.123456` to MariaDB
+  twice with `snk.db.mysql`: once letting the sink create the table, once into a table you
+  created with `DATETIME(6)` (`mode: append`).
+  *Check:* read both back and explain the difference with `SHOW CREATE TABLE`. Which of open
+  question 16's options would you pick, and what would it cost the sink?

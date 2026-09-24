@@ -3,6 +3,16 @@
 **State only.** Design lives in [PLAN_duckle_parity.md](PLAN_duckle_parity.md). Read this file
 first when picking the project back up.
 
+> ## ✅ Phase 10q (MariaDB) — built 2026-09-24, green locally
+>
+> **What 10q did:** proved MariaDB 11.8 through the existing MySQL components: no new
+> component. Round trip, MariaDB's own types, a masked wrong password. **Found a data-loss bug
+> on MySQL and MariaDB alike**: a table `snk.db.mysql` creates keeps timestamps to the whole
+> second (the DuckDB extension creates `DATETIME`); a `DATETIME(6)` table made beforehand keeps
+> microseconds. Pinned by tests, documented, **open question 16** asks whether to fix.
+> **78 components, 1072 Rust tests** (1062 on Linux) with every server up, twice, none
+> skipped; 152 frontend.
+>
 > ## ✅ Phase 10p (Snowflake) — built 2026-09-24, green locally
 >
 > **What 10p built:** `src.warehouse.snowflake` and `snk.warehouse.snowflake` over the SQL
@@ -127,8 +137,8 @@ first when picking the project back up.
 > minutes). Everything through 10l is committed and pushed; the plan for 10m–10u is not yet
 > committed.
 >
-> **Next:** **10q, MariaDB**, when the user says so: one connector each (MongoDB, BigQuery
-> and Snowflake done; MariaDB, ClickHouse, Cassandra, Neo4j, SQL Server),
+> **Next:** **10r, ClickHouse**, when the user says so: one connector each (MongoDB,
+> BigQuery, Snowflake and MariaDB done; ClickHouse, Cassandra, Neo4j, SQL Server),
 > planned 2026-09-24. **Redis (10n) is not built** (the user, 2026-09-24); Elasticsearch is
 > not built (memory); Oracle is deferred.
 > Open question 15 (SQL Server's memory) waits for 10u. **The website** (`b035bd9`,
@@ -167,14 +177,14 @@ first when picking the project back up.
 >
 > | Job | Checked locally by |
 > |---|---|
-> | `gate (windows)` — fmt, clippy, 1067 tests (servers skip), samples | running it, repeatedly |
-> | `gate (ubuntu)` — fmt, clippy, **1057 tests** with Postgres, MySQL, MinIO, Kafka (four listeners), NATS (five servers), kinesis-mock, ElasticMQ, the Pub/Sub emulator, RabbitMQ, MongoDB and the BigQuery emulator, samples | `cargo test` in `rust:1.96-slim-bookworm` |
+> | `gate (windows)` — fmt, clippy, 1072 tests (servers skip), samples | running it, repeatedly |
+> | `gate (ubuntu)` — fmt, clippy, **1062 tests** with Postgres, MySQL, MariaDB, MinIO, Kafka (four listeners), NATS (five servers), kinesis-mock, ElasticMQ, the Pub/Sub emulator, RabbitMQ, MongoDB and the BigQuery emulator, samples | `cargo test` in `rust:1.96-slim-bookworm` |
 > | `artifact (both)` — bake, run from elsewhere, run in a bare container | Phase 9b and 9c |
 > | `cross-build-script` — `build-runner.ps1`, ELF check, unbaked contract, no-op rerun | each assertion run by hand |
 > | `frontend` — 152 tests, typecheck, build | running it |
 >
 > **The Linux job excludes `apps/desktop`** (Tauri needs WebKitGTK and GTK to compile), so
-> **1057 + 10 desktop = 1067** is the arithmetic to check if either number moves. **CI fetches
+> **1062 + 10 desktop = 1072** is the arithmetic to check if either number moves. **CI fetches
 > only the extensions the tests load** (`DUCKDB_TEST_EXTENSIONS`, hyphen-separated because
 > `actions/cache` refuses a comma in a key). **CI cannot do the Windows-to-Linux cross-build**
 > (GitHub's Windows runners run no Linux containers), so it proves the output instead: a Linux
@@ -184,7 +194,7 @@ first when picking the project back up.
 >
 > ```powershell
 > ./scripts/test-services.ps1                                       # Postgres, MySQL, MinIO, Kafka, NATS, Kinesis, SQS, Pub/Sub, RabbitMQ, MongoDB, BigQuery in Docker
-> cargo test --workspace                                            # expect 1067 passing
+> cargo test --workspace                                            # expect 1072 passing
 > ./scripts/test-services.ps1 -Stop                                 # tidy up afterwards
 > npm --prefix frontend run test                                    # expect 152 passing
 > npm --prefix frontend run typecheck                               # expect clean
@@ -212,12 +222,12 @@ first when picking the project back up.
 
 ## Where things stand
 
-- **Next phase:** **10q, MariaDB**, planned in [PLAN_duckle_parity.md](PLAN_duckle_parity.md)
+- **Next phase:** **10r, ClickHouse**, planned in [PLAN_duckle_parity.md](PLAN_duckle_parity.md)
   under *Phases 10m–10u*. Each starts when the user says so. **10n (Redis) is not built**
   (decision 82).
-- **In progress:** nothing. **Phases 0–9, 10a–10m, 10o and 10p are done** (10a–10f on
-  2026-09-23, 10g–10p on 2026-09-24; CI green through 10o on run 35976507434; 10p green
-  locally).
+- **In progress:** nothing. **Phases 0–9, 10a–10m and 10o–10q are done** (10a–10f on
+  2026-09-23, 10g–10q on 2026-09-24; CI green through 10o on run 35976507434; 10p pushed,
+  its CI running; 10q green locally).
 - **Blocked on:** nothing.
 
 Phase 9 was split into 9a–9d on 2026-09-17 before starting, the same way 6 and 8 were:
@@ -240,7 +250,7 @@ pass), `ctl.throttle` (nothing to throttle until Phase 10 has a row cursor).
 **a scheduler that runs them**, and **a console to watch it from**. From the repo root:
 
 ```powershell
-cargo test --workspace        # 1067 tests: 323 engine, 281 connectors, 113 scheduler, 65 console, 51 e2e, 51 cli, 48 state, 39 verified, 26 runner, 23 secrets, 17 native e2e, 15 metadata, 10 desktop, 5 plugin-sdk
+cargo test --workspace        # 1072 tests: 323 engine, 281 connectors, 113 scheduler, 65 console, 51 e2e, 51 cli, 48 state, 44 verified, 26 runner, 23 secrets, 17 native e2e, 15 metadata, 10 desktop, 5 plugin-sdk
 .\target\debug\etl.exe run samples\pipelines\orders_enriched.json
 .\target\debug\etl.exe validate samples\pipelines\orders_enriched.json
 .\target\debug\etl.exe plan samples\pipelines\orders_enriched.json --script
@@ -701,7 +711,7 @@ fail the run. That is `ctl.fail`'s shape and it needs 6b's execution-model decis
 | 10n | — Redis | **not built** (the user's choice, decision 82) | 2026-09-24 |
 | 10o | — BigQuery | **done** (green in CI, run 35976507434; against the emulator; not checked against real Google Cloud) | 2026-09-24 |
 | 10p | — Snowflake | **done** (against the fixture only; not checked against real Snowflake) | 2026-09-24 |
-| 10q | — MariaDB (through the MySQL components) | planned | |
+| 10q | — MariaDB (through the MySQL components) | **done** (against MariaDB 11.8 itself; open question 16) | 2026-09-24 |
 | 10r | — ClickHouse | planned | |
 | 10s | — Cassandra | planned | |
 | 10t | — Neo4j | planned | |
@@ -981,6 +991,13 @@ recommended, except Elasticsearch, which is not built.
     planned (86 after 10u). Its design is kept in the plan.
 
 ## Open decisions
+
+16. **Sub-second timestamps in tables `snk.db.mysql` creates** (found in 10q, true since
+    Phase 4, on MySQL and MariaDB): the DuckDB extension creates `DATETIME`, so fractions are
+    dropped silently. (a) Fix it: the sink creates the table itself, from the upstream's
+    schema, with `DATETIME(6)` for timestamps, through `mysql_execute`, then appends
+    **(recommended: silent loss of precision is the worst kind of wrong)**; (b) refuse a
+    sub-second value when the sink would create the table; (c) leave it documented, as now.
 
 15. **SQL Server's test server** (before Phase 10u): it needs at least 2 GB of memory, more
     than decision 79's 1 GB cap that ruled out Elasticsearch. (a) defer it, as Elasticsearch;
@@ -1693,6 +1710,17 @@ ran*. Earlier ones were resolved 2026-09-16 (Settled decisions 5–8).
   `etl_metadata` while the crate built alone; `cargo clean -p` for two crates fixed it.
 - **Kinesis's signed client became `aws::JsonApi`** for SQS to share, proved by Kinesis's
   unchanged tests.
+
+### From Phase 10q
+
+- **A table `snk.db.mysql` creates drops sub-second timestamps**, on MySQL 8.4 as on MariaDB
+  11.8: the extension creates `DATETIME`. Phase 10c's round trip checked counts and totals of
+  minute-precision orders, so it could not see it. Pinned by a test on both servers;
+  open question 16.
+- **MariaDB's own types read cleanly** through the MySQL extension, and nothing else in the
+  MySQL path needed a change.
+- **`at` is reserved in DuckDB's SQL** as in the BigQuery emulator's; twice in one day. The
+  tests say `stamp`.
 
 ### From Phase 10p
 
@@ -2926,3 +2954,19 @@ Started by the user ("pls start 10p").
 
 **1067 Rust tests with every server up, twice, none skipped; 152 frontend; fmt and clippy
 clean; seven mutations each caught.** Not checked against real Snowflake.
+
+### 2026-09-24 — Phase 10q: MariaDB
+
+Started by the user ("pls start 10q").
+
+- A probe: `mariadb:11.8` read and written through DuckDB's mysql extension; its types read
+  cleanly; a table created by `CREATE TABLE ... AS SELECT` lost a timestamp's microseconds.
+  The same probe on `mysql:8.4` showed the same, and that a `DATETIME(6)` table keeps them.
+- `verified.rs` — `round_trip` takes a label; 5 tests (MariaDB's round trip, its types, a
+  masked wrong password, and the timestamp behaviour on MySQL and on MariaDB).
+- `scripts/test-services.ps1` — MariaDB 11.8 (53307, 1 GB); `gate.yml`'s note.
+- Docs: `connectors.md` (MySQL and MariaDB), the plan's as-built notes, `learnings.md`,
+  `assignments.md` (A63), open question 16.
+
+**1072 Rust tests with every server up, twice, none skipped; 152 frontend; fmt and clippy
+clean.**

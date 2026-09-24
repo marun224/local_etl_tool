@@ -933,3 +933,25 @@ defaults. `endpoint` replaces `https://<account>.snowflakecomputing.com` for a p
   says.
 - **Like every native sink, it inserts only after a run that fully succeeded**, and never in
   `preview`. At-least-once: a re-run inserts again.
+
+## Not native, but held to the same standard: `src.db.mysql` and `snk.db.mysql`, for MySQL and MariaDB
+
+These two are DuckDB components (the `mysql` extension, `ATTACH ... (TYPE mysql)`), not Rust
+ones; they are here because what they promise was found by running them. **Verified against
+MySQL 8.4 (Phase 10c) and MariaDB 11.8 (Phase 10q).** MariaDB needs no component of its own:
+the same `connection` string (`host=... port=... user=... passwd=... database=...`) reaches
+either.
+
+- **Reading** a MariaDB table gives its own types their natural values: `UUID` and `INET6`
+  their text, `JSON` its text, `ENUM` the label, `BIT(1)` a boolean, `YEAR` an integer,
+  `DECIMAL` exact, `DATETIME(6)` to the microsecond.
+- **Writing** is `overwrite` (`CREATE OR REPLACE TABLE ... AS SELECT`) or `append` (the table
+  made on first use, then `INSERT`).
+- **A table the sink creates keeps timestamps to the whole second.** The extension creates a
+  TIMESTAMP column as `DATETIME`, which MySQL and MariaDB store without fractions, so
+  `10:00:00.123456` lands as `10:00:00`, silently. Found in 10q on both servers, and true since
+  Phase 4. **To keep fractions, create the table yourself with `DATETIME(6)` and write with
+  `mode: append`**; an existing table's column types are kept. Whether the sink should create
+  `DATETIME(6)` itself is open question 16.
+- A wrong password fails naming MySQL's own refusal ("Access denied"), with the password
+  masked.

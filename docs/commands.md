@@ -2360,3 +2360,20 @@ cd frontend; npm test; npm run typecheck   # 152
 python docs_10p.py                         # connectors.md, plan, tracker, learnings, assignments (A61-A62)
 ./scripts/test-services.ps1 -Stop
 ```
+
+## 2026-09-24 — Phase 10q: MariaDB
+
+```bash
+docker run -d --rm --name etl-probe-mariadb -p 53307:3306 -e MARIADB_ROOT_PASSWORD=etl -e MARIADB_DATABASE=etl mariadb:11.8
+docker exec etl-probe-mariadb mariadb ... CREATE TABLE t (UUID, INET6, JSON, DECIMAL, DATETIME(6), BOOLEAN, ENUM, BIT, YEAR)
+duckdb < mariadb_probe.sql (scratchpad)    # every type reads; CREATE TABLE AS SELECT drops the microseconds
+docker run -d --rm --name etl-probe-mysql -p 53308:3306 ... mysql:8.4
+duckdb < ts_probe.sql (both servers)       # created: whole seconds; a DATETIME(6) table: microseconds kept
+./scripts/test-services.ps1                # now also etl-test-mariadb (53307, 1 GB)
+cargo test -p etl-duckdb-engine --test verified -- mariadb mysql postgres
+#   types and fraction tests failed: "at" is reserved in DuckDB's SQL; renamed stamp -> 6 of 6
+cargo fmt --all --check; cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace                     # twice (BigQuery restarted between): 1072 and 1072, none skipped
+python docs_10q.py                         # connectors.md, plan, tracker (open question 16), learnings, A63
+./scripts/test-services.ps1 -Stop
+```

@@ -293,11 +293,11 @@ fn csv_into(component_id: &str, properties: &str) -> PipelineDoc {
 
 /// A database round trip: write twice (overwrite, then append) and read back
 /// after each, through the components under test and nothing else.
-fn round_trip(kind: &str, extension: &str, connection: &str) {
-    let Some((workspace, binary)) = workspace(&format!("{kind}_round_trip"), &[extension]) else {
+fn round_trip(label: &str, kind: &str, extension: &str, connection: &str) {
+    let Some((workspace, binary)) = workspace(&format!("{label}_round_trip"), &[extension]) else {
         return;
     };
-    let name = table(kind);
+    let name = table(label);
     let connection = connection.replace('\\', "\\\\").replace('"', "\\\"");
     let options = options(&workspace);
 
@@ -341,7 +341,7 @@ fn round_trip(kind: &str, extension: &str, connection: &str) {
         "after append"
     );
 
-    let first_append = table(&format!("{kind}_fresh_append"));
+    let first_append = table(&format!("{label}_fresh_append"));
     let pipeline = csv_into(
         &format!("snk.db.{kind}"),
         &format!(
@@ -354,14 +354,14 @@ fn round_trip(kind: &str, extension: &str, connection: &str) {
 #[test]
 fn postgres_is_written_and_read_back_through_attach() {
     if let Some(connection) = server("ETL_TEST_POSTGRES") {
-        round_trip("postgres", "postgres_scanner", &connection);
+        round_trip("postgres", "postgres", "postgres_scanner", &connection);
     }
 }
 
 #[test]
 fn mysql_is_written_and_read_back_through_attach() {
     if let Some(connection) = server("ETL_TEST_MYSQL") {
-        round_trip("mysql", "mysql_scanner", &connection);
+        round_trip("mysql", "mysql", "mysql_scanner", &connection);
     }
 }
 
@@ -2628,4 +2628,194 @@ fn previewing_a_bigquery_source_reads_without_remembering() {
     let shown = preview(&plan, "read_orders", 50, &options(&workspace)).expect("previews");
     assert_eq!(shown.rows.len(), 9);
     assert_eq!(dataset.count("large_orders"), 0, "a preview loads nothing");
+}
+
+// ---------------------------------------------------------------------------
+// MariaDB, through the MySQL components (Phase 10q)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn mariadb_is_written_and_read_back_through_the_mysql_components() {
+    if let Some(connection) = server("ETL_TEST_MARIADB") {
+        round_trip("mariadb", "mysql", "mysql_scanner", &connection);
+    }
+}
+
+/// SQL straight to a MySQL-protocol server through DuckDB's mysql extension,
+/// for setting up what the components under test then read.
+fn on_server(binary: &Path, workspace: &Path, connection: &str, statements: &[&str]) {
+    let extensions = etl_duckdb_engine::exec::locate_extension_dir(&options(workspace))
+        .expect("the vendored extensions");
+    let mut sql = format!(
+        "SET extension_directory = '{}'; SET autoinstall_known_extensions = false; \
+         LOAD mysql_scanner; ATTACH '{connection}' AS server (TYPE mysql);",
+        slashed(&extensions)
+    );
+    for statement in statements {
+        sql.push_str(&format!(
+            " CALL mysql_execute('server', '{}');",
+            statement.replace('\'', "''")
+        ));
+    }
+    query(binary, workspace, &sql);
+}
+
+#[test]
+fn mariadbs_own_types_are_read_as_their_values() {
+    let Some(connection) = server("ETL_TEST_MARIADB") else {
+        return;
+    };
+    let Some((workspace, binary)) = workspace("mariadb_types", &["mysql_scanner"]) else {
+        return;
+    };
+    let name = table("mariadb_types");
+    on_server(
+        &binary,
+        &workspace,
+        &connection,
+        &[
+            &format!("DROP TABLE IF EXISTS {name}"),
+            &format!(
+                "CREATE TABLE {name} (id INT PRIMARY KEY, u UUID, ip INET6, doc JSON, \
+                 amount DECIMAL(10,2), stamp DATETIME(6), ok BOOLEAN, kind ENUM('a','b'), \
+                 flag BIT(1), yr YEAR)"
+            ),
+            &format!(
+                "INSERT INTO {name} VALUES (1, 'f47ac10b-58cc-4372-a567-0e02b2c3d479', '::1', \
+                 '{{\"a\": 1}}', 12.30, '2026-09-24 10:00:00.123456', TRUE, 'b', b'1', 2026)"
+            ),
+        ],
+    );
+
+    let connection_json = connection.replace('\\', "\\\\").replace('"', "\\\"");
+    let pipeline = to_parquet_at(
+        "src.db.mysql",
+        &format!(r#"{{ "connection": "{connection_json}", "table": "{name}" }}"#),
+        "out/types.parquet",
+    );
+    run(&compile(&pipeline).unwrap(), &options(&workspace)).expect("reads");
+    assert_eq!(
+        query(
+            &binary,
+            &workspace,
+            "SELECT u, ip, doc, amount::VARCHAR AS amount, stamp::VARCHAR AS stamp, ok, kind, flag, yr, \
+                    typeof(amount) AS amount_type, typeof(stamp) AS stamp_type \
+             FROM 'out/types.parquet';"
+        ),
+        r#"[{"u":"f47ac10b-58cc-4372-a567-0e02b2c3d479","ip":"::1","doc":"{\"a\": 1}","amount":"12.30","stamp":"2026-09-24 10:00:00.123456","ok":true,"kind":"b","flag":true,"yr":2026,"amount_type":"DECIMAL(10,2)","stamp_type":"TIMESTAMP"}]"#
+    );
+}
+
+/// Found in 10q, on MySQL 8.4 as on MariaDB 11.8: a table the sink creates
+/// holds its timestamps as `DATETIME`, whole seconds, because DuckDB's mysql
+/// extension creates the column so; a table made beforehand with `DATETIME(6)`
+/// keeps the microseconds through an append. Pinned here so the documented
+/// behaviour is the tested one (open question 16 asks whether to change it).
+fn sub_second_timestamps_survive_only_a_datetime_6_column(variable: &str, label: &str) {
+    let Some(connection) = server(variable) else {
+        return;
+    };
+    let Some((workspace, binary)) = workspace(&format!("{label}_fractions"), &["mysql_scanner"])
+    else {
+        return;
+    };
+    std::fs::write(
+        workspace.join("stamps.csv"),
+        "id,stamp\n1,2026-09-24 10:00:00.123456\n",
+    )
+    .unwrap();
+    let created = table(&format!("{label}_created"));
+    let prepared = table(&format!("{label}_prepared"));
+    on_server(
+        &binary,
+        &workspace,
+        &connection,
+        &[
+            &format!("DROP TABLE IF EXISTS {created}"),
+            &format!("DROP TABLE IF EXISTS {prepared}"),
+            &format!("CREATE TABLE {prepared} (id BIGINT, stamp DATETIME(6))"),
+        ],
+    );
+
+    let connection_json = connection.replace('\\', "\\\\").replace('"', "\\\"");
+    let options = options(&workspace);
+    let write = |name: &str, mode: &str| {
+        let pipeline = document(&format!(
+            r#"{{ "formatVersion": 1,
+              "nodes": [
+                {{ "id": "read", "position": {{"x":0,"y":0}}, "data": {{ "label": "CSV",
+                   "componentId": "src.file.csv", "properties": {{ "path": "stamps.csv" }} }} }},
+                {{ "id": "write", "position": {{"x":0,"y":0}}, "data": {{ "label": "Write",
+                   "componentId": "snk.db.mysql",
+                   "properties": {{ "connection": "{connection_json}", "table": "{name}", "mode": "{mode}" }} }} }}
+              ],
+              "edges": [ {{ "id": "e1", "source": "read", "target": "write" }} ] }}"#
+        ));
+        run(&compile(&pipeline).unwrap(), &options).expect("writes");
+    };
+    let read = |name: &str| {
+        let out = format!("out/{name}.parquet");
+        let pipeline = to_parquet_at(
+            "src.db.mysql",
+            &format!(r#"{{ "connection": "{connection_json}", "table": "{name}" }}"#),
+            &out,
+        );
+        run(&compile(&pipeline).unwrap(), &options).expect("reads");
+        query(
+            &binary,
+            &workspace,
+            &format!("SELECT stamp::VARCHAR AS stamp FROM '{out}';"),
+        )
+    };
+
+    write(&created, "overwrite");
+    assert_eq!(
+        read(&created),
+        r#"[{"stamp":"2026-09-24 10:00:00"}]"#,
+        "{label}: created"
+    );
+    write(&prepared, "append");
+    assert_eq!(
+        read(&prepared),
+        r#"[{"stamp":"2026-09-24 10:00:00.123456"}]"#,
+        "{label}: made with DATETIME(6)"
+    );
+}
+
+#[test]
+fn sub_second_timestamps_survive_only_a_datetime_6_column_on_mysql() {
+    sub_second_timestamps_survive_only_a_datetime_6_column("ETL_TEST_MYSQL", "mysql");
+}
+
+#[test]
+fn sub_second_timestamps_survive_only_a_datetime_6_column_on_mariadb() {
+    sub_second_timestamps_survive_only_a_datetime_6_column("ETL_TEST_MARIADB", "mariadb");
+}
+
+#[test]
+fn a_wrong_mariadb_password_fails_and_is_masked() {
+    let Some(connection) = server("ETL_TEST_MARIADB") else {
+        return;
+    };
+    let Some((workspace, _)) = workspace("mariadb_bad_password", &["mysql_scanner"]) else {
+        return;
+    };
+    let wrong = connection.replace("passwd=etl", "passwd=wrong-hunter2");
+    assert_ne!(
+        wrong, connection,
+        "the connection string should hold passwd=etl"
+    );
+    let pipeline = to_parquet(
+        "src.db.mysql",
+        &format!(r#"{{ "connection": "{wrong}", "table": "anything" }}"#),
+    );
+    let options = RunOptions {
+        redact: vec!["wrong-hunter2".to_string()],
+        ..options(&workspace)
+    };
+    let error = run(&compile(&pipeline).unwrap(), &options)
+        .unwrap_err()
+        .to_string();
+    assert!(!error.contains("wrong-hunter2"), "{error}");
+    assert!(error.contains("Access denied"), "{error}");
 }

@@ -4,7 +4,7 @@
     and MinIO (S3) from Phase 10c, Kafka from 10e, NATS from 10g, a Kinesis
     stand-in from 10h, an SQS stand-in from 10j, Google's Pub/Sub emulator
     from 10k, RabbitMQ from 10l, MongoDB from 10m and a BigQuery emulator from
-    10o, each in a throwaway container.
+    10o and MariaDB from 10q, each in a throwaway container.
 
 .DESCRIPTION
     The verification tests read these environment variables and skip each
@@ -12,6 +12,8 @@
 
       ETL_TEST_POSTGRES   a libpq connection string
       ETL_TEST_MYSQL      a MySQL connection string
+      ETL_TEST_MARIADB    the same for MariaDB 11.8, which the MySQL components
+                          read and write (Phase 10q)
       ETL_TEST_S3         http://host:port of an S3-compatible endpoint, with
                           the bucket `etl-test` already created and the
                           credentials etl-test / etl-test-secret
@@ -83,7 +85,7 @@ $natsCreds = 'etl-test-nats-creds'
 $containers = @('etl-test-postgres', 'etl-test-mysql', 'etl-test-minio', 'etl-test-kafka',
     'etl-test-nats', 'etl-test-nats-users', 'etl-test-nats-token', 'etl-test-nats-tls',
     'etl-test-nats-creds', 'etl-test-kinesis', 'etl-test-sqs', 'etl-test-pubsub',
-    'etl-test-rabbitmq', 'etl-test-mongodb', 'etl-test-bigquery')
+    'etl-test-rabbitmq', 'etl-test-mongodb', 'etl-test-bigquery', 'etl-test-mariadb')
 
 function Invoke-Docker {
     $output = & docker @args 2>&1
@@ -118,13 +120,17 @@ if ($LASTEXITCODE -ne 0) {
 Remove-Everything
 Invoke-Docker network create $network
 
-Write-Host 'Starting PostgreSQL, MySQL, MinIO, Kafka, NATS, Kinesis, SQS, Pub/Sub, RabbitMQ, MongoDB and BigQuery (the first run pulls the images)'
+Write-Host 'Starting PostgreSQL, MySQL, MinIO, Kafka, NATS, Kinesis, SQS, Pub/Sub, RabbitMQ, MongoDB, BigQuery and MariaDB (the first run pulls the images)'
 
 Invoke-Docker run -d --name etl-test-postgres --network $network -p 55432:5432 `
     -e POSTGRES_PASSWORD=etl postgres:16
 
 Invoke-Docker run -d --name etl-test-mysql --network $network -p 53306:3306 `
     -e MYSQL_ROOT_PASSWORD=etl -e MYSQL_DATABASE=etl mysql:8.4
+
+# MariaDB 11.8, capped at 1 GB, for the MySQL components (Phase 10q).
+Invoke-Docker run -d --name etl-test-mariadb --network $network --memory 1g -p 53307:3306 `
+    -e MARIADB_ROOT_PASSWORD=etl -e MARIADB_DATABASE=etl mariadb:11.8
 
 # From quay.io: MinIO no longer publishes to Docker Hub, where `minio/minio`
 # now answers "repository does not exist" (found 2026-09-23). Any
@@ -274,6 +280,7 @@ Wait-For 'PostgreSQL' { docker exec etl-test-postgres pg_isready -U postgres }
 # mysqladmin ping answers before the server accepts real queries during first
 # start-up, so the probe is a query.
 Wait-For 'MySQL' { docker exec etl-test-mysql mysql -uroot -petl -e 'SELECT 1' etl }
+Wait-For 'MariaDB' { docker exec etl-test-mariadb mariadb -uroot -petl -e 'SELECT 1' etl }
 
 # The bucket, made with MinIO's own client from a companion container on the
 # same network: DuckDB cannot create a bucket, and this works the same on
@@ -371,6 +378,7 @@ Invoke-Docker cp etl-test-nats-creds:/creds/etl.creds $natsCredsFile
 $variables = [ordered]@{
     ETL_TEST_POSTGRES = 'host=127.0.0.1 port=55432 user=postgres password=etl dbname=postgres'
     ETL_TEST_MYSQL    = 'host=127.0.0.1 port=53306 user=root passwd=etl database=etl'
+    ETL_TEST_MARIADB  = 'host=127.0.0.1 port=53307 user=root passwd=etl database=etl'
     ETL_TEST_S3       = 'http://127.0.0.1:59000'
     ETL_TEST_KAFKA    = '127.0.0.1:59092'
     ETL_TEST_KAFKA_SASL     = '127.0.0.1:59094'

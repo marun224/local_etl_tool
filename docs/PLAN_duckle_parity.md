@@ -2106,6 +2106,16 @@ fails. No new component unless the probe shows MariaDB needs one (then `src.db.m
 
 **Done.** MariaDB proven through the MySQL components, or given its own if it must be.
 
+**As built (2026-09-24).** No new component: `src.db.mysql` and `snk.db.mysql` read and write
+MariaDB 11.8 unchanged, its own types included (`UUID`, `INET6`, `JSON`, `ENUM`, `BIT`,
+`YEAR`, `DATETIME(6)`). The round trip, a types test, a masked wrong password and a
+timestamp test run against it in `verified.rs`, set up through the extension's
+`mysql_execute`. **Found, on MySQL 8.4 as on MariaDB: a table `snk.db.mysql` creates holds
+timestamps as `DATETIME`, whole seconds**, because the extension creates the column so; a
+table made with `DATETIME(6)` keeps microseconds through `append`. Pinned by a test on both
+servers and documented; changing it is open question 16. `at` is a reserved word in DuckDB's
+SQL too; the tests say `stamp`.
+
 ###### Phase 10r — ClickHouse
 
 **Files.** `crates/connectors/src/{clickhouse.rs, clickhouse/tests.rs}` over `http.rs` (the

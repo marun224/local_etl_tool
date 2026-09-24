@@ -134,8 +134,8 @@ jobs:
       # Phase 10c: PostgreSQL, MySQL and MinIO in containers, for
       # tests/verified.rs; since 10e a Kafka broker, since 10g five NATS servers and
       # since 10h kinesis-mock, since 10j ElasticMQ (SQS), since 10k the Pub/Sub
-      # emulator, since 10l RabbitMQ, since 10m MongoDB and since 10o a BigQuery
-      # emulator, for the streaming, queue, database and warehouse connectors'
+      # emulator, since 10l RabbitMQ, since 10m MongoDB, since 10o a BigQuery
+      # emulator and since 10q MariaDB, for the streaming, queue, database and warehouse connectors'
       # tests and samples. Linux only, because
       # Windows runners cannot run Linux containers; on Windows those tests
       # skip, and the lake ones still run.

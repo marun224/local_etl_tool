@@ -735,3 +735,19 @@ the fuller record. From Phase 10 on, a section is added at the end of each phase
 **Mistakes worth not repeating**
 - None new; the lesson of 10o (the server under test, or an independent tool, is the source
   of expected values) held.
+
+## Phase 10q — MariaDB (2026-09-24)
+
+**Concepts**
+- **Wire compatibility is not type compatibility**: MariaDB speaks MySQL's protocol, and its
+  own types (`UUID`, `INET6`) still have to be read to be trusted.
+- **`CREATE TABLE ... AS SELECT` lets the driver choose the column types**, and a driver's
+  default can be narrower than the data (`DATETIME` versus `DATETIME(6)`).
+
+**Decisions and why**
+- **Pin a known flaw with a test before deciding to fix it**: the documentation then cannot
+  drift from the behaviour, and a fix will announce itself by changing the test.
+
+**Mistakes worth not repeating**
+- **Round-trip tests on coarse data hide precision loss**: include a value at the finest
+  precision the type allows.
