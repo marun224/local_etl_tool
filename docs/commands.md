@@ -2342,3 +2342,21 @@ cargo test --workspace                     # twice, emulator restarted between: 
 python docs_10o.py                         # connectors.md, plan, tracker, learnings, assignments (A59-A60)
 ./scripts/test-services.ps1 -Stop
 ```
+
+## 2026-09-24 — Phase 10p: Snowflake
+
+```bash
+openssl version                            # OpenSSL 3.5.7 (Git for Windows)
+python (scratchpad): RFC 7515's JWK -> rfc_key.pem (PKCS#8)
+openssl rsa -in rfc_key.pem -pubout -outform DER | openssl dgst -sha256 -binary | openssl enc -base64
+#   b9E8JDWjYefFiM0X9V9a098Bd6ZsFyemogCEX016uIw=  -> the test's expected fingerprint
+cargo check -p etl-connectors --all-targets
+cargo test -p etl-connectors --lib snowflake::tests      # 12, first run
+python mutate_10p.py                       # 7 mutations, each caught, each reverted
+cargo build -p etl-cli; ./target/debug/etl validate samples/pipelines/snowflake_orders.json   # valid
+cargo fmt --all --check; cargo clippy --workspace --all-targets -- -D warnings
+cd frontend; npm test; npm run typecheck   # 152
+./scripts/test-services.ps1; cargo test --workspace      # twice (BigQuery restarted between): 1067 and 1067
+python docs_10p.py                         # connectors.md, plan, tracker, learnings, assignments (A61-A62)
+./scripts/test-services.ps1 -Stop
+```

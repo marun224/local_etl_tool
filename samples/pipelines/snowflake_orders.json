@@ -1,0 +1,150 @@
+{
+  "formatVersion": 1,
+  "name": "snowflake_orders",
+  "nodes": [
+    {
+      "id": "read_orders",
+      "type": "source",
+      "position": {
+        "x": 0.0,
+        "y": 0.0
+      },
+      "data": {
+        "label": "Orders table",
+        "componentId": "src.warehouse.snowflake",
+        "properties": {
+          "account": "${snowflake_account}",
+          "user": "${snowflake_user}",
+          "private_key_file": "${snowflake_key_file}",
+          "warehouse": "${snowflake_warehouse}",
+          "database": "${snowflake_database}",
+          "schema": "${snowflake_schema}",
+          "table": "orders",
+          "incremental_column": "order_id",
+          "columns": {
+            "ORDER_ID": "INTEGER",
+            "CUSTOMER_ID": "VARCHAR",
+            "ORDER_TS": "TIMESTAMP",
+            "AMOUNT": "DECIMAL(10,2)",
+            "STATUS": "VARCHAR"
+          }
+        },
+        "alias": "orders"
+      }
+    },
+    {
+      "id": "large_only",
+      "type": "transform",
+      "position": {
+        "x": 280.0,
+        "y": 0.0
+      },
+      "data": {
+        "label": "Over 100",
+        "componentId": "xf.filter",
+        "properties": {
+          "predicate": "AMOUNT > 100"
+        }
+      }
+    },
+    {
+      "id": "write_large",
+      "type": "sink",
+      "position": {
+        "x": 560.0,
+        "y": 0.0
+      },
+      "data": {
+        "label": "Large orders",
+        "componentId": "snk.file.parquet",
+        "properties": {
+          "path": "${workspace}/samples/out/snowflake_large_orders.parquet",
+          "mode": "overwrite"
+        }
+      }
+    },
+    {
+      "id": "put_large",
+      "type": "sink",
+      "position": {
+        "x": 560.0,
+        "y": 160.0
+      },
+      "data": {
+        "label": "Large orders table",
+        "componentId": "snk.warehouse.snowflake",
+        "properties": {
+          "account": "${snowflake_account}",
+          "user": "${snowflake_user}",
+          "private_key_file": "${snowflake_key_file}",
+          "warehouse": "${snowflake_warehouse}",
+          "database": "${snowflake_database}",
+          "schema": "${snowflake_schema}",
+          "table": "large_orders",
+          "mode": "append"
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "source": "read_orders",
+      "target": "large_only",
+      "sourceHandle": "main",
+      "targetHandle": "in"
+    },
+    {
+      "id": "e2",
+      "source": "large_only",
+      "target": "write_large",
+      "sourceHandle": "main",
+      "targetHandle": "in"
+    },
+    {
+      "id": "e3",
+      "source": "large_only",
+      "target": "put_large",
+      "sourceHandle": "main",
+      "targetHandle": "in"
+    }
+  ],
+  "parameters": {
+    "snowflake_account": {
+      "type": "string",
+      "required": true,
+      "default": "myorg-myaccount",
+      "description": "The account identifier. No Snowflake runs in this project's tests: this sample is for a real account, and is not yet checked against one."
+    },
+    "snowflake_user": {
+      "type": "string",
+      "required": true,
+      "default": "ETL_LOADER",
+      "description": "The user whose public key is registered with ALTER USER ... SET RSA_PUBLIC_KEY."
+    },
+    "snowflake_key_file": {
+      "type": "string",
+      "required": true,
+      "default": "keys/snowflake_rsa_key.p8",
+      "description": "The user's private key, PKCS#8 PEM, unencrypted, relative to the workspace. Keep it out of the repository."
+    },
+    "snowflake_warehouse": {
+      "type": "string",
+      "required": true,
+      "default": "LOAD_WH",
+      "description": "The warehouse that runs the statements."
+    },
+    "snowflake_database": {
+      "type": "string",
+      "required": true,
+      "default": "SALES",
+      "description": "The database holding ORDERS and LARGE_ORDERS."
+    },
+    "snowflake_schema": {
+      "type": "string",
+      "required": true,
+      "default": "PUBLIC",
+      "description": "The schema holding them."
+    }
+  }
+}

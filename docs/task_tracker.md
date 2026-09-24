@@ -3,7 +3,16 @@
 **State only.** Design lives in [PLAN_duckle_parity.md](PLAN_duckle_parity.md). Read this file
 first when picking the project back up.
 
-> ## ✅ Phase 10o (BigQuery) — built 2026-09-24, green locally with every server up
+> ## ✅ Phase 10p (Snowflake) — built 2026-09-24, green locally
+>
+> **What 10p built:** `src.warehouse.snowflake` and `snk.warehouse.snowflake` over the SQL
+> API: key-pair sign-in (a JWT naming the key's fingerprint, **proved equal to `openssl`'s**),
+> statements polled and read by partition, rows typed by `rowType`, incremental by a
+> **bind variable**, and batched bound `INSERT`s. **78 components, 1067 Rust tests** (1057 on
+> Linux) with every server up, twice, none skipped; **152 frontend**; seven mutations each
+> caught. **Not checked against real Snowflake**: no emulator exists and no account is used.
+>
+> ## ✅ Phase 10o (BigQuery) — `8bab325`, green in CI (run 35976507434)
 >
 > **What 10o built:** `src.warehouse.bigquery` (a table or a query as one query job, polled
 > and paged; rows typed by the result's schema, timestamps exact to the microsecond;
@@ -118,14 +127,14 @@ first when picking the project back up.
 > minutes). Everything through 10l is committed and pushed; the plan for 10m–10u is not yet
 > committed.
 >
-> **Next:** **10p, Snowflake**, when the user says so: one connector each (MongoDB and
-> BigQuery done; Snowflake, MariaDB, ClickHouse, Cassandra, Neo4j, SQL Server),
+> **Next:** **10q, MariaDB**, when the user says so: one connector each (MongoDB, BigQuery
+> and Snowflake done; MariaDB, ClickHouse, Cassandra, Neo4j, SQL Server),
 > planned 2026-09-24. **Redis (10n) is not built** (the user, 2026-09-24); Elasticsearch is
 > not built (memory); Oracle is deferred.
 > Open question 15 (SQL Server's memory) waits for 10u. **The website** (`b035bd9`,
 > pushed) shows 18 of 50 connectors working, MongoDB the latest (both ways); its roadmap
-> names BigQuery and Snowflake as next. BigQuery stays off the working list until read
-> against real Google Cloud (decision 78). Kinesis, SQS and Pub/Sub stay off it until
+> names BigQuery and Snowflake as next. BigQuery and Snowflake stay off the working list
+> until read against the real services (decision 78). Kinesis, SQS and Pub/Sub stay off it until
 > read against the real services. The live site still needs a redeploy.
 >
 > **10d, for the record:** `src.saas.graphql` and `snk.saas.graphql`, the shared `http.rs`,
@@ -158,14 +167,14 @@ first when picking the project back up.
 >
 > | Job | Checked locally by |
 > |---|---|
-> | `gate (windows)` — fmt, clippy, 1055 tests (servers skip), samples | running it, repeatedly |
-> | `gate (ubuntu)` — fmt, clippy, **1045 tests** with Postgres, MySQL, MinIO, Kafka (four listeners), NATS (five servers), kinesis-mock, ElasticMQ, the Pub/Sub emulator, RabbitMQ, MongoDB and the BigQuery emulator, samples | `cargo test` in `rust:1.96-slim-bookworm` |
+> | `gate (windows)` — fmt, clippy, 1067 tests (servers skip), samples | running it, repeatedly |
+> | `gate (ubuntu)` — fmt, clippy, **1057 tests** with Postgres, MySQL, MinIO, Kafka (four listeners), NATS (five servers), kinesis-mock, ElasticMQ, the Pub/Sub emulator, RabbitMQ, MongoDB and the BigQuery emulator, samples | `cargo test` in `rust:1.96-slim-bookworm` |
 > | `artifact (both)` — bake, run from elsewhere, run in a bare container | Phase 9b and 9c |
 > | `cross-build-script` — `build-runner.ps1`, ELF check, unbaked contract, no-op rerun | each assertion run by hand |
-> | `frontend` — 149 tests, typecheck, build | running it |
+> | `frontend` — 152 tests, typecheck, build | running it |
 >
 > **The Linux job excludes `apps/desktop`** (Tauri needs WebKitGTK and GTK to compile), so
-> **1045 + 10 desktop = 1055** is the arithmetic to check if either number moves. **CI fetches
+> **1057 + 10 desktop = 1067** is the arithmetic to check if either number moves. **CI fetches
 > only the extensions the tests load** (`DUCKDB_TEST_EXTENSIONS`, hyphen-separated because
 > `actions/cache` refuses a comma in a key). **CI cannot do the Windows-to-Linux cross-build**
 > (GitHub's Windows runners run no Linux containers), so it proves the output instead: a Linux
@@ -175,12 +184,12 @@ first when picking the project back up.
 >
 > ```powershell
 > ./scripts/test-services.ps1                                       # Postgres, MySQL, MinIO, Kafka, NATS, Kinesis, SQS, Pub/Sub, RabbitMQ, MongoDB, BigQuery in Docker
-> cargo test --workspace                                            # expect 1055 passing
+> cargo test --workspace                                            # expect 1067 passing
 > ./scripts/test-services.ps1 -Stop                                 # tidy up afterwards
-> npm --prefix frontend run test                                    # expect 149 passing
+> npm --prefix frontend run test                                    # expect 152 passing
 > npm --prefix frontend run typecheck                               # expect clean
 > npm --prefix frontend run build                                   # expect clean
-> .\target\debug\etl.exe components                                 # expect 76
+> .\target\debug\etl.exe components                                 # expect 78
 > .\target\debug\etl.exe run samples\pipelines\orders_enriched.json # expect 12/5/7/6/6
 > .\target\debug\etl.exe run samples\pipelines\orders_checked.json  # expect 12/10+2/9+1/9/2/1
 > .\target\debug\etl.exe run samples\pipelines\orders_guarded.json  # expect 12 through, branch taken
@@ -203,11 +212,12 @@ first when picking the project back up.
 
 ## Where things stand
 
-- **Next phase:** **10p, Snowflake**, planned in [PLAN_duckle_parity.md](PLAN_duckle_parity.md)
+- **Next phase:** **10q, MariaDB**, planned in [PLAN_duckle_parity.md](PLAN_duckle_parity.md)
   under *Phases 10m–10u*. Each starts when the user says so. **10n (Redis) is not built**
   (decision 82).
-- **In progress:** nothing. **Phases 0–9, 10a–10m and 10o are done** (10a–10f on 2026-09-23,
-  10g–10o on 2026-09-24; CI green through 10m on run 35972853098; 10o green locally).
+- **In progress:** nothing. **Phases 0–9, 10a–10m, 10o and 10p are done** (10a–10f on
+  2026-09-23, 10g–10p on 2026-09-24; CI green through 10o on run 35976507434; 10p green
+  locally).
 - **Blocked on:** nothing.
 
 Phase 9 was split into 9a–9d on 2026-09-17 before starting, the same way 6 and 8 were:
@@ -230,7 +240,7 @@ pass), `ctl.throttle` (nothing to throttle until Phase 10 has a row cursor).
 **a scheduler that runs them**, and **a console to watch it from**. From the repo root:
 
 ```powershell
-cargo test --workspace        # 1055 tests: 323 engine, 269 connectors, 113 scheduler, 65 console, 51 e2e, 51 cli, 48 state, 39 verified, 26 runner, 23 secrets, 17 native e2e, 15 metadata, 10 desktop, 5 plugin-sdk
+cargo test --workspace        # 1067 tests: 323 engine, 281 connectors, 113 scheduler, 65 console, 51 e2e, 51 cli, 48 state, 39 verified, 26 runner, 23 secrets, 17 native e2e, 15 metadata, 10 desktop, 5 plugin-sdk
 .\target\debug\etl.exe run samples\pipelines\orders_enriched.json
 .\target\debug\etl.exe validate samples\pipelines\orders_enriched.json
 .\target\debug\etl.exe plan samples\pipelines\orders_enriched.json --script
@@ -282,27 +292,28 @@ exists — writing the report only if one does. `plan.needs_session()` decides t
 because they read something that never got created, and the failures. The exit code is 3 either
 way. Getting the report back is the entire point of asking a run to continue.
 
-**Seventy-six components exist.** Sources: `src.cloud.http`, `src.cloud.s3`, `src.db.mongodb`, `src.db.mysql`,
+**Seventy-eight components exist.** Sources: `src.cloud.http`, `src.cloud.s3`, `src.db.mongodb`, `src.db.mysql`,
 `src.db.postgres`, `src.db.sqlite`, `src.file.csv`, `src.file.excel`, `src.file.json`,
 `src.file.jsonl`, `src.file.parquet`, `src.file.xml`, `src.lake.delta`, `src.lake.iceberg`,
-`src.queue.pubsub`, `src.queue.rabbitmq`, `src.queue.sqs`, `src.saas.graphql`, `src.saas.rest`, `src.stream.kafka`, `src.stream.kinesis`, `src.stream.nats`, `src.warehouse.bigquery`. Transforms:
+`src.queue.pubsub`, `src.queue.rabbitmq`, `src.queue.sqs`, `src.saas.graphql`, `src.saas.rest`, `src.stream.kafka`, `src.stream.kinesis`, `src.stream.nats`, `src.warehouse.bigquery`, `src.warehouse.snowflake`. Transforms:
 `xf.aggregate`, `xf.cast`, `xf.dedup`, `xf.derive`, `xf.distinct`, `xf.except`,
 `xf.filter`, `xf.intersect`, `xf.join`, `xf.limit`,
 `xf.pivot`, `xf.rename`, `xf.sample`, `xf.select`, `xf.sort`, `xf.sql`, `xf.union`,
 `xf.unpivot`, `xf.window`. Sinks: `snk.cloud.s3`, `snk.db.mongodb`, `snk.db.mysql`, `snk.db.postgres`,
 `snk.db.sqlite`, `snk.file.csv`, `snk.file.excel`, `snk.file.json`, `snk.file.jsonl`,
-`snk.file.parquet`, `snk.file.xml`, `snk.queue.pubsub`, `snk.queue.rabbitmq`, `snk.queue.sqs`, `snk.saas.graphql`, `snk.saas.rest`, `snk.stream.kafka`, `snk.stream.kinesis`, `snk.stream.nats`, `snk.warehouse.bigquery`. Quality: `qa.accepted_values`, `qa.expression`, `qa.not_null`, `qa.range`,
+`snk.file.parquet`, `snk.file.xml`, `snk.queue.pubsub`, `snk.queue.rabbitmq`, `snk.queue.sqs`, `snk.saas.graphql`, `snk.saas.rest`, `snk.stream.kafka`, `snk.stream.kinesis`, `snk.stream.nats`, `snk.warehouse.bigquery`, `snk.warehouse.snowflake`. Quality: `qa.accepted_values`, `qa.expression`, `qa.not_null`, `qa.range`,
 `qa.referential`, `qa.regex`, `qa.unique`. Quality assertions, which fail the run rather than
 partitioning rows and so have no reject port: `qa.row_count`, `qa.schema_match`. Control:
 `ctl.branch`, `ctl.fail`, `ctl.log`, `ctl.sequence`, `ctl.wait`. Everything else in the six
 namespaces compiles to `UnsupportedComponent`, by design.
 
-**Twenty-two of them are written in Rust, not lowered to DuckDB alone** (the list below,
+**Twenty-four of them are written in Rust, not lowered to DuckDB alone** (the list below,
 `src.stream.kinesis` and `snk.stream.kinesis` from 10h and 10i, `src.queue.sqs` and
 `snk.queue.sqs` from 10j, the first that hold messages until the run's outcome,
 `src.queue.pubsub` and `snk.queue.pubsub` from 10k, and `src.queue.rabbitmq` and
 `snk.queue.rabbitmq` from 10l, and `src.db.mongodb` and `snk.db.mongodb` from 10m, and `src.warehouse.bigquery` and
-`snk.warehouse.bigquery` from 10o). `src.file.xml` and
+`snk.warehouse.bigquery` from 10o, and `src.warehouse.snowflake` and
+`snk.warehouse.snowflake` from 10p). `src.file.xml` and
 `snk.file.xml` (Phase 10a), `src.saas.rest` and `snk.saas.rest` (Phase 10b),
 `src.saas.graphql` and `snk.saas.graphql` (Phase 10d), `src.stream.kafka` (10e),
 `snk.stream.kafka` (10f), and `src.stream.nats` and `snk.stream.nats` (10g) are the *native*
@@ -688,8 +699,8 @@ fail the run. That is `ctl.fail`'s shape and it needs 6b's execution-model decis
 | 10l | — RabbitMQ | **done** (`44d1aaa`; against RabbitMQ 4.3 itself) | 2026-09-24 |
 | 10m | — MongoDB | **done** (green in CI, run 35972853098; against MongoDB 8.0 itself) | 2026-09-24 |
 | 10n | — Redis | **not built** (the user's choice, decision 82) | 2026-09-24 |
-| 10o | — BigQuery | **done** (against the emulator; not checked against real Google Cloud) | 2026-09-24 |
-| 10p | — Snowflake | planned (fixture only) | |
+| 10o | — BigQuery | **done** (green in CI, run 35976507434; against the emulator; not checked against real Google Cloud) | 2026-09-24 |
+| 10p | — Snowflake | **done** (against the fixture only; not checked against real Snowflake) | 2026-09-24 |
 | 10q | — MariaDB (through the MySQL components) | planned | |
 | 10r | — ClickHouse | planned | |
 | 10s | — Cassandra | planned | |
@@ -1682,6 +1693,15 @@ ran*. Earlier ones were resolved 2026-09-16 (Settled decisions 5–8).
   `etl_metadata` while the crate built alone; `cargo clean -p` for two crates fixed it.
 - **Kinesis's signed client became `aws::JsonApi`** for SQS to share, proved by Kinesis's
   unchanged tests.
+
+### From Phase 10p
+
+- **Every Snowflake test passed at its first run**, and the fingerprint matched `openssl`'s
+  at the first attempt: the SPKI around `ring`'s public key was written from the DER rules,
+  and `openssl` was the independent check.
+- **No server, so the proof is narrower**: the fixture checks what is sent and how answers
+  are read, not that Snowflake accepts it. The first real run is owed before the website can
+  list Snowflake.
 
 ### From Phase 10o
 
@@ -2889,3 +2909,20 @@ the same session dropped 10n (Redis) from the plan at the user's request.
 
 **1055 Rust tests with every server up, twice, none skipped; 149 frontend; fmt and clippy
 clean; seven mutations each caught.**
+
+### 2026-09-24 — Phase 10p: Snowflake
+
+Started by the user ("pls start 10p").
+
+- `openssl` (Git for Windows' 3.5.7) computed RFC 7515's key's fingerprint the way
+  Snowflake's documentation does, as the test's expected value.
+- `crates/connectors` — `snowflake.rs` (`src.warehouse.snowflake`,
+  `snk.warehouse.snowflake`) with 12 tests against the fixture; `bigquery::fingerprint` made
+  crate-visible; `gcp::tests::rfc_key_pem` for other tests.
+- `samples/pipelines/snowflake_orders.json` (for a real account; `etl validate` passes);
+  `gate.yml` — 78 components; the registry test. No test service: none exists.
+- Docs: `connectors.md` (Snowflake), the plan's as-built notes, `learnings.md`,
+  `assignments.md` (A61-A62).
+
+**1067 Rust tests with every server up, twice, none skipped; 152 frontend; fmt and clippy
+clean; seven mutations each caught.** Not checked against real Snowflake.

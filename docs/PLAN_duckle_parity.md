@@ -1915,7 +1915,7 @@ so. Oracle is deferred (decision 80).
 | Phase | Connector | Components | Test server | Checked against |
 |---|---|---|---|---|
 | 10m | MongoDB | `src.db.mongodb`, `snk.db.mongodb` | `mongo:8.0` (315 MB) | MongoDB itself |
-| ~~10n~~ | ~~Redis~~ | **not built** (decision 82) | | |
+| 10n | Redis | `src.db.redis`, `snk.db.redis`, `src.stream.redis`, `snk.stream.redis` | `redis:8.2-alpine` (28 MB) | Redis itself |
 | 10o | BigQuery | `src.warehouse.bigquery`, `snk.warehouse.bigquery` | `goccy/bigquery-emulator` | the emulator; not real Google Cloud |
 | 10p | Snowflake | `src.warehouse.snowflake`, `snk.warehouse.snowflake` | none exists: the local fixture | the fixture; not real Snowflake |
 | 10q | MariaDB | none new: `src.db.mysql` and `snk.db.mysql` | `mariadb:11.8` (104 MB) | MariaDB itself |
@@ -1924,7 +1924,7 @@ so. Oracle is deferred (decision 80).
 | 10t | Neo4j | `src.db.neo4j`, `snk.db.neo4j` | `neo4j` 2026.08 (402 MB), heap capped | Neo4j itself |
 | 10u | SQL Server | `src.db.sqlserver`, `snk.db.sqlserver` | Microsoft's image, **needs 2 GB** | **open question 15** before it starts |
 
-Components: 72 before 10m; 74 after it; then 76, 78, 78, 80, 82, 84, and 86 after 10u.
+Components: 72 now; 74, 78, 80, 82, 82, 84, 86, 88, and 90 after 10u.
 
 ###### What every one of these shares
 
@@ -1989,29 +1989,38 @@ nothing. The sample on both transports and `preview`. **74 components.**
 
 **Done.** MongoDB both ways, incremental, plain and TLS, semantics documented.
 
-**As built (2026-09-24).** Done as planned, with these differences:
+###### Phase 10n — Redis
 
-- **The module is `mongo.rs`**, so it cannot be mistaken for the `mongodb` crate.
-- **The driver's TLS is already our rule** (the probe read its source): `ca_file_path` alone
-  if given, else the bundled public roots, on `ring`. So `ca_cert` passes straight through.
-- **Upsert is the `update` command**, not the driver's `bulkWrite`, which needs MongoDB 8.
-- **A missing collection is looked for** (`listCollections`) before reading: MongoDB answers a
-  `find` on one with nothing.
-- **`mongod` takes plain and TLS connections on one port** (`allowTLS`) in the test services,
-  capped at 1 GB, with the certificate joined to its key by the container's shell.
-- **The engine's tests set up with the driver** (a dev-dependency of `etl-duckdb-engine`,
-  already compiled for the connector).
-- **A Kinesis test became clock-proof**: Docker Desktop's clock had drifted 150 ms ahead of
-  Windows', which made records put a moment before a `latest` run count as new. The test now
-  waits 1.5 s; `connectors.md` says `latest` depends on this machine's clock.
+**Files.** `crates/connectors/src/{redis.rs, redis/tests.rs}`; `redis` 1.7 (blocking API,
+`streams`, `tls-rustls`); the services script (`redis:8.2-alpine`, a password, a TLS
+listener), `gate.yml`, `verified.rs`, a sample, `connectors.md`, the frontend icon if a new
+group needs one.
 
-###### Phase 10n — Redis: not built
+**Do.** (decision 74)
 
-**Dropped 2026-09-24 by the user** (Settled decision 82), after 10m. Nothing of it was built.
-The design is kept here for whoever takes it up later: a Redis Stream read through a
-consumer group and held with 10j's receipts (`XACK` after success), a key snapshot by
-`SCAN`, and sinks to a stream (`XADD`) and to hashes by a key template, through the `redis`
-1.7 crate, tested against `redis:8.2-alpine`. It would add four components.
+1. **`src.stream.redis`**: a Redis **Stream** read through a **consumer group**,
+   `XREADGROUP` in bounded batches, **held until the run's outcome** with 10j's receipts:
+   `XACK` on acknowledge; on release the entries stay pending and are claimed again by the
+   next run (`XAUTOCLAIM` of this consumer's pending entries first, then new ones). Creates
+   the group if asked (`create_group`, from `$` or `0`). Rows: the entry's fields as columns
+   (or `value_format` over one field), plus `_stream`, `_id`, `_delivery_count`.
+2. **`src.db.redis`**: a **snapshot of keys** matching `pattern`, by `SCAN` (never `KEYS`):
+   hashes become rows of their fields, strings a `value` column (JSON if `value_format`
+   says so), plus `_key` and `_type`; other types refused by name. `max_records`.
+3. **`snk.stream.redis`**: each row one entry, `XADD` in pipelined batches, `maxlen`
+   optional (approximate trimming).
+4. **`snk.db.redis`**: each row a **hash** at `key_template` (e.g. `order:{order_id}`), or a
+   string of the row's JSON; `ttl_seconds` optional; pipelined. Idempotent by key.
+5. `url` (`redis://` or `rediss://`), `username`, `password`, `database`, `ca_cert`,
+   `timeout_ms`.
+
+**Verify.** Against Redis: a stream acknowledged, released (the next run gets the same
+entries, `_delivery_count` 2), `preview` releasing, `max_records` leaving the rest; a
+consumer group created from `0`; a key snapshot of hashes and strings, a wrong type named;
+the sinks round trip, a re-run of the hash sink adding no keys; a wrong password named; TLS.
+The samples on both transports. **78 components.**
+
+**Done.** Redis streams (held) and keys, both ways, semantics documented.
 
 ###### Phase 10o — BigQuery
 
@@ -2036,37 +2045,16 @@ consumer group and held with 10j's receipts (`XACK` after success), a key snapsh
 **Verify.** Against the emulator: a table read and a query read, types, pages, an
 incremental second run reading only new rows, a missing table named; the load job
 round trip, `truncate` replacing. Against the fixture: sign-in carried, a job still running
-polled, a failed job's errors reported. The sample on both transports. **76 components.**
+polled, a failed job's errors reported. The sample on both transports. **80 components.**
 
 **Done.** BigQuery both ways against the emulator; "not yet checked against real Google
 Cloud" recorded.
-
-**As built (2026-09-24).** Done as planned, with these differences:
-
-- **`start` is a GoogleSQL literal the author writes**, not a value: the column's type is
-  not known before the first job. Later runs pass the saved value as a parameter typed by
-  the result's schema, as planned.
-- **`jobs.query`, not `jobs.insert`**: the emulator does not run inserted query jobs (a
-  500), and `jobs.query` polled with `getQueryResults` does the same on real BigQuery.
-- **Timestamps are parsed as text, exactly**, in all three forms BigQuery writes them (whole
-  microseconds when `useInt64Timestamp` is honoured, seconds with a fraction as the emulator
-  writes them, and scientific notation).
-- **Load jobs carry 4 MB each** (a multipart upload), `CREATE_NEVER`; `truncate` is the first
-  job's disposition. Resumable uploads, for bigger loads, are for later.
-- **Paging is proved against the fixture**: the emulator returns every row on the first page
-  whatever `maxResults` says.
-- **The emulator leaks**: it keeps the memory of dropped datasets, about 450 MB per full
-  round of its tests. One round fits the 1 GB cap (decision 79), which is what CI runs;
-  locally it is restarted between rounds. A dozen rounds (the mutation checks) had it killed
-  for memory, which first looked like failures of the connector.
-- `http.rs` gained `Settings::signed` for a GET beside the POST; the frontend a `warehouse`
-  icon.
 
 ###### Phase 10p — Snowflake
 
 **Files.** `crates/connectors/src/{snowflake.rs, snowflake/tests.rs}`, reusing `gcp.rs`'s
 RS256 (moved to a shared `jwt.rs` if both need it) and `http.rs`; `connectors.md`, a sample
-(parameters only, as no server runs it); `verified.rs` gains nothing, as no server runs.
+(parameters only, as no server runs it), `verify.rs` not touched.
 
 **Do.** (decision 77)
 
@@ -2085,10 +2073,25 @@ RS256 (moved to a shared `jwt.rs` if both need it) and `http.rs`; `connectors.md
 **Verify.** Against the fixture only: the JWT's claims and fingerprint, checked against a
 public-key fingerprint computed independently in the test; a statement polled (`202`, then
 `200`); partitions fetched; types; bind variables sent, never interpolated; errors with
-Snowflake's `code` and `message` named; the sink's batches. **78 components.**
+Snowflake's `code` and `message` named; the sink's batches. **82 components.**
 
 **Done.** Snowflake both ways against the fixture; "not yet checked against real Snowflake"
 recorded, and not marked working on the website.
+
+**As built (2026-09-24).** Done as planned, with these differences:
+
+- **RS256 stays in `gcp.rs`** and Snowflake calls it (`jwt`, `rsa_key`); moving it to a
+  `jwt.rs` would have touched 10k's tests for no gain.
+- **The fingerprint is proved against `openssl`**: RFC 7515's key through Snowflake's
+  documented command (`openssl rsa -pubout -outform DER | openssl dgst -sha256 -binary |
+  openssl enc -base64`) gives `b9E8JDWj...uIw=`, and the connector's SubjectPublicKeyInfo,
+  built around `ring`'s PKCS#1 public key, hashes to the same.
+- **Incremental values are bound as TEXT and cast** (`CAST(? AS <type>)`), the type from the
+  result's `rowType`: one path for every type, with no per-type encoding of bound values to
+  get wrong unseen, and the saved value readable. The session time zone is UTC so both directions agree.
+- **`private_key` (PEM text) beside `private_key_file`**, so a key can be a secret; an
+  encrypted key is refused with the command that decrypts it.
+- **Submissions carry a `requestId`**, so a retried POST is the same statement.
 
 ###### Phase 10q — MariaDB
 
@@ -2099,7 +2102,7 @@ section of the docs, the website.
 modes, types (MariaDB's `UUID`, `INET6`, `JSON` as `LONGTEXT`), a wrong password. Fix what
 fails. No new component unless the probe shows MariaDB needs one (then `src.db.mariadb`).
 
-**Verify.** The same tests as MySQL's in `verified.rs`, against MariaDB. **78 components.**
+**Verify.** The same tests as MySQL's in `verified.rs`, against MariaDB. **82 components.**
 
 **Done.** MariaDB proven through the MySQL components, or given its own if it must be.
 
@@ -2121,7 +2124,7 @@ fails. No new component unless the probe shows MariaDB needs one (then `src.db.m
 
 **Verify.** Against ClickHouse: a table and a query read, types (`Decimal`, `DateTime64`,
 `Array`, `Nullable`, `LowCardinality`), incremental runs, a missing table and a wrong
-password named; the sink round trip and a retried batch deduplicated. **80 components.**
+password named; the sink round trip and a retried batch deduplicated. **84 components.**
 
 **Done.** ClickHouse both ways, semantics documented.
 
@@ -2145,7 +2148,7 @@ password named; the sink round trip and a retried batch deduplicated. **80 compo
 
 **Verify.** Against Cassandra: a table and a query read across several pages, types, a
 missing keyspace and a wrong password named; the sink round trip and a re-run adding
-nothing. **82 components.**
+nothing. **86 components.**
 
 **Done.** Cassandra both ways, semantics documented.
 
@@ -2166,7 +2169,7 @@ password), `gate.yml`, `verified.rs`, a sample, `connectors.md`.
 
 **Verify.** Against Neo4j: a query read of nodes, relationships and scalars, parameters, a
 Cypher error named with its code; the sink creating nodes and relationships, a re-run with
-`MERGE` adding nothing. **84 components.**
+`MERGE` adding nothing. **88 components.**
 
 **Done.** Neo4j both ways, semantics documented.
 
@@ -2182,7 +2185,7 @@ through a staging table); SQL and Windows-free authentication (SQL logins), TLS 
 `ca_cert` or `trust_server_certificate` for a test server.
 
 **Verify.** Against SQL Server: reads, types (`decimal`, `datetime2`, `datetimeoffset`,
-`uniqueidentifier`, `nvarchar(max)`), incremental runs, the three write modes. **86
+`uniqueidentifier`, `nvarchar(max)`), incremental runs, the three write modes. **90
 components.**
 
 **Done.** SQL Server both ways, semantics documented.
@@ -2191,7 +2194,7 @@ components.**
 more than the 1 GB cap that ruled out Elasticsearch. (a) defer it, as Elasticsearch;
 (b) run it only in a separate CI job with a larger runner; (c) test it against a fixture only.
 
-**Deferred.** **Redis** (decision 82: the user's choice), **Elasticsearch** (decision 76: memory), **Oracle** (decision 80: Oracle's
+**Deferred.** **Elasticsearch** (decision 76: memory), **Oracle** (decision 80: Oracle's
 native client library would break the single binary), OpenSearch with Elasticsearch.
 **Later families**, planned when reached: the site's remaining warehouses (Redshift,
 Databricks, DuckDB), file formats (TSV, Arrow, Avro), object storage (GCS, Azure Blob, real

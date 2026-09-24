@@ -876,3 +876,60 @@ reports. `timeout_ms` (default 120,000) bounds each request.
   reads as UTC.
 - **Like every native sink, it loads only after a run that fully succeeded**, and never in
   `preview`. At-least-once: a re-run appends again.
+
+## `src.warehouse.snowflake` and `snk.warehouse.snowflake`
+
+Added in Phase 10p (2026-09-24). Snowflake's **SQL API** (`/api/v2/statements`) through the
+shared `ureq` layer. **Not checked against real Snowflake**: there is no emulator, and no
+account is used (Settled decisions 77, 78). What is proved, against the local fixture: the
+key's fingerprint against `openssl`'s, the JWT's claims and signature, values typed as
+Snowflake's documentation writes them, bind variables, and the flow of statements, polls
+and partitions. A first run against a real account is the check still owed.
+
+### Signing in
+
+**By key pair only**, which is what the SQL API takes for a program: `account` (the account
+identifier, `orgname-accountname` or a locator such as `xy12345.eu-west-1`), `user`, and the
+user's private key, as `private_key_file` (PKCS#8 PEM, unencrypted, relative to the
+workspace) or as `private_key` (the PEM text, as a `${SECRET:...}`). Register the public key
+first: `ALTER USER <user> SET RSA_PUBLIC_KEY='...'`. Each request carries a fresh JWT signed
+RS256 (10k's signing), naming the account, the user and the key's SHA-256 fingerprint, the
+same value `DESC USER` shows as `RSA_PUBLIC_KEY_FP`. An encrypted key is refused with how to
+decrypt it; passwords, OAuth and programmatic access tokens are not read yet. `role`,
+`warehouse`, `database` and `schema` are sent with every statement; unset, the user's
+defaults. `endpoint` replaces `https://<account>.snowflakecomputing.com` for a private link.
+
+### Reading: `src.warehouse.snowflake`
+
+- **A `table`** (`name`, `schema.name` or `database.schema.name`; a name Snowflake would read
+  bare stays bare, so it is upper-cased as Snowflake stored it) **or a `query`**. One
+  statement, submitted with a request ID so a retried submission is not run twice; a
+  `202` (still running) is polled until done; then each **result partition** after the first
+  is fetched. `max_records` stops without fetching later partitions.
+- **Every statement runs with the session time zone UTC.**
+- **Rows are typed by the result's `rowType`**: NUMBER with scale 0 a number (its text beyond
+  64 bits), with a scale its exact text; FLOAT a number; BOOLEAN; DATE and TIME their text;
+  TIMESTAMP_NTZ, _LTZ and _TZ a UTC timestamp to the microsecond; VARIANT, OBJECT and ARRAY
+  parsed JSON; BINARY its hex; TEXT itself.
+- **Only what is new**: `incremental_column` wraps the read as `SELECT * FROM (<read>) WHERE
+  col > CAST(? AS <type>) ORDER BY col`, the last successful run's highest value a **bind
+  variable**, never pasted into the SQL; the first run starts at `start`, a SQL literal you
+  write (`'2026-01-01'::TIMESTAMP_NTZ`, `1000`). Saved only when the whole run succeeds; set
+  aside, and said so, when the table, query or column changed. The column must only go up.
+  **The warehouse runs, and bills, the whole wrapped query**: cluster the table by that
+  column to keep it cheap.
+
+### Writing: `snk.warehouse.snowflake`
+
+- **Batched `INSERT`s**: `INSERT INTO <table> (<columns>) VALUES (?, ...)` with each column
+  bound to an array of up to 1,000 values, so a statement inserts a thousand rows. The SQL API
+  has no `PUT` or `COPY`; for millions of rows a stage and `COPY INTO` are the better way, and
+  are not offered yet.
+- **Every value is bound as text** and Snowflake converts it to the column's type; a nested
+  value arrives as its JSON text, which a VARIANT column stores as a string, not parsed. The
+  table must exist, and every row must have the first row's columns.
+- **`mode: truncate`** runs `TRUNCATE TABLE` first, then the inserts: not one transaction, so
+  a failure part-way leaves the table with what was inserted until then, which the error
+  says.
+- **Like every native sink, it inserts only after a run that fully succeeded**, and never in
+  `preview`. At-least-once: a re-run inserts again.

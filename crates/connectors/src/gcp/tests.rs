@@ -165,6 +165,11 @@ impl Drop for Scratch {
     }
 }
 
+/// RFC 7515's example key as a PKCS#8 PEM, for other connectors' tests.
+pub(crate) fn rfc_key_pem() -> String {
+    pem("PRIVATE KEY", &pkcs8(&rfc()["jwk"]))
+}
+
 pub(crate) fn service_account(token_uri: &str) -> JsonValue {
     json!({
         "type": "service_account",

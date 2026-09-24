@@ -469,3 +469,18 @@ Copy-Item samples\pipelines\orders_enriched.json samples\out\scratch\
   and `1.79E+9`.
   *Check:* each gives the microseconds you expect, and you can say which line handles the
   sign and which the exponent's `+`.
+
+## Phase 10p — Snowflake
+
+- [ ] **A61. Be your own oracle.**
+  *Do:* make a key with `openssl genrsa 2048 | openssl pkcs8 -topk8 -nocrypt -out k.p8`, and
+  compute its fingerprint with Snowflake's documented command.
+  *Check:* a test in `snowflake/tests.rs` reading `k.p8` gives the same `SHA256:` value. What
+  would the fingerprint be if the code hashed `key.public()` without the SPKI wrapper?
+
+- [ ] **A62. 🦀 Run it for real (if you have an account).**
+  *Do:* register the public key with `ALTER USER ... SET RSA_PUBLIC_KEY`, fill in
+  `samples/pipelines/snowflake_orders.json`'s parameters, create `ORDERS` and `LARGE_ORDERS`,
+  and run it twice.
+  *Check:* the second run reads nothing; `DESC USER` shows `RSA_PUBLIC_KEY_FP` equal to the
+  JWT's `iss` suffix. This is the check the project still owes.

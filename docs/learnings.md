@@ -714,3 +714,24 @@ the fuller record. From Phase 10 on, a section is added at the end of each phase
   before reading test failures that all start at once.
 - **Working out expected timestamps by hand** when the server under test had already shown
   the right answer in the probe.
+
+## Phase 10p — Snowflake (2026-09-24)
+
+**Concepts**
+- **Key-pair authentication by fingerprint**: the server stores the public key and knows it
+  by the SHA-256 of its SubjectPublicKeyInfo; the JWT names that fingerprint in `iss`, so the
+  server knows which key to verify with before it verifies.
+- **SubjectPublicKeyInfo versus RSAPublicKey**: the same key in two DER wrappings; hash the
+  wrong one and every sign-in fails with an unhelpful "JWT token is invalid".
+- **Asynchronous statements**: submit, get a handle and a `202`, poll, then read results in
+  partitions, which may arrive gzip-compressed.
+
+**Decisions and why**
+- **An independent oracle for the one thing that must be exact**: `openssl` produced the
+  fingerprint, so the test does not check the code against itself.
+- **Bind as text and cast in SQL** where typed bindings have awkward encodings: one path for
+  every type, and the value stays readable in the saved position.
+
+**Mistakes worth not repeating**
+- None new; the lesson of 10o (the server under test, or an independent tool, is the source
+  of expected values) held.

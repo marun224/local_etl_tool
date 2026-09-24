@@ -31,6 +31,7 @@ pub mod nats;
 pub mod pubsub;
 pub mod rabbitmq;
 pub mod rest;
+pub mod snowflake;
 pub mod sqs;
 mod tls;
 pub mod xml;
@@ -63,6 +64,8 @@ pub fn all() -> &'static [(String, Connector)] {
             Connector::Sink(&mongo::MongoSink),
             Connector::Source(&bigquery::BigquerySource),
             Connector::Sink(&bigquery::BigquerySink),
+            Connector::Source(&snowflake::SnowflakeSource),
+            Connector::Sink(&snowflake::SnowflakeSink),
         ]
         .into_iter()
         .map(|connector| (connector.spec().id, connector))

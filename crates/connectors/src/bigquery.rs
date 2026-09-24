@@ -549,7 +549,7 @@ impl SourceSettings {
 }
 
 /// A short, stable name for a query: its SHA-256, first sixteen hex digits.
-fn fingerprint(query: &str) -> String {
+pub(crate) fn fingerprint(query: &str) -> String {
     let digest = ring::digest::digest(&ring::digest::SHA256, query.as_bytes());
     digest.as_ref()[..8]
         .iter()
