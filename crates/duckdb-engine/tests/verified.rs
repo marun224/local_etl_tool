@@ -2135,3 +2135,233 @@ fn previewing_a_rabbitmq_source_gives_everything_back() {
     assert_eq!(shown.rows.len(), 9);
     assert_eq!(queue.waiting(), 9, "a preview is a look, not a take");
 }
+
+// ---------------------------------------------------------------------------
+// MongoDB, incremental by a checkpoint (Phase 10m)
+// ---------------------------------------------------------------------------
+
+/// A database for one test, dropped when dropped.
+struct MongoDatabase {
+    uri: String,
+    name: String,
+}
+
+impl MongoDatabase {
+    fn new(uri: &str, test: &str) -> Self {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .subsec_nanos();
+        MongoDatabase {
+            uri: uri.to_string(),
+            name: format!("etl_verified_{test}_{nanos}"),
+        }
+    }
+
+    fn collection(&self, name: &str) -> mongodb::sync::Collection<mongodb::bson::Document> {
+        mongodb::sync::Client::with_uri_str(&self.uri)
+            .unwrap()
+            .database(&self.name)
+            .collection(name)
+    }
+
+    /// Orders as MongoDB would hold them: a real date, a decimal amount.
+    fn insert_orders(&self, orders: &[serde_json::Value]) {
+        use mongodb::bson::{doc, DateTime, Decimal128};
+        let documents: Vec<_> = orders
+            .iter()
+            .map(|order| {
+                let at = order["order_ts"].as_str().unwrap().replace(' ', "T") + "Z";
+                doc! {
+                    "order_id": order["order_id"].as_i64().unwrap(),
+                    "customer_id": order["customer_id"].as_str().unwrap(),
+                    "order_ts": DateTime::parse_rfc3339_str(&at).unwrap(),
+                    "amount": format!("{:.2}", order["amount"].as_f64().unwrap())
+                        .parse::<Decimal128>()
+                        .unwrap(),
+                    "status": order["status"].as_str().unwrap(),
+                }
+            })
+            .collect();
+        self.collection("orders")
+            .insert_many(documents)
+            .run()
+            .unwrap();
+    }
+
+    fn count(&self, collection: &str) -> u64 {
+        self.collection(collection)
+            .count_documents(mongodb::bson::doc! {})
+            .run()
+            .unwrap()
+    }
+}
+
+impl Drop for MongoDatabase {
+    fn drop(&mut self) {
+        if let Ok(client) = mongodb::sync::Client::with_uri_str(&self.uri) {
+            let _ = client.database(&self.name).drop().run();
+        }
+    }
+}
+
+fn mongodb_orders(
+    workspace: &Path,
+    uri: &str,
+    database: &MongoDatabase,
+    checkpoints: &BTreeMap<String, serde_json::Value>,
+    policy: Option<serde_json::Value>,
+) -> etl_duckdb_engine::Plan {
+    let text = std::fs::read_to_string(repo_root().join("samples/pipelines/mongodb_orders.json"))
+        .expect("the sample is committed");
+    let mut json: serde_json::Value = serde_json::from_str(&text).unwrap();
+    if let Some(policy) = policy {
+        json["nodes"][1]["data"]["policy"] = policy;
+    }
+    let resolver = Resolver::new(workspace)
+        .bind("mongodb_uri", uri)
+        .bind("database", &database.name);
+    let resolved = resolve(&document(&json.to_string()), &resolver).expect("resolves");
+    compile_with(
+        &resolved.document,
+        &CompileOptions {
+            checkpoints: checkpoints.clone(),
+            ..CompileOptions::default()
+        },
+    )
+    .expect("compiles")
+}
+
+/// The sample, three runs: everything, nothing new, then only what arrived.
+fn the_mongodb_sample_carries_on(name: &str, policy: Option<serde_json::Value>) {
+    let Some(uri) = server("ETL_TEST_MONGODB") else {
+        return;
+    };
+    let Some((workspace, binary)) = workspace(name, &[]) else {
+        return;
+    };
+    let orders = sample_orders();
+    let database = MongoDatabase::new(&uri, name);
+    database.insert_orders(&orders[..10]);
+
+    let first = run(
+        &mongodb_orders(
+            &workspace,
+            &uri,
+            &database,
+            &BTreeMap::new(),
+            policy.clone(),
+        ),
+        &options(&workspace),
+    )
+    .expect("runs");
+    let put = rows(&first)[3].expect("the large orders were written");
+    assert_eq!(rows(&first)[0], Some(10));
+    assert_eq!(database.count("large_orders"), put);
+    let saved = positions(&first);
+    let highest = orders[..10]
+        .iter()
+        .map(|order| order["order_id"].as_i64().unwrap())
+        .max()
+        .unwrap();
+    assert_eq!(
+        saved["read_orders"]["value"],
+        serde_json::json!({ "$numberLong": highest.to_string() }),
+        "{saved:?}"
+    );
+    assert_eq!(
+        query(
+            &binary,
+            &workspace,
+            "SELECT count(*) AS n, typeof(any_value(order_ts)) AS t, \
+                    typeof(any_value(amount)) AS a, min(length(_id)) AS id \
+             FROM 'samples/out/mongodb_large_orders.parquet';"
+        ),
+        format!(r#"[{{"n":{put},"t":"TIMESTAMP","a":"DECIMAL(10,2)","id":24}}]"#)
+    );
+
+    // Nothing new: the saved position is the end, and nothing is written twice.
+    let second = run(
+        &mongodb_orders(&workspace, &uri, &database, &saved, policy.clone()),
+        &options(&workspace),
+    )
+    .expect("runs");
+    assert_eq!(rows(&second), [Some(0), Some(0), Some(0), Some(0)]);
+
+    // Two more orders arrive: exactly those are read.
+    database.insert_orders(&orders[10..]);
+    let third = run(
+        &mongodb_orders(&workspace, &uri, &database, &saved, policy),
+        &options(&workspace),
+    )
+    .expect("runs");
+    assert_eq!(rows(&third)[0], Some(2));
+}
+
+#[test]
+fn the_mongodb_sample_carries_on_between_runs_on_the_one_script_path() {
+    the_mongodb_sample_carries_on("mongodb_script", None);
+}
+
+#[test]
+fn the_mongodb_sample_carries_on_between_runs_on_the_session_path() {
+    the_mongodb_sample_carries_on(
+        "mongodb_session",
+        Some(serde_json::json!({ "retryAttempts": 1 })),
+    );
+}
+
+#[test]
+fn a_failed_mongodb_run_saves_no_position() {
+    let Some(uri) = server("ETL_TEST_MONGODB") else {
+        return;
+    };
+    let Some((workspace, _)) = workspace("mongodb_failed", &[]) else {
+        return;
+    };
+    let database = MongoDatabase::new(&uri, "failed");
+    database.insert_orders(&sample_orders()[..6]);
+
+    let mut json: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(repo_root().join("samples/pipelines/mongodb_orders.json"))
+            .unwrap(),
+    )
+    .unwrap();
+    json["nodes"][1]["data"]["properties"]["predicate"] = serde_json::json!("no_such_column > 1");
+    json["nodes"][1]["data"]["policy"] = serde_json::json!({ "continueOnFailure": true });
+    let resolver = Resolver::new(&workspace)
+        .bind("mongodb_uri", &uri)
+        .bind("database", &database.name);
+    let resolved = resolve(&document(&json.to_string()), &resolver).expect("resolves");
+    let plan = compile_with(&resolved.document, &CompileOptions::default()).unwrap();
+
+    let report = run(&plan, &options(&workspace)).expect("a report, not an error");
+    assert!(report.failed());
+    assert_eq!(report.stages[0].rows, Some(6), "the source did read them");
+    assert!(
+        report.checkpoints.is_empty(),
+        "a failed run moves no position: {:?}",
+        report.checkpoints
+    );
+    assert_eq!(database.count("large_orders"), 0, "and delivers nothing");
+}
+
+#[test]
+fn previewing_a_mongodb_source_reads_without_remembering() {
+    let Some(uri) = server("ETL_TEST_MONGODB") else {
+        return;
+    };
+    let Some((workspace, _)) = workspace("mongodb_preview", &[]) else {
+        return;
+    };
+    let database = MongoDatabase::new(&uri, "preview");
+    database.insert_orders(&sample_orders()[..9]);
+    let plan = mongodb_orders(&workspace, &uri, &database, &BTreeMap::new(), None);
+    let shown = preview(&plan, "read_orders", 50, &options(&workspace)).expect("previews");
+    assert_eq!(shown.rows.len(), 9);
+    assert_eq!(
+        database.count("large_orders"),
+        0,
+        "a preview writes nothing"
+    );
+}

@@ -536,7 +536,10 @@ came from, never what they are. `endpoint` overrides
 - **The position** is one entry per shard: the last sequence number read (as text: they are
   128-bit), "done" for a closed shard read to its end, "start" for a shard not yet reached,
   or, after a `latest` first run that read nothing, the time that run started, so the next
-  run reads from then. `GetRecords` is paced to Kinesis's five calls a second per shard, and
+  run reads from then. That time is **this machine's clock**, compared with Kinesis's arrival
+  times: a clock running behind makes records put just before the run count as new (found
+  in 10m, when Docker Desktop's clock ran 150 ms ahead of Windows'). Keep the clock synced.
+  `GetRecords` is paced to Kinesis's five calls a second per shard, and
   throttling (`ProvisionedThroughputExceededException`, a call rate exceeded) is retried
   with backoff; a real limit, such as an account's shard limit, fails at once.
 - **Rows** are the other brokers' `value_format` (`json`, `text`, `bytes`) plus `_stream`,
@@ -770,3 +773,54 @@ queue name, so it needs a routing key.
 - **At-least-once**: a re-run publishes everything again.
 - **Like every native sink, it publishes only after a run that fully succeeded**, and never
   in `preview`.
+
+## `src.db.mongodb` and `snk.db.mongodb`
+
+Added in Phase 10m (2026-09-24). MongoDB's own driver (`mongodb` 3.9, its blocking API).
+**Verified against MongoDB 8.0 itself**, plain and over TLS.
+
+**Where:** `uri` (`mongodb://host[:port][,host...]/?options` or `mongodb+srv://...`),
+`database`, `collection`. `username`, `password` and `auth_source` fill in or override the
+URI's, so the password can be a `${SECRET:...}`. **TLS**: `ca_cert` turns it on and trusts
+that file alone; otherwise the URI's `tls=true` trusts the bundled public roots, the same
+rule as every other connector. `timeout_ms` (default 30,000) bounds finding a server and
+each operation. Reports and errors name the hosts and the database, never the password.
+
+### Reading: `src.db.mongodb`
+
+- **`filter`, `projection`, `sort`**: JSON documents, as MongoDB takes them, in **Extended
+  JSON** where a value is not plain JSON: `{"at": {"$gte": {"$date": "2026-01-01T00:00:00Z"}}}`,
+  `{"_id": {"$oid": "..."}}`. `batch_size` (default 1,000) documents a round trip;
+  `max_records` caps a run.
+- **Rows**: each top-level field is a column. What is not plain JSON is made plain: an
+  `ObjectId` is its 24-character hex, a date a UTC timestamp, a `Decimal128` its exact text
+  (which DuckDB casts to `DECIMAL` without loss), binary base64, nested documents and arrays
+  JSON with the same rules inside. List the columns you want in `columns`, as for every
+  native source.
+- **A collection that does not exist is an error**, naming it. MongoDB itself answers a read
+  of a missing collection with nothing, which would look like an empty one.
+- **Only what is new**: `incremental_field` (e.g. `updatedAt`, `order_id`, or `_id`, whose
+  `ObjectId`s rise with time) makes each run read only documents whose value there is above
+  the last successful run's highest, in that field's order, with `start` (Extended JSON)
+  for the first run. The highest value read is saved **only if the whole run succeeds**, as
+  a checkpoint (`etl state list`, `etl state forget`), keeping its type: a date stays a
+  date. A position saved for another collection or field is set aside and the report says
+  so. **Two things are the data's to guarantee**: a document without the field is never
+  read this way, and a field that can go *down*, or be set to a value below the saved one
+  later, skips documents. `max_records` with it reads the oldest new documents first and the
+  next run carries on.
+
+### Writing: `snk.db.mongodb`
+
+- **`mode: insert`** (the default): `insertMany`, unordered, 1,000 documents a call. A
+  refused document (a duplicate `_id` or unique key) fails the run naming the row, **after**
+  the rest of its batch has landed; the message says how many documents were written.
+- **`mode: upsert`** with `key_fields`: each row **replaces** the document whose key fields
+  match, or is added, through the `update` command, 1,000 to a call. A re-run adds nothing
+  twice. A row without a value for a key field fails, naming it. It works on every server
+  version (the driver's `bulkWrite` would need MongoDB 8).
+- **Types**: a row's JSON becomes BSON as Extended JSON says, so a column holding
+  `{"$date": "..."}` is stored as a date; a timestamp column from DuckDB arrives as text and is
+  stored as text.
+- **Like every native sink, it writes only after a run that fully succeeded**, and never in
+  `preview`. Insert is at-least-once; upsert is idempotent by its keys.

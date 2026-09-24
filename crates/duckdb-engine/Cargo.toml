@@ -19,6 +19,7 @@ thiserror.workspace = true
 [dev-dependencies]
 async-nats = { version = "0.50", default-features = false, features = ["jetstream", "ring", "nkeys"] }
 etl-secrets.workspace = true
+mongodb = { version = "3.9", default-features = false, features = ["compat-3-0-0", "rustls-tls", "sync", "dns-resolver"] }
 rskafka = "0.6"
 tiny_http = "0.12"
 tokio = { version = "1", default-features = false, features = ["rt", "net", "time"] }

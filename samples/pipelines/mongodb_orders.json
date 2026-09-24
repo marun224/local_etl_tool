@@ -1,0 +1,150 @@
+{
+  "formatVersion": 1,
+  "name": "mongodb_orders",
+  "nodes": [
+    {
+      "id": "read_orders",
+      "type": "source",
+      "position": {
+        "x": 0.0,
+        "y": 0.0
+      },
+      "data": {
+        "label": "Orders collection",
+        "componentId": "src.db.mongodb",
+        "properties": {
+          "uri": "${mongodb_uri}",
+          "username": "${mongodb_user}",
+          "password": "${mongodb_password}",
+          "database": "${database}",
+          "collection": "${collection}",
+          "incremental_field": "order_id",
+          "columns": {
+            "_id": "VARCHAR",
+            "order_id": "INTEGER",
+            "customer_id": "VARCHAR",
+            "order_ts": "TIMESTAMP",
+            "amount": "DECIMAL(10,2)",
+            "status": "VARCHAR"
+          }
+        },
+        "alias": "orders"
+      }
+    },
+    {
+      "id": "large_only",
+      "type": "transform",
+      "position": {
+        "x": 280.0,
+        "y": 0.0
+      },
+      "data": {
+        "label": "Over 100",
+        "componentId": "xf.filter",
+        "properties": {
+          "predicate": "amount > 100"
+        }
+      }
+    },
+    {
+      "id": "write_large",
+      "type": "sink",
+      "position": {
+        "x": 560.0,
+        "y": 0.0
+      },
+      "data": {
+        "label": "Large orders",
+        "componentId": "snk.file.parquet",
+        "properties": {
+          "path": "${workspace}/samples/out/mongodb_large_orders.parquet",
+          "mode": "overwrite"
+        }
+      }
+    },
+    {
+      "id": "put_large",
+      "type": "sink",
+      "position": {
+        "x": 560.0,
+        "y": 160.0
+      },
+      "data": {
+        "label": "Large orders collection",
+        "componentId": "snk.db.mongodb",
+        "properties": {
+          "uri": "${mongodb_uri}",
+          "username": "${mongodb_user}",
+          "password": "${mongodb_password}",
+          "database": "${database}",
+          "collection": "${large_collection}",
+          "mode": "upsert",
+          "key_fields": [
+            "order_id"
+          ]
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "source": "read_orders",
+      "target": "large_only",
+      "sourceHandle": "main",
+      "targetHandle": "in"
+    },
+    {
+      "id": "e2",
+      "source": "large_only",
+      "target": "write_large",
+      "sourceHandle": "main",
+      "targetHandle": "in"
+    },
+    {
+      "id": "e3",
+      "source": "large_only",
+      "target": "put_large",
+      "sourceHandle": "main",
+      "targetHandle": "in"
+    }
+  ],
+  "parameters": {
+    "mongodb_uri": {
+      "type": "string",
+      "required": true,
+      "default": "mongodb://127.0.0.1:57017/?authSource=admin",
+      "description": "The server. The committed default is the MongoDB scripts/test-services.ps1 starts."
+    },
+    "mongodb_user": {
+      "type": "string",
+      "required": false,
+      "default": "etl",
+      "description": "The user to sign in as."
+    },
+    "mongodb_password": {
+      "type": "string",
+      "required": false,
+      "default": "etl-secret",
+      "description": "Test-only: the test server's password. For a real server, keep the password in a secret (etl secret set) and reference that instead."
+    },
+    "database": {
+      "type": "string",
+      "required": true,
+      "default": "etl_sample",
+      "description": "The database both collections are in."
+    },
+    "collection": {
+      "type": "string",
+      "required": true,
+      "default": "orders",
+      "description": "The orders to read. Each run reads only orders with a higher order_id than the last successful run's highest."
+    },
+    "large_collection": {
+      "type": "string",
+      "required": true,
+      "default": "large_orders",
+      "description": "Where the large orders are written, upserted on order_id, so a re-run replaces rather than duplicates."
+    }
+  }
+}

@@ -3,7 +3,17 @@
 **State only.** Design lives in [PLAN_duckle_parity.md](PLAN_duckle_parity.md). Read this file
 first when picking the project back up.
 
-> ## ✅ Phase 10l (RabbitMQ) — built 2026-09-24, green locally with every server up, **uncommitted**
+> ## ✅ Phase 10m (MongoDB) — built 2026-09-24, green locally with every server up
+>
+> **What 10m built:** `src.db.mongodb` (filter, projection and sort in Extended JSON;
+> incremental by a field through a checkpoint, kept as its BSON type; a missing collection
+> named) and `snk.db.mongodb` (insert, unordered; upsert on `key_fields` through the `update`
+> command). MongoDB 8.0 in the test services, plain and TLS on one port, capped at 1 GB.
+> **74 components, 1035 Rust tests** (1025 on Linux) with every server up, twice, none
+> skipped; **146 frontend**; six mutations each caught. Found on the way: Docker Desktop's
+> clock drifting ahead broke a Kinesis `latest` test, now clock-proof and documented.
+>
+> ## ✅ Phase 10l (RabbitMQ) — `44d1aaa`, green in CI (run 35964870851)
 >
 > **What 10l built:** `src.queue.rabbitmq` and `snk.queue.rabbitmq` through `lapin`: the
 > receipt owns the connection and channel and settles with one `basic.ack`/`basic.nack`
@@ -92,15 +102,18 @@ first when picking the project back up.
 > `kinesis-mock` image in the Ubuntu gate.
 >
 > **Since then:** 10j and 10k are `4b44de9` (one commit: 10k moved 10j's lease keeper),
-> pushed and green in CI on run 35959734855, which also covers 10h and 10i. 10l is
-> uncommitted.
+> pushed and green in CI on run 35959734855, which also covers 10h and 10i. **10l is
+> `44d1aaa`, green in CI on run 35964870851** (all six jobs; the Windows gate took 21
+> minutes). Everything through 10l is committed and pushed; the plan for 10m–10u is not yet
+> committed.
 >
-> **Next:** the user's call. Phase 10's queue family is done; the plan's *Later families*
-> (NoSQL, warehouses over their own protocols, vector DBs) are planned one at a time when
-> reached, and Phase 11 is the AI assistant. **The website** (`efc49ee`, pushed) shows 16 of
-> 50 connectors working; RabbitMQ can be added there, naming
-> `the_rabbitmq_sample_takes_what_it_read_on_the_one_script_path`. Kinesis, SQS and Pub/Sub
-> stay off it until read against the real services. The live site still needs a redeploy.
+> **Next:** **10n, Redis**, when the user says so: the second of Phases 10m–10u, one
+> connector each (MongoDB, Redis, BigQuery, Snowflake, MariaDB, ClickHouse, Cassandra, Neo4j,
+> SQL Server), planned 2026-09-24. Elasticsearch is not built (memory); Oracle is deferred.
+> Open question 15 (SQL Server's memory) waits for 10u. **The website** (`9fd2a49` and
+> `1dbd1e5`, pushed) shows 17 of 50 connectors working, RabbitMQ the latest; its roadmap names
+> MongoDB, Redis, BigQuery and Snowflake as next. Kinesis, SQS and Pub/Sub stay off it until
+> read against the real services. The live site still needs a redeploy.
 >
 > **10d, for the record:** `src.saas.graphql` and `snk.saas.graphql`, the shared `http.rs`,
 > the `code` property kind. CI warnings seen on its run, neither failing anything: the `@v4`
@@ -132,14 +145,14 @@ first when picking the project back up.
 >
 > | Job | Checked locally by |
 > |---|---|
-> | `gate (windows)` — fmt, clippy, 1021 tests (servers skip), samples | running it, repeatedly |
-> | `gate (ubuntu)` — fmt, clippy, **1011 tests** with Postgres, MySQL, MinIO, Kafka (four listeners), NATS (five servers), kinesis-mock, ElasticMQ, the Pub/Sub emulator and RabbitMQ, samples | `cargo test` in `rust:1.96-slim-bookworm` |
+> | `gate (windows)` — fmt, clippy, 1035 tests (servers skip), samples | running it, repeatedly |
+> | `gate (ubuntu)` — fmt, clippy, **1025 tests** with Postgres, MySQL, MinIO, Kafka (four listeners), NATS (five servers), kinesis-mock, ElasticMQ, the Pub/Sub emulator, RabbitMQ and MongoDB, samples | `cargo test` in `rust:1.96-slim-bookworm` |
 > | `artifact (both)` — bake, run from elsewhere, run in a bare container | Phase 9b and 9c |
 > | `cross-build-script` — `build-runner.ps1`, ELF check, unbaked contract, no-op rerun | each assertion run by hand |
-> | `frontend` — 143 tests, typecheck, build | running it |
+> | `frontend` — 146 tests, typecheck, build | running it |
 >
 > **The Linux job excludes `apps/desktop`** (Tauri needs WebKitGTK and GTK to compile), so
-> **1011 + 10 desktop = 1021** is the arithmetic to check if either number moves. **CI fetches
+> **1025 + 10 desktop = 1035** is the arithmetic to check if either number moves. **CI fetches
 > only the extensions the tests load** (`DUCKDB_TEST_EXTENSIONS`, hyphen-separated because
 > `actions/cache` refuses a comma in a key). **CI cannot do the Windows-to-Linux cross-build**
 > (GitHub's Windows runners run no Linux containers), so it proves the output instead: a Linux
@@ -148,13 +161,13 @@ first when picking the project back up.
 > **To check everything, from the repo root:**
 >
 > ```powershell
-> ./scripts/test-services.ps1                                       # Postgres, MySQL, MinIO, Kafka, NATS, Kinesis, SQS, Pub/Sub, RabbitMQ in Docker
-> cargo test --workspace                                            # expect 1021 passing
+> ./scripts/test-services.ps1                                       # Postgres, MySQL, MinIO, Kafka, NATS, Kinesis, SQS, Pub/Sub, RabbitMQ, MongoDB in Docker
+> cargo test --workspace                                            # expect 1035 passing
 > ./scripts/test-services.ps1 -Stop                                 # tidy up afterwards
-> npm --prefix frontend run test                                    # expect 143 passing
+> npm --prefix frontend run test                                    # expect 146 passing
 > npm --prefix frontend run typecheck                               # expect clean
 > npm --prefix frontend run build                                   # expect clean
-> .\target\debug\etl.exe components                                 # expect 72
+> .\target\debug\etl.exe components                                 # expect 74
 > .\target\debug\etl.exe run samples\pipelines\orders_enriched.json # expect 12/5/7/6/6
 > .\target\debug\etl.exe run samples\pipelines\orders_checked.json  # expect 12/10+2/9+1/9/2/1
 > .\target\debug\etl.exe run samples\pipelines\orders_guarded.json  # expect 12 through, branch taken
@@ -177,10 +190,10 @@ first when picking the project back up.
 
 ## Where things stand
 
-- **Next phase:** to be chosen by the user: a *Later family* of Phase 10 (NoSQL, warehouses,
-  vector DBs), or Phase 11.
+- **Next phase:** **10n, Redis**, planned in [PLAN_duckle_parity.md](PLAN_duckle_parity.md)
+  under *Phases 10m–10u*. Each starts when the user says so. Needs Docker running.
 - **In progress:** nothing. **Phases 0–9 and 10a–10l are done** (10a–10f on 2026-09-23,
-  10g–10l on 2026-09-24; CI green through 10k on run 35959734855; 10l uncommitted).
+  10g–10l on 2026-09-24; CI green through 10l on run 35964870851).
 - **Blocked on:** nothing.
 
 Phase 9 was split into 9a–9d on 2026-09-17 before starting, the same way 6 and 8 were:
@@ -203,7 +216,7 @@ pass), `ctl.throttle` (nothing to throttle until Phase 10 has a row cursor).
 **a scheduler that runs them**, and **a console to watch it from**. From the repo root:
 
 ```powershell
-cargo test --workspace        # 1021 tests: 323 engine, 243 connectors, 113 scheduler, 65 console, 51 e2e, 51 cli, 48 state, 31 verified, 26 runner, 23 secrets, 17 native e2e, 15 metadata, 10 desktop, 5 plugin-sdk
+cargo test --workspace        # 1035 tests: 323 engine, 253 connectors, 113 scheduler, 65 console, 51 e2e, 51 cli, 48 state, 35 verified, 26 runner, 23 secrets, 17 native e2e, 15 metadata, 10 desktop, 5 plugin-sdk
 .\target\debug\etl.exe run samples\pipelines\orders_enriched.json
 .\target\debug\etl.exe validate samples\pipelines\orders_enriched.json
 .\target\debug\etl.exe plan samples\pipelines\orders_enriched.json --script
@@ -255,14 +268,14 @@ exists — writing the report only if one does. `plan.needs_session()` decides t
 because they read something that never got created, and the failures. The exit code is 3 either
 way. Getting the report back is the entire point of asking a run to continue.
 
-**Seventy-two components exist.** Sources: `src.cloud.http`, `src.cloud.s3`, `src.db.mysql`,
+**Seventy-four components exist.** Sources: `src.cloud.http`, `src.cloud.s3`, `src.db.mongodb`, `src.db.mysql`,
 `src.db.postgres`, `src.db.sqlite`, `src.file.csv`, `src.file.excel`, `src.file.json`,
 `src.file.jsonl`, `src.file.parquet`, `src.file.xml`, `src.lake.delta`, `src.lake.iceberg`,
 `src.queue.pubsub`, `src.queue.rabbitmq`, `src.queue.sqs`, `src.saas.graphql`, `src.saas.rest`, `src.stream.kafka`, `src.stream.kinesis`, `src.stream.nats`. Transforms:
 `xf.aggregate`, `xf.cast`, `xf.dedup`, `xf.derive`, `xf.distinct`, `xf.except`,
 `xf.filter`, `xf.intersect`, `xf.join`, `xf.limit`,
 `xf.pivot`, `xf.rename`, `xf.sample`, `xf.select`, `xf.sort`, `xf.sql`, `xf.union`,
-`xf.unpivot`, `xf.window`. Sinks: `snk.cloud.s3`, `snk.db.mysql`, `snk.db.postgres`,
+`xf.unpivot`, `xf.window`. Sinks: `snk.cloud.s3`, `snk.db.mongodb`, `snk.db.mysql`, `snk.db.postgres`,
 `snk.db.sqlite`, `snk.file.csv`, `snk.file.excel`, `snk.file.json`, `snk.file.jsonl`,
 `snk.file.parquet`, `snk.file.xml`, `snk.queue.pubsub`, `snk.queue.rabbitmq`, `snk.queue.sqs`, `snk.saas.graphql`, `snk.saas.rest`, `snk.stream.kafka`, `snk.stream.kinesis`, `snk.stream.nats`. Quality: `qa.accepted_values`, `qa.expression`, `qa.not_null`, `qa.range`,
 `qa.referential`, `qa.regex`, `qa.unique`. Quality assertions, which fail the run rather than
@@ -270,11 +283,11 @@ partitioning rows and so have no reject port: `qa.row_count`, `qa.schema_match`.
 `ctl.branch`, `ctl.fail`, `ctl.log`, `ctl.sequence`, `ctl.wait`. Everything else in the six
 namespaces compiles to `UnsupportedComponent`, by design.
 
-**Eighteen of them are written in Rust, not lowered to DuckDB alone** (the list below,
+**Twenty of them are written in Rust, not lowered to DuckDB alone** (the list below,
 `src.stream.kinesis` and `snk.stream.kinesis` from 10h and 10i, `src.queue.sqs` and
 `snk.queue.sqs` from 10j, the first that hold messages until the run's outcome,
 `src.queue.pubsub` and `snk.queue.pubsub` from 10k, and `src.queue.rabbitmq` and
-`snk.queue.rabbitmq` from 10l). `src.file.xml` and
+`snk.queue.rabbitmq` from 10l, and `src.db.mongodb` and `snk.db.mongodb` from 10m). `src.file.xml` and
 `snk.file.xml` (Phase 10a), `src.saas.rest` and `snk.saas.rest` (Phase 10b),
 `src.saas.graphql` and `snk.saas.graphql` (Phase 10d), `src.stream.kafka` (10e),
 `snk.stream.kafka` (10f), and `src.stream.nats` and `snk.stream.nats` (10g) are the *native*
@@ -657,7 +670,16 @@ fail the run. That is `ctl.fail`'s shape and it needs 6b's execution-model decis
 | 10i | — the Kinesis sink | **done** (pushed with `[skip ci]`; not checked against real AWS) | 2026-09-24 |
 | 10j | — receipts (acknowledge after success), and SQS | **done** (green in CI, run 35959734855; not checked against real AWS) | 2026-09-24 |
 | 10k | — Pub/Sub | **done** (green in CI, run 35959734855; not checked against real Google Cloud) | 2026-09-24 |
-| 10l | — RabbitMQ | **done** (uncommitted; against RabbitMQ 4.3 itself) | 2026-09-24 |
+| 10l | — RabbitMQ | **done** (`44d1aaa`; against RabbitMQ 4.3 itself) | 2026-09-24 |
+| 10m | — MongoDB | **done** (against MongoDB 8.0 itself) | 2026-09-24 |
+| 10n | — Redis (streams, held; keys) | planned | |
+| 10o | — BigQuery | planned (emulator only) | |
+| 10p | — Snowflake | planned (fixture only) | |
+| 10q | — MariaDB (through the MySQL components) | planned | |
+| 10r | — ClickHouse | planned | |
+| 10s | — Cassandra | planned | |
+| 10t | — Neo4j | planned | |
+| 10u | — SQL Server | planned; **open question 15** first | |
 | 11 | AI assistant + MCP server | not started | |
 | 12 | Benchmarks + parity audit | not started | |
 
@@ -898,9 +920,43 @@ recommended:
 70. **No real AWS or Google Cloud** (question 14): SQS and Pub/Sub are recorded as not yet
     checked against the real services, as Kinesis is.
 
+Decisions 71–81 are Phases 10m–10u's (databases and warehouses), agreed 2026-09-24: all as
+recommended, except Elasticsearch, which is not built.
+
+71. **One connector per sub-phase** (10m MongoDB, 10n Redis, 10o BigQuery, 10p Snowflake, 10q
+    MariaDB, 10r ClickHouse, 10s Cassandra, 10t Neo4j, 10u SQL Server), each committed and
+    pushed when green, the website updated after each, each started only when the user says so.
+72. **"Others on the site's list"** are the rest of its Databases group: MariaDB, ClickHouse,
+    Cassandra, SQL Server and Neo4j. Redshift, Databricks and DuckDB wait for a later family.
+73. **MongoDB**: a collection with filter, projection and sort, batched; incremental by a
+    field through a checkpoint; insert, or upsert on key fields. Change streams later.
+74. **Redis**: a Stream through a consumer group, held with 10j's receipts (`XACK` after
+    success), and a key snapshot by pattern (`SCAN`); sinks to a stream (`XADD`) and to hashes
+    by a key template.
+75. **BigQuery**: our own REST client with 10k's Google sign-in; query jobs paged for reads,
+    load jobs for writes; tested against `goccy/bigquery-emulator`. DuckDB's community
+    extension was the alternative.
+76. **Elasticsearch is not built** (the user, answering question 5): its test server needs
+    more memory than a test container is given. OpenSearch goes with it.
+77. **Snowflake**: the SQL API with key-pair sign-in (RS256, 10k's), results by partition,
+    batched inserts with bind variables; tested against the local fixture only.
+78. **No real cloud accounts** (question 8): BigQuery and Snowflake are recorded as not yet
+    checked against the real services and stay off the website's `working` list until they
+    are, as Kinesis, SQS and Pub/Sub do.
+79. **Test containers are capped at 1 GB of memory** (question 10), in CI's Ubuntu gate like
+    the others.
+80. **Oracle is deferred**: its client needs Oracle's native library on every machine, which
+    breaks the single binary.
+81. **Incremental native reads use 10e's checkpoints** (`incremental_field` or
+    `incremental_column` with `start`), not the DuckDB sources' `incremental` block, which
+    does not reach native sources.
+
 ## Open decisions
 
-None open.
+15. **SQL Server's test server** (before Phase 10u): it needs at least 2 GB of memory, more
+    than decision 79's 1 GB cap that ruled out Elasticsearch. (a) defer it, as Elasticsearch;
+    (b) run it only in a separate CI job with a larger runner; (c) test it against a fixture
+    only. No recommendation yet: the probe in 10q–10t will show how the other servers fit.
 
 Resolved 2026-09-23, all as recommended: (1) the session's stderr race is fixed by
 framing stderr with an `error()` marker, not by softening the test; (2) the failed Ubuntu job
@@ -1608,6 +1664,20 @@ ran*. Earlier ones were resolved 2026-09-16 (Settled decisions 5–8).
   `etl_metadata` while the crate built alone; `cargo clean -p` for two crates fixed it.
 - **Kinesis's signed client became `aws::JsonApi`** for SQS to share, proved by Kinesis's
   unchanged tests.
+
+### From Phase 10m
+
+- **Every MongoDB test passed at its first run**, after a probe of the driver answered the
+  design's questions first (TLS, upserts, errors, a missing collection).
+- **The mutation that inserts stop at the first refusal was not caught at first**: the test
+  put its duplicate last, where ordered and unordered agree. The duplicate is now in the
+  middle.
+- **Docker Desktop's clock ran 150 ms ahead of Windows'** by the second full run, and a
+  Kinesis `latest` test failed every time from then on: records put a moment before the run
+  carried arrival times after its start. Not the connector; the test now waits longer than
+  any skew, and `connectors.md` says `latest` depends on the machine's clock.
+- **`mongod`'s first start creates the user and restarts**: readiness waits for the image's
+  "init process complete" before a signed-in ping.
 
 ### From Phase 10l
 
@@ -2724,3 +2794,31 @@ Started by the user ("2 --> start 10l"), after 10j and 10k were committed and pu
 **1021 Rust tests with every server up, twice, none skipped; 143 frontend; fmt and clippy
 clean; four mutations each caught.** CI run 35959734855 (10j and 10k) green meanwhile. Not
 committed.
+
+### 2026-09-24 — Phases 10m–10u planned
+
+After 10l was pushed (`44d1aaa`), the user asked to target MongoDB, Redis, Elasticsearch, the
+site's other databases, Snowflake and BigQuery one by one. Research: each client crate's
+version, Rust version and TLS features (crates.io), each test image's size (Docker Hub).
+Answered all as recommended except Elasticsearch, dropped for its memory. Plan written as
+Phases 10m–10u (decisions 71–81; open question 15 for SQL Server). No code.
+
+### 2026-09-24 — Phase 10m: MongoDB
+
+Started by the user ("pls start 10m").
+
+- A scratchpad probe of `mongodb` 3.9 against `mongo:8.0`: types, Extended JSON filters, a
+  missing collection (silent), the `update` command upserting a batch, duplicate keys in an
+  unordered insert, a wrong password, an unreachable server; and its TLS source.
+- `crates/connectors` — `mongo.rs` (`src.db.mongodb`, `snk.db.mongodb`) with 10 tests (7
+  against MongoDB); `mongodb` added. `kinesis/tests.rs`: one test made clock-proof.
+- `samples/pipelines/mongodb_orders.json`; `verified.rs` — 4 tests (both transports with
+  three incremental runs, a failed run saving no position, preview); `mongodb` a
+  dev-dependency of the engine crate.
+- `scripts/test-services.ps1` — MongoDB 8.0 (57017, plain and TLS, 1 GB); `gate.yml` — 74
+  components; the registry test.
+- Docs: `connectors.md` (MongoDB; Kinesis's clock), the plan's as-built notes,
+  `learnings.md`, `assignments.md` (A57-A58).
+
+**1035 Rust tests with every server up, twice, none skipped; 146 frontend; fmt and clippy
+clean; six mutations each caught.**

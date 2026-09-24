@@ -1904,6 +1904,303 @@ confirms. The sample on both transports. **72 components.**
 **Later families**, planned one at a time when reached: NoSQL, warehouses over their own
 protocols, vector DBs.
 
+##### Phases 10m–10u — databases and warehouses, one connector at a time
+
+**Questions answered 2026-09-24** (Settled decisions 71–81): all as recommended, except that
+**Elasticsearch is not built** (decision 76): its test server needs more memory than the
+project will give a test container. **One connector per sub-phase**, each committed and
+pushed when green, the website updated after each, and each started only when the user says
+so. Oracle is deferred (decision 80).
+
+| Phase | Connector | Components | Test server | Checked against |
+|---|---|---|---|---|
+| 10m | MongoDB | `src.db.mongodb`, `snk.db.mongodb` | `mongo:8.0` (315 MB) | MongoDB itself |
+| 10n | Redis | `src.db.redis`, `snk.db.redis`, `src.stream.redis`, `snk.stream.redis` | `redis:8.2-alpine` (28 MB) | Redis itself |
+| 10o | BigQuery | `src.warehouse.bigquery`, `snk.warehouse.bigquery` | `goccy/bigquery-emulator` | the emulator; not real Google Cloud |
+| 10p | Snowflake | `src.warehouse.snowflake`, `snk.warehouse.snowflake` | none exists: the local fixture | the fixture; not real Snowflake |
+| 10q | MariaDB | none new: `src.db.mysql` and `snk.db.mysql` | `mariadb:11.8` (104 MB) | MariaDB itself |
+| 10r | ClickHouse | `src.db.clickhouse`, `snk.db.clickhouse` | `clickhouse:25.8` (231 MB) | ClickHouse itself |
+| 10s | Cassandra | `src.db.cassandra`, `snk.db.cassandra` | `cassandra:5.0` (168 MB), heap capped | Cassandra itself |
+| 10t | Neo4j | `src.db.neo4j`, `snk.db.neo4j` | `neo4j` 2026.08 (402 MB), heap capped | Neo4j itself |
+| 10u | SQL Server | `src.db.sqlserver`, `snk.db.sqlserver` | Microsoft's image, **needs 2 GB** | **open question 15** before it starts |
+
+Components: 72 now; 74, 78, 80, 82, 82, 84, 86, 88, and 90 after 10u.
+
+###### What every one of these shares
+
+1. **Native connectors** in `crates/connectors`, one module and one `tests.rs` each, like
+   10a–10l. Blocking where the client allows it; otherwise the NATS and RabbitMQ pattern (a
+   small `tokio` runtime of the connector's own, and **a deadline on every call**,
+   `timeout_ms`, because 10l found a client that never answers).
+2. **A probe first**, in the scratchpad, against the real test server, before any project
+   code: the client's behaviour on a wrong password, a missing database or table, TLS, and
+   anything the phase's design leans on. What it finds goes in the as-built notes.
+3. **Reads are bounded and typed.** Every source has `columns` (the fixed schema, as the
+   other native sources) and `max_records`; a document or row that does not fit is an error
+   naming it, never a silently dropped field.
+4. **Incremental reads use checkpoints** (10e's design), not the DuckDB sources'
+   `incremental` block, which applies to DuckDB-lowered sources only: a property
+   `incremental_field` (or `incremental_column`) with `start`, the highest value read saved
+   only after a fully successful run, and the checkpoint recording the field so a changed
+   field starts over. `etl state list` and `forget` see them as they see Kafka's. Documented,
+   as for watermarks: a field that can go *down* skips rows.
+5. **Sinks write in batches, at-least-once**, and a failure says how many rows landed before
+   it. Where the target has keys, an **upsert** mode makes a re-run idempotent.
+6. **Secrets and TLS as before.** Passwords and keys as `${SECRET:...}`; TLS through the
+   shared `tls.rs` where the client lets us hand it a `rustls` configuration, and the phase's
+   probe says so where it does not. Reports and errors name host, database and user, never a
+   password.
+7. **Test services**: each server is added to `test-services.ps1` in its own phase, with a
+   variable `ETL_TEST_<NAME>`, **capped at 1 GB of memory** (decision 79), and in CI's Ubuntu
+   gate. Tests skip without it. The engine's tests use each server's own admin surface to
+   set up (as 10l used RabbitMQ's management API).
+8. **Per phase:** a sample under `samples/pipelines/`, both transports and `preview` in
+   `verified.rs`, mutations on the settle and write paths, `connectors.md`, the plan's
+   as-built notes, `learnings.md`, `assignments.md`, the tracker, and the website's
+   `CLAIMS.md` naming the test that makes it `working` (only for phases checked against the
+   real software, decision 78).
+
+###### Phase 10m — MongoDB
+
+**Files.** `crates/connectors/src/{mongodb.rs, mongodb/tests.rs}`; `mongodb` 3.9 with `sync`
+and `rustls-tls` (`ring`), default features off where they pull more; the services script
+(`mongo:8.0`, a user and a TLS listener with Kafka's CA), `gate.yml`, `verified.rs`, a
+sample, `connectors.md`.
+
+**Do.**
+
+1. **`src.db.mongodb`** (decision 73): `uri` (`mongodb://` or `mongodb+srv://`), `username`,
+   `password`, `database`, `collection`; `filter` (a JSON query document, Extended JSON),
+   `projection`, `sort`; `batch_size`; `max_records` (default unbounded, as the DB sources);
+   `incremental_field` with `start` (a checkpoint of the highest value, as point 4); `columns`.
+   A document becomes a row: top-level fields to columns, nested documents and arrays as
+   JSON, `ObjectId` as its hex text, dates as UTC timestamps, `Decimal128` as text. `_id` is
+   always a column.
+2. **`snk.db.mongodb`**: `mode` `insert` (`insertMany`, unordered, in batches of 1,000) or
+   `upsert` on `key_fields` (`bulkWrite` of `replaceOne` with `upsert`), so a re-run
+   replaces rather than duplicates. Duplicate-key errors in `insert` name the row.
+3. **TLS**: the driver's own `rustls` configuration takes a CA file; `ca_cert` passes it.
+
+**Verify.** Against MongoDB: a filter and projection; nested fields as JSON; types
+(`ObjectId`, dates, decimals); incremental runs reading only newer documents, and a failed
+run saving no position; `max_records`; a wrong password and a missing collection named; TLS
+with `ca_cert` and refused without; insert and upsert round trips, a re-run of upsert adding
+nothing. The sample on both transports and `preview`. **74 components.**
+
+**Done.** MongoDB both ways, incremental, plain and TLS, semantics documented.
+
+**As built (2026-09-24).** Done as planned, with these differences:
+
+- **The module is `mongo.rs`**, so it cannot be mistaken for the `mongodb` crate.
+- **The driver's TLS is already our rule** (the probe read its source): `ca_file_path` alone
+  if given, else the bundled public roots, on `ring`. So `ca_cert` passes straight through.
+- **Upsert is the `update` command**, not the driver's `bulkWrite`, which needs MongoDB 8.
+- **A missing collection is looked for** (`listCollections`) before reading: MongoDB answers a
+  `find` on one with nothing.
+- **`mongod` takes plain and TLS connections on one port** (`allowTLS`) in the test services,
+  capped at 1 GB, with the certificate joined to its key by the container's shell.
+- **The engine's tests set up with the driver** (a dev-dependency of `etl-duckdb-engine`,
+  already compiled for the connector).
+- **A Kinesis test became clock-proof**: Docker Desktop's clock had drifted 150 ms ahead of
+  Windows', which made records put a moment before a `latest` run count as new. The test now
+  waits 1.5 s; `connectors.md` says `latest` depends on this machine's clock.
+
+###### Phase 10n — Redis
+
+**Files.** `crates/connectors/src/{redis.rs, redis/tests.rs}`; `redis` 1.7 (blocking API,
+`streams`, `tls-rustls`); the services script (`redis:8.2-alpine`, a password, a TLS
+listener), `gate.yml`, `verified.rs`, a sample, `connectors.md`, the frontend icon if a new
+group needs one.
+
+**Do.** (decision 74)
+
+1. **`src.stream.redis`**: a Redis **Stream** read through a **consumer group**,
+   `XREADGROUP` in bounded batches, **held until the run's outcome** with 10j's receipts:
+   `XACK` on acknowledge; on release the entries stay pending and are claimed again by the
+   next run (`XAUTOCLAIM` of this consumer's pending entries first, then new ones). Creates
+   the group if asked (`create_group`, from `$` or `0`). Rows: the entry's fields as columns
+   (or `value_format` over one field), plus `_stream`, `_id`, `_delivery_count`.
+2. **`src.db.redis`**: a **snapshot of keys** matching `pattern`, by `SCAN` (never `KEYS`):
+   hashes become rows of their fields, strings a `value` column (JSON if `value_format`
+   says so), plus `_key` and `_type`; other types refused by name. `max_records`.
+3. **`snk.stream.redis`**: each row one entry, `XADD` in pipelined batches, `maxlen`
+   optional (approximate trimming).
+4. **`snk.db.redis`**: each row a **hash** at `key_template` (e.g. `order:{order_id}`), or a
+   string of the row's JSON; `ttl_seconds` optional; pipelined. Idempotent by key.
+5. `url` (`redis://` or `rediss://`), `username`, `password`, `database`, `ca_cert`,
+   `timeout_ms`.
+
+**Verify.** Against Redis: a stream acknowledged, released (the next run gets the same
+entries, `_delivery_count` 2), `preview` releasing, `max_records` leaving the rest; a
+consumer group created from `0`; a key snapshot of hashes and strings, a wrong type named;
+the sinks round trip, a re-run of the hash sink adding no keys; a wrong password named; TLS.
+The samples on both transports. **78 components.**
+
+**Done.** Redis streams (held) and keys, both ways, semantics documented.
+
+###### Phase 10o — BigQuery
+
+**Files.** `crates/connectors/src/{bigquery.rs, bigquery/tests.rs}`, reusing `gcp.rs` and
+`http.rs`; the services script (`ghcr.io/goccy/bigquery-emulator`, pinned), `gate.yml`,
+`verified.rs`, a sample, `connectors.md`, a `warehouse` icon.
+
+**Do.** (decision 75)
+
+1. **`src.warehouse.bigquery`**: `project`, `dataset` and `table`, or `query` (GoogleSQL);
+   `location`; the Google sign-in set from 10k (`credentials_file`, the variable, gcloud's
+   login; none for a plain-`http://` emulator endpoint); `max_records`;
+   `incremental_column` with `start`, as a **query parameter**, never pasted into the SQL.
+   `jobs.query`, then `getQueryResults` page by page; BigQuery's typed JSON rows converted
+   by the result schema (INT64 as integers, NUMERIC as text, TIMESTAMP as UTC timestamps,
+   RECORD and REPEATED as JSON). The report names the job and the bytes it processed.
+2. **`snk.warehouse.bigquery`**: `mode` `append` or `truncate`; rows as NDJSON in a **load
+   job** (free, unlike streaming inserts), one job per run up to a size limit, then more;
+   the job polled to completion, its errors named with the row where BigQuery says.
+3. The sign-in scope `bigquery`. Everything else as 10k's `Api`.
+
+**Verify.** Against the emulator: a table read and a query read, types, pages, an
+incremental second run reading only new rows, a missing table named; the load job
+round trip, `truncate` replacing. Against the fixture: sign-in carried, a job still running
+polled, a failed job's errors reported. The sample on both transports. **80 components.**
+
+**Done.** BigQuery both ways against the emulator; "not yet checked against real Google
+Cloud" recorded.
+
+###### Phase 10p — Snowflake
+
+**Files.** `crates/connectors/src/{snowflake.rs, snowflake/tests.rs}`, reusing `gcp.rs`'s
+RS256 (moved to a shared `jwt.rs` if both need it) and `http.rs`; `connectors.md`, a sample
+(parameters only, as no server runs it); `verified.rs` gains nothing, as no server runs.
+
+**Do.** (decision 77)
+
+1. **Sign-in by key pair**: `account`, `user`, `private_key_file` (PKCS#8 PEM), the JWT
+   Snowflake's SQL API asks for (`iss` = `ACCOUNT.USER.SHA256:<public key fingerprint>`,
+   `sub` = `ACCOUNT.USER`, an hour), sent with `X-Snowflake-Authorization-Token-Type:
+   KEYPAIR_JWT`. `role`, `warehouse`, `database`, `schema`. Programmatic access tokens later.
+2. **`src.warehouse.snowflake`**: `table` or `query`; `POST /api/v2/statements`, polled while
+   it runs, then every result **partition** fetched; rows converted by the result metadata
+   (NUMBER with scale as text, TIMESTAMP_* as UTC, VARIANT/OBJECT/ARRAY as JSON);
+   `incremental_column` with `start` as a **bind variable**; `max_records`.
+3. **`snk.warehouse.snowflake`**: batched `INSERT` with bind variables (arrays of values),
+   `mode` `append` or `truncate`; a failed batch says how many rows were inserted before it.
+   (`PUT` and `COPY` are not available through the SQL API.)
+
+**Verify.** Against the fixture only: the JWT's claims and fingerprint, checked against a
+public-key fingerprint computed independently in the test; a statement polled (`202`, then
+`200`); partitions fetched; types; bind variables sent, never interpolated; errors with
+Snowflake's `code` and `message` named; the sink's batches. **82 components.**
+
+**Done.** Snowflake both ways against the fixture; "not yet checked against real Snowflake"
+recorded, and not marked working on the website.
+
+###### Phase 10q — MariaDB
+
+**Files.** The services script (`mariadb:11.8`), `verified.rs`, `connectors.md` or the DB
+section of the docs, the website.
+
+**Do.** Run the existing `src.db.mysql` and `snk.db.mysql` against MariaDB: reads, both write
+modes, types (MariaDB's `UUID`, `INET6`, `JSON` as `LONGTEXT`), a wrong password. Fix what
+fails. No new component unless the probe shows MariaDB needs one (then `src.db.mariadb`).
+
+**Verify.** The same tests as MySQL's in `verified.rs`, against MariaDB. **82 components.**
+
+**Done.** MariaDB proven through the MySQL components, or given its own if it must be.
+
+###### Phase 10r — ClickHouse
+
+**Files.** `crates/connectors/src/{clickhouse.rs, clickhouse/tests.rs}` over `http.rs` (the
+`clickhouse` crate needs Rust 1.89, above the project's 1.88); the services script
+(`clickhouse:25.8`, a user), `gate.yml`, `verified.rs`, a sample, `connectors.md`.
+
+**Do.**
+
+1. **`src.db.clickhouse`**: `url` (the HTTP interface, `http://` or `https://`), `username`,
+   `password`, `database`; `table` or `query`; rows streamed as `JSONEachRow`, read line by
+   line so memory stays flat; `incremental_column` as a **query parameter**
+   (`{name:Type}`); `max_records`.
+2. **`snk.db.clickhouse`**: `INSERT ... FORMAT JSONEachRow` in batches of 100,000 rows or
+   16 MB; `insert_deduplication_token` per batch, so a retried batch is not inserted twice.
+3. Errors: ClickHouse's `Code: N. DB::Exception` text, trimmed and named.
+
+**Verify.** Against ClickHouse: a table and a query read, types (`Decimal`, `DateTime64`,
+`Array`, `Nullable`, `LowCardinality`), incremental runs, a missing table and a wrong
+password named; the sink round trip and a retried batch deduplicated. **84 components.**
+
+**Done.** ClickHouse both ways, semantics documented.
+
+###### Phase 10s — Cassandra
+
+**Files.** `crates/connectors/src/{cassandra.rs, cassandra/tests.rs}`; `scylla` 1.9 with
+`rustls-023`; the services script (`cassandra:5.0`, heap 512 MB, a password authenticator),
+`gate.yml`, `verified.rs`, a sample, `connectors.md`.
+
+**Do.**
+
+1. **`src.db.cassandra`**: `contact_points`, `username`, `password`, `keyspace`, `table` or
+   `query` (CQL), `consistency` (default `LOCAL_QUORUM`); paged reads (`page_size`);
+   `max_records`. A full-table read is a token-range scan, documented as such: Cassandra has
+   no cheap "everything newer than" query, so **no incremental read** unless the query names
+   a clustering-key range itself.
+2. **`snk.db.cassandra`**: prepared `INSERT`s, concurrent up to a limit, `ttl_seconds`
+   optional. Cassandra's inserts are upserts, so a re-run is idempotent by primary key.
+3. Types: `uuid`/`timeuuid` as text, `decimal` and `varint` as text, collections and UDTs as
+   JSON, `timestamp` as UTC.
+
+**Verify.** Against Cassandra: a table and a query read across several pages, types, a
+missing keyspace and a wrong password named; the sink round trip and a re-run adding
+nothing. **86 components.**
+
+**Done.** Cassandra both ways, semantics documented.
+
+###### Phase 10t — Neo4j
+
+**Files.** `crates/connectors/src/{neo4j.rs, neo4j/tests.rs}` over `http.rs` (Neo4j's Query
+API, `POST /db/<database>/query/v2`); the services script (`neo4j`, heap 512 MB, a
+password), `gate.yml`, `verified.rs`, a sample, `connectors.md`.
+
+**Do.**
+
+1. **`src.db.neo4j`**: `url`, `username`, `password`, `database`, `query` (Cypher, returning
+   named columns), `parameters`; nodes and relationships returned whole become JSON;
+   `max_records`, enforced with the query's own `LIMIT` when it has none.
+2. **`snk.db.neo4j`**: `cypher` run once per batch with the rows as `$rows`
+   (`UNWIND $rows AS row MERGE ...`), batches of 1,000 in one transaction each; the write is
+   as idempotent as the Cypher (`MERGE`), which `connectors.md` says plainly.
+
+**Verify.** Against Neo4j: a query read of nodes, relationships and scalars, parameters, a
+Cypher error named with its code; the sink creating nodes and relationships, a re-run with
+`MERGE` adding nothing. **88 components.**
+
+**Done.** Neo4j both ways, semantics documented.
+
+###### Phase 10u — SQL Server (only once open question 15 is answered)
+
+**Files.** `crates/connectors/src/{sqlserver.rs, sqlserver/tests.rs}`; `tiberius` with
+`rustls`; the services script (`mcr.microsoft.com/mssql/server`), `gate.yml`, `verified.rs`,
+a sample, `connectors.md`.
+
+**Do.** `src.db.sqlserver` (`table` or `query`, `incremental_column` as a parameter) and
+`snk.db.sqlserver` (batched inserts, `mode` `append`, `truncate` or `merge` on `key_columns`
+through a staging table); SQL and Windows-free authentication (SQL logins), TLS with
+`ca_cert` or `trust_server_certificate` for a test server.
+
+**Verify.** Against SQL Server: reads, types (`decimal`, `datetime2`, `datetimeoffset`,
+`uniqueidentifier`, `nvarchar(max)`), incremental runs, the three write modes. **90
+components.**
+
+**Done.** SQL Server both ways, semantics documented.
+
+**Open question 15 (before 10u):** SQL Server's test server needs at least 2 GB of memory,
+more than the 1 GB cap that ruled out Elasticsearch. (a) defer it, as Elasticsearch;
+(b) run it only in a separate CI job with a larger runner; (c) test it against a fixture only.
+
+**Deferred.** **Elasticsearch** (decision 76: memory), **Oracle** (decision 80: Oracle's
+native client library would break the single binary), OpenSearch with Elasticsearch.
+**Later families**, planned when reached: the site's remaining warehouses (Redshift,
+Databricks, DuckDB), file formats (TSV, Arrow, Avro), object storage (GCS, Azure Blob, real
+S3), and named SaaS connectors.
+
 ### Phase 11 — AI assistant + MCP server
 
 **Goal.** A local model writes valid pipeline JSON; external agents drive the studio.

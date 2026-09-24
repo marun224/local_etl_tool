@@ -663,3 +663,29 @@ the fuller record. From Phase 10 on, a section is added at the end of each phase
 - **Passing a string with nested double quotes to a native program from PowerShell 5.1.**
   Use single quotes inside, or build the argument some other way.
 - **Assuming a header a broker documents is stable across major versions** (`x-delivery-count`).
+
+## Phase 10m — MongoDB (2026-09-24)
+
+**Concepts**
+- **Extended JSON** is how JSON carries BSON's extra types (`$date`, `$oid`,
+  `$numberDecimal`, `$numberLong`): the same text goes into a filter, a `start` and a
+  checkpoint and comes back as the right type.
+- **Incremental reads on a document store** are a filter the run adds (`field > saved`) and a
+  sort, so the last document read is the highest; saving it only after success is 10e's
+  checkpoint, unchanged.
+- **Unordered bulk writes** keep going past a refused document, so "how many landed" is the
+  batch size minus the refusals, not zero.
+
+**Decisions and why**
+- **The server command over the driver's newest API** for upserts: `update` with many
+  statements works on every server version; `bulkWrite` only on MongoDB 8.
+- **Check that a collection exists**: a silent empty read of a misspelt collection is the
+  worst kind of success.
+- **Make a test prove the connector, not the clocks**: a wait longer than any skew, and the
+  dependency written down for users.
+
+**Mistakes worth not repeating**
+- **A mutation test that cannot tell two behaviours apart** proves nothing: put the case
+  where they differ (a refusal mid-batch) in the test.
+- **Assuming a test that passed once is deterministic**: environmental drift (a VM clock)
+  can turn it red an hour later.

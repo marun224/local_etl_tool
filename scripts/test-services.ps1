@@ -3,7 +3,8 @@
     Start the servers the verification tests run against: PostgreSQL, MySQL
     and MinIO (S3) from Phase 10c, Kafka from 10e, NATS from 10g, a Kinesis
     stand-in from 10h, an SQS stand-in from 10j, Google's Pub/Sub emulator
-    from 10k and RabbitMQ from 10l, each in a throwaway container.
+    from 10k, RabbitMQ from 10l and MongoDB from 10m, each in a throwaway
+    container.
 
 .DESCRIPTION
     The verification tests read these environment variables and skip each
@@ -45,6 +46,11 @@
       ETL_TEST_RABBITMQ_HTTP
                           http://host:port of its management API, which the
                           engine's tests use to make queues and count them
+      ETL_TEST_MONGODB    mongodb://etl:etl-secret@host:port/?authSource=admin of
+                          MongoDB 8.0
+      ETL_TEST_MONGODB_TLS
+                          the same server over TLS (it takes both on one port),
+                          certificate signed by Kafka's CA (ETL_TEST_KAFKA_CA)
 
     This script starts the containers on a private network, waits until each
     one answers, creates the bucket with MinIO's own `mc` client, and then
@@ -75,7 +81,7 @@ $natsCreds = 'etl-test-nats-creds'
 $containers = @('etl-test-postgres', 'etl-test-mysql', 'etl-test-minio', 'etl-test-kafka',
     'etl-test-nats', 'etl-test-nats-users', 'etl-test-nats-token', 'etl-test-nats-tls',
     'etl-test-nats-creds', 'etl-test-kinesis', 'etl-test-sqs', 'etl-test-pubsub',
-    'etl-test-rabbitmq')
+    'etl-test-rabbitmq', 'etl-test-mongodb')
 
 function Invoke-Docker {
     $output = & docker @args 2>&1
@@ -110,7 +116,7 @@ if ($LASTEXITCODE -ne 0) {
 Remove-Everything
 Invoke-Docker network create $network
 
-Write-Host 'Starting PostgreSQL, MySQL, MinIO, Kafka, NATS, Kinesis, SQS, Pub/Sub and RabbitMQ (the first run pulls the images)'
+Write-Host 'Starting PostgreSQL, MySQL, MinIO, Kafka, NATS, Kinesis, SQS, Pub/Sub, RabbitMQ and MongoDB (the first run pulls the images)'
 
 Invoke-Docker run -d --name etl-test-postgres --network $network -p 55432:5432 `
     -e POSTGRES_PASSWORD=etl postgres:16
@@ -232,6 +238,16 @@ Invoke-Docker run -d --name etl-test-rabbitmq --network $network `
     --entrypoint sh rabbitmq:4.3-alpine -c `
     "printf '%s\n' $($rabbitTls -join ' ') > /etc/rabbitmq/conf.d/20-etl-tls.conf && echo '[rabbitmq_management].' > /etc/rabbitmq/enabled_plugins && exec docker-entrypoint.sh rabbitmq-server"
 
+# MongoDB 8.0, user etl / etl-secret, capped at 1 GB (Settled decision 79). It
+# takes plain and TLS connections on one port (allowTLS), with the certificate
+# made for Kafka, which mongod wants as one file with its key: the container's
+# shell joins them before the server starts.
+Invoke-Docker run -d --name etl-test-mongodb --network $network --memory 1g `
+    -p 57017:27017 -v "${kafkaSecrets}:/certs:ro" `
+    -e MONGO_INITDB_ROOT_USERNAME=etl -e MONGO_INITDB_ROOT_PASSWORD=etl-secret `
+    --entrypoint sh mongo:8.0 -c `
+    'cat /certs/server.pem /certs/server.key > /tmp/server-with-key.pem && exec docker-entrypoint.sh mongod --tlsMode allowTLS --tlsCertificateKeyFile /tmp/server-with-key.pem --tlsCAFile /certs/ca.pem --tlsAllowConnectionsWithoutCertificates'
+
 function Wait-For([string] $what, [scriptblock] $probe, [int] $seconds = 180) {
     $deadline = (Get-Date).AddSeconds($seconds)
     while ((Get-Date) -lt $deadline) {
@@ -315,6 +331,17 @@ Wait-For 'Pub/Sub' {
 # Both listeners accepting connections, not merely the node up.
 Wait-For 'RabbitMQ' { docker exec etl-test-rabbitmq rabbitmq-diagnostics -q check_port_connectivity }
 
+# The image creates the user on a first, local-only start and then restarts:
+# ready means that is over and the real server answers a signed-in ping.
+Wait-For 'MongoDB' {
+    $logs = docker logs etl-test-mongodb 2>&1 | Out-String
+    if ($logs -match 'init process complete') {
+        docker exec etl-test-mongodb mongosh --quiet 'mongodb://etl:etl-secret@127.0.0.1:27017/admin' --eval 'db.runCommand({ ping: 1 }).ok'
+    } else {
+        $global:LASTEXITCODE = 1
+    }
+}
+
 # The CA certificate, for the tests' `ca_cert`. Under target/, which git ignores.
 $caDirectory = Join-Path $PSScriptRoot '../target/test-services'
 New-Item -ItemType Directory -Force $caDirectory | Out-Null
@@ -344,6 +371,8 @@ $variables = [ordered]@{
     ETL_TEST_RABBITMQ       = 'amqp://etl:etl-secret@127.0.0.1:57672/%2f'
     ETL_TEST_RABBITMQ_TLS   = 'amqps://etl:etl-secret@127.0.0.1:57671/%2f'
     ETL_TEST_RABBITMQ_HTTP  = 'http://127.0.0.1:57673'
+    ETL_TEST_MONGODB        = 'mongodb://etl:etl-secret@127.0.0.1:57017/?authSource=admin'
+    ETL_TEST_MONGODB_TLS    = 'mongodb://etl:etl-secret@127.0.0.1:57017/?authSource=admin&tls=true'
 }
 
 if ($env:GITHUB_ENV) {

@@ -440,3 +440,18 @@ Copy-Item samples\pipelines\orders_enriched.json samples\out\scratch\
   *Hint:* what does the confirm say about a message that reached no queue?
   *Check:* explain in two sentences why the test passes with `mandatory: true` and fails
   without it, and what a user would have seen in production.
+
+## Phase 10m — MongoDB
+
+- [ ] **A57. Watch a checkpoint keep its type.**
+  *Do:* run `samples/pipelines/mongodb_orders.json` twice with the services up, then change
+  its `incremental_field` to `order_ts` and run it again.
+  *Check:* `etl state list` shows the position as Extended JSON; after the change, the
+  report says the saved position was set aside. Why must a date be saved as
+  `{"$date": ...}` and not as text?
+
+- [ ] **A58. 🦀 Upsert or insert?**
+  *Do:* in `mongo/tests.rs`, write a test that sends the same five rows twice with
+  `mode: insert` and no `_id`.
+  *Check:* explain the count you get, and which setting would make the second run add
+  nothing.

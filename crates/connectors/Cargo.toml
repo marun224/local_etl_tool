@@ -15,6 +15,7 @@ etl-plugin-sdk.workspace = true
 etl-state.workspace = true
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 lapin = { version = "4.12", default-features = false, features = ["rustls--ring", "tokio"] }
+mongodb = { version = "3.9", default-features = false, features = ["compat-3-0-0", "rustls-tls", "sync", "dns-resolver"] }
 quick-xml = "0.41.0"
 ring = "0.17"
 rskafka = { version = "0.6", features = ["transport-tls"] }

@@ -2272,3 +2272,45 @@ python docs_10l.py                         # connectors.md, plan, tracker, learn
 ```
 
 Not committed.
+
+## 2026-09-24 — Phases 10m–10u: research and plan
+
+```bash
+curl https://crates.io/api/v1/crates/{mongodb,redis,elasticsearch,tiberius,scylla,neo4rs,clickhouse,oracle,bson}
+#   mongodb 3.9.1 (1.88; sync, rustls on ring), redis 1.7.0 (1.88), elasticsearch 9.1.0-alpha.1,
+#   tiberius 0.12.3 (2024), scylla 1.9.0 (1.88), neo4rs 0.8.0, clickhouse 0.15.2 (1.89: too new),
+#   oracle 0.6.3 (needs Oracle's client library)
+curl https://crates.io/api/v1/crates/{mongodb/3.9.1,redis/1.7.0,scylla/1.9.0}   # features
+curl https://hub.docker.com/v2/repositories/<image>/tags/<tag>                    # sizes:
+#   mongo:8.0 315 MB, redis:8.2-alpine 28 MB, elasticsearch:9.1.4 716 MB, opensearch:3.2.0 1005 MB,
+#   clickhouse:25.8 231 MB, cassandra:5.0 168 MB, neo4j:2026.08 402 MB, mariadb:11.8 104 MB
+python plan_10m_apply.py                  # scratchpad: plan Phases 10m-10u, tracker decisions 71-81,
+                                          #   open question 15, status rows, next
+```
+
+Answered all as recommended except Elasticsearch (not built: memory). No code.
+
+## 2026-09-24 — Phase 10m: MongoDB
+
+```bash
+docker run -d --rm --name etl-probe-mongo -p 57017:27017 -e MONGO_INITDB_ROOT_USERNAME=etl ... mongo:8.0
+cargo new mongo_probe (scratchpad); cargo add mongodb@3.9 --no-default-features -F compat-3-0-0,rustls-tls,sync,dns-resolver
+cargo tree -e normal | grep -ci "aws-lc|openssl"   # 0
+cargo run (probe)                          # types, Extended JSON filter, missing collection silent, update-command upsert,
+                                           #   unordered duplicate keys, wrong password, unreachable server
+cargo add -p etl-connectors mongodb@3.9 (same features); engine dev-dependency the same
+./scripts/test-services.ps1                # now also etl-test-mongodb (57017, allowTLS, 1 GB)
+cargo test -p etl-connectors --lib mongo::tests          # 10, first run
+cargo test -p etl-duckdb-engine --test verified mongodb  # 4
+python mutate_10m.py                       # 6 mutations; "insert stops at the first refusal" NOT caught,
+                                           #   test fixed (duplicate mid-batch), then caught
+cargo fmt --all --check; cargo clippy --workspace --all-targets -- -D warnings
+./target/debug/etl components              # 74
+cd frontend; npm test; npm run typecheck   # 146
+cargo test --workspace                     # round 2: kinesis latest test FAILED (Docker Desktop clock 150 ms ahead)
+python kinesis_at.py (scratchpad)          # arrival timestamps later than the host's clock after the puts
+# kinesis/tests.rs: wait 1.5 s before the latest run; connectors.md: latest depends on the clock
+cargo test --workspace                     # every ETL_TEST_* set, twice: 1035 and 1035, none skipped
+python docs_10m.py                         # connectors.md, plan, tracker, learnings, assignments (A57-A58)
+./scripts/test-services.ps1 -Stop
+```

@@ -423,6 +423,12 @@ fn a_run_that_is_not_saved_is_read_again_and_latest_reads_only_what_arrives() {
     let (again, _, _) = run_once(&properties_, None);
     assert_eq!(first, again);
 
+    // `latest` starts from this machine's clock, which Kinesis compares with
+    // its own arrival times. Docker Desktop's clock drifts ahead of the host's
+    // (150 ms seen in 10m), making records put a moment ago look newer than
+    // "now"; a wait longer than any such skew keeps the test about the
+    // connector rather than the clocks.
+    std::thread::sleep(Duration::from_millis(1500));
     let mut latest = properties_.clone();
     latest["start"] = json!("latest");
     let (nothing, saved, _) = run_once(&latest, None);
