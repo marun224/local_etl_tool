@@ -3,6 +3,52 @@
 **State only.** Design lives in [PLAN_duckle_parity.md](PLAN_duckle_parity.md). Read this file
 first when picking the project back up.
 
+> ## ✅ Phase 11d3 (prompt, classify, extract) — built 2026-09-25, green locally, pushed with `[skip ci]`
+>
+> **What 11d3 built:** three components that ask a model about each row, as native
+> transforms: **`xf.ai.prompt`** (a `{column}` template, the answer as text),
+> **`xf.ai.classify`** (always one of your labels, constrained by a JSON Schema and checked),
+> **`xf.ai.extract`** (named fields, one typed column each). Any OpenAI-compatible
+> `base_url` (the key a `${SECRET:...}`, the host in lineage, the key nowhere), or, unset,
+> the local model, so all three work offline. Guardrails: `max_rows` refused before any call,
+> `concurrency`, a timeout and retries per call; a call that still fails fails the stage,
+> naming its row. The sample `tickets_triaged.json` runs all three on the local model (~10 s a
+> stage for four tickets; its judgement is a 1.5B model's, and the docs say so). **88
+> components, 1208 Rust tests** (18 new; the test services were stopped), **183 frontend**;
+> fmt, clippy and `tsc` clean; six mutations each caught by a test that runs in CI.
+>
+> **Phase 11 is finished**: 11a (MCP), 11b (`etl assist`), 11c (the chat panel), 11d1–11d3
+> (the six `xf.ai.*`). **11b–11d3 are pushed with `[skip ci]`** (the user: "pls commit and
+> push all changes. do not run CI"), so **CI has not run on anything since 11a**. **Next: Phase 12**
+> (benchmarks and the parity audit), planned in detail when the user starts it.
+
+> ## ✅ Phase 11d2 (native transforms, `xf.ai.embed`) — built 2026-09-25, green locally, pushed with `[skip ci]`
+>
+> **What 11d2 built:** the engine can run **Rust between two DuckDB stages**: a native
+> transform (a `Transform` trait in the SDK) gets only the columns it reads, keyed by row, and
+> its added columns are joined back, so every other column keeps its type. **`xf.ai.embed`**
+> is the first: bge-small-en-v1.5 (37 MB, fetched by `scripts/fetch-model.ps1`) run by
+> `llama-server` for the stage, a `FLOAT[384]` vector per text. Preview runs it; `etl build`
+> refuses it (the model stays on this machine). The sample `tickets_for_search.json` embeds
+> the tickets' chunks in 0.7 s. **85 components, 1190 Rust tests** (14 new; 3 need the model;
+> the test services were stopped), **180 frontend**; fmt, clippy and `tsc` clean; five
+> mutations each caught, one only by the model tests.
+>
+> **Not committed, not pushed, no CI** (decision 115).
+
+> ## ✅ Phase 11d1 (chunk and redact) — built 2026-09-25, green locally, pushed with `[skip ci]`
+>
+> **What 11d1 built:** two components in plain SQL, no model. **`xf.ai.chunk`** splits a text
+> column into overlapping chunks (one row each, other columns kept) that end at whitespace
+> and overlap by whole words. **`xf.ai.redact`** replaces emails, phone numbers, card numbers
+> (Luhn-checked), SSNs and IP addresses with `[EMAIL]`-style tokens or joinable hashes; names
+> and street addresses are not found, and the help says so. `docs/ai_transforms.md`; the
+> sample `tickets_for_retrieval.json`. **84 components, 1176 Rust tests** (13 new; the test
+> services were stopped, so theirs returned early), **177 frontend**; fmt, clippy and `tsc`
+> clean; six mutations each caught by a named test.
+>
+> **Not committed, not pushed, no CI** (decision 115).
+
 > ## ✅ Phase 11c (the chat panel) — built 2026-09-25, green locally, pushed with `[skip ci]`
 >
 > **What 11c built:** in the desktop app, **Assistant** in the header opens a panel where a
@@ -374,8 +420,9 @@ first when picking the project back up.
 
 ## Where things stand
 
-- **Next phase:** **11d, the `xf.ai.*` transforms**, whose scope is decided when it starts
-  (decision 98); it starts when the user says so. **11a, 11b and 11c are done** (`etl mcp`,
+- **Next phase:** **Phase 12, benchmarks and the parity audit**, in the plan; to be planned in
+  detail (questions first) when the user starts it. **Phase 11 is finished** (11a–11d3),
+  all pushed; 11b–11d3 with `[skip ci]`, so CI has not run since 11a. **11a, 11b and 11c are done** (`etl mcp`,
   `etl assist`, the chat panel); **11b and 11c are pushed with `[skip ci]`**, so CI has not
   run on them yet. **Phases 10m–10u are finished**; Phase 10's later families (the
   plan's *Later families*) wait until the user chooses one. **10n (Redis), 10s (Cassandra) and 10t (Neo4j) are not
@@ -408,7 +455,7 @@ pass), `ctl.throttle` (nothing to throttle until Phase 10 has a row cursor).
 **a scheduler that runs them**, and **a console to watch it from**. From the repo root:
 
 ```powershell
-cargo test --workspace        # 1163 tests (with the model in tools/): 13 + 8 + 1 assistant, 3 assist e2e, 14 desktop, 324 engine, 321 connectors, 113 scheduler, 65 console, 51 e2e, 51 cli, 48 state, 48 verified, 26 runner, 23 secrets, 19 metadata, 17 native e2e, 9 mcp, 5 plugin-sdk, 4 mcp e2e
+cargo test --workspace        # 1208 tests (with the models in tools/): 13 + 8 + 1 assistant, 4 assist e2e, 14 desktop, 8 ai_text, 3 ai_embed, 1 ai_ask, 337 engine, 321 connectors, 113 scheduler, 65 console, 51 e2e, 51 cli, 48 state, 48 verified, 26 runner, 23 secrets, 19 metadata, 17 native e2e, 9 mcp, 5 plugin-sdk, 4 mcp e2e
 .\target\debug\etl.exe run samples\pipelines\orders_enriched.json
 .\target\debug\etl.exe validate samples\pipelines\orders_enriched.json
 .\target\debug\etl.exe plan samples\pipelines\orders_enriched.json --script
@@ -875,12 +922,15 @@ fail the run. That is `ctl.fail`'s shape and it needs 6b's execution-model decis
 | 10s | — Cassandra | **removed from the plan** (the user's choice, decision 86) | 2026-09-24 |
 | 10t | — Neo4j | **removed from the plan** (the user's choice, decision 86) | 2026-09-24 |
 | 10u | — SQL Server | **done** (against the local TDS fixture only; not checked against real SQL Server) | 2026-09-24 |
-| 11 | AI assistant + MCP server | **planned** in four sub-phases (decisions 91–98) | |
+| 11 | AI assistant + MCP server | **done** (11a–11d3; pushed, CI not run since 11a) | 2026-09-25 |
 | 11a | — the MCP server (`etl mcp`, stdio) | **done** (thirteen tools; `docs/mcp.md`) | 2026-09-24 |
 | 11b | — the local model and grammar-constrained output (`etl assist`) | **done** (10 of 10 on this machine; `docs/assist.md`; pushed, CI not run) | 2026-09-25 |
 | 11c | — the chat panel (desktop app) | **done** (decisions 99–105; pushed, CI not run; clicking through is A73) | 2026-09-25 |
-| 11d | — the `xf.ai.*` transforms | **next**; scope decided when it starts | |
-| 12 | Benchmarks + parity audit | not started | |
+| 11d | — the `xf.ai.*` transforms | **done** in three (decisions 106–115) | 2026-09-25 |
+| 11d1 | — `xf.ai.chunk` and `xf.ai.redact`, in SQL | **done** (pushed, CI not run; `docs/ai_transforms.md`) | 2026-09-25 |
+| 11d2 | — the native transform stage; `xf.ai.embed` | **done** (pushed, CI not run; `docs/ai_transforms.md`) | 2026-09-25 |
+| 11d3 | — `xf.ai.prompt`, `xf.ai.classify`, `xf.ai.extract` | **done** (pushed, CI not run; `docs/ai_transforms.md`) | 2026-09-25 |
+| 12 | Benchmarks + parity audit | **next**; not planned in detail | |
 
 ## Settled decisions
 
@@ -1214,9 +1264,29 @@ Decisions 99–105 are Phase 11c's, agreed 2026-09-25 ("pls go with recommended"
 105. **Git as for 11b**: no commit, push or CI until the user says; 11b and 11c stay in the
     working tree.
 
+Decisions 106–115 are Phase 11d's, agreed 2026-09-25 ("all as recommended"):
+
+106. **11d is three sub-phases**: 11d1 `xf.ai.chunk` and `xf.ai.redact` in SQL; 11d2 the
+    native transform stage and `xf.ai.embed`; 11d3 the endpoint transforms. Each is built
+    when the user says.
+107. **PII is found by patterns in SQL**: email, phone, credit card, SSN, IP address. Names
+    and street addresses are not found, and the help says so.
+108. **Chunks are measured in characters**, with overlap, ending at whitespace.
+109. **The embedding model is bge-small-en-v1.5** (about 35 MB, 384 dimensions, English).
+110. **An embedding is a `FLOAT[n]` column**, which DuckDB's `vss` can index.
+111. **The endpoint transforms are `xf.ai.prompt`, `xf.ai.classify` and `xf.ai.extract`.**
+112. **Without a `base_url`, the vendored local model answers**, so all six work offline.
+113. **Guardrails**: `max_rows` (default 1,000, refused before any call), `concurrency`
+    (default 4), a timeout and retries per call; a call that still fails fails the stage.
+114. **`etl build` refuses the local models**; the endpoint transforms build, their key a
+    secret as today.
+115. **Git as for 11b and 11c**: no commit, push or CI until the user says.
+
 ## Open decisions
 
-None open. Questions 17–23 (Phase 11c) were answered 2026-09-25, all as recommended: Settled decisions 99–105.
+None open. Questions 24–33 (Phase 11d) were answered 2026-09-25, all as recommended: Settled decisions 106–115.
+
+Questions 17–23 (Phase 11c) were answered 2026-09-25, all as recommended: Settled decisions 99–105.
 
 (15, SQL Server's test server, was answered 2026-09-24: a fixture only, decision 87.)
 
@@ -3395,3 +3465,92 @@ The user: "pls commit and push 11b and 11c, do not run git CI". One commit for b
 docs interleave), with `[skip ci]` in the message, as for 10r. CI's first run on them is
 still owed: the new `etl-assistant` tests and the `jsonschema` dev-dependency have never
 built on Linux.
+
+### 2026-09-25 — Phase 11d planned; questions 24–33
+
+Started by the user ("pls start 11d"). Under the workflow's rules this session planned 11d
+and asked; nothing of it is built.
+
+- **Read**: how native components run (`native.rs`: sources before DuckDB, sinks after, a
+  JSON Lines file between), the driven path (`run_driven`, which acts between stages), and
+  `DECISION_execution_model.md`.
+- **Found**: chunk and redact are SQL and need no model; embeddings and the endpoint
+  transforms need Rust between two DuckDB statements, which the engine does not do yet. The
+  plan's 11d section is written in detail, split into 11d1–11d3.
+
+### 2026-09-25 — Phase 11d1: chunk and redact
+
+Questions 24–33 answered by the user, all as recommended ("all as recommended"): decisions
+106–115. 11d is three sub-phases; this session built the first.
+
+- **Sandbox first**: DuckDB 1.5.5's Python-style lambdas, `list_reduce`, a Luhn check, and a
+  recursive CTE with `LATERAL` steps, each proved in the scratchpad before a builder.
+- `crates/duckdb-engine` — specs for `xf.ai.chunk` and `xf.ai.redact`; builders
+  `transform_ai_chunk`, `transform_ai_redact`, `accepts` (Luhn; phone judgement),
+  `REDACT_PATTERNS`, `REDACT_KINDS`; 5 golden and refusal tests; `tests/ai_text.rs` (8 on
+  real DuckDB); the inventory.
+- **Found on the way**: the phone pattern took the first three groups of a card number that
+  failed Luhn ("[PHONE] 1112") and would have taken `10 000 000`; phones are now matched as a
+  whole run and judged. A mutation that failed to compile was redone as a behaviour change,
+  and one that no test caught (empty chunks kept) got a test.
+- `samples/data/tickets.jsonl`, `samples/pipelines/tickets_for_retrieval.json` (4 tickets,
+  7 chunks); `frontend/src/icons.ts` (scissors, eye-off).
+- **84 components, 1176 Rust tests**, **177 frontend**; fmt, clippy, `tsc` clean.
+- Docs: `docs/ai_transforms.md`, the plan's as-built notes, `learnings.md`, `assignments.md`
+  (A75–A76), `commands.md`.
+- **Not committed, not pushed, no CI** (decision 115).
+
+### 2026-09-25 — Phase 11d2: native transforms and `xf.ai.embed`
+
+Started by the user ("pls start 11d2").
+
+- **Sandbox first**: `llama-server --embeddings` with bge-small (384 dimensions, normalised,
+  cat~kitten 0.78 against cat~revenue 0.38; a 900-token input refused), and the feed and
+  join-back in DuckDB (types kept, a skipped row null, an empty file read).
+- `scripts/fetch-model.ps1` — the embedding model (`ggml-org/bge-small-en-v1.5-Q8_0-GGUF`,
+  pinned, SHA256 checked).
+- `crates/plugin-sdk` — `Transform`, `ROW_KEY`, `Connector::Transform`.
+- `crates/assistant` — `Server::spawn_with`, `Server::post`, `locate_embedder`.
+- `crates/connectors` — `embed.rs` (`xf.ai.embed`), 3 tests.
+- `crates/duckdb-engine` — `Direction::Transform`, `NativeStep::input` and `feed`,
+  `builders::native_transform` and `native_feed`, `native::run_transform`, the driven-path
+  hook, preview in a session, `Plan::unportable`; 3 bridge tests with a stand-in transform,
+  4 plan tests, `tests/ai_embed.rs` (3, with the model).
+- `crates/cli` — `etl build` refuses an unportable transform; 1 test.
+- `samples/pipelines/tickets_for_search.json`; `frontend/src/icons.ts` (sparkles).
+- **85 components, 1190 Rust tests**, **180 frontend**; fmt, clippy, `tsc` clean; five
+  mutations each caught (the driver skipping the Rust half only by the model tests).
+- Docs: `docs/ai_transforms.md`, `docs/adding_a_component.md` (native transforms), the
+  plan's as-built notes, `learnings.md`, `assignments.md` (A77–A78), `commands.md`.
+- **Not committed, not pushed, no CI** (decision 115).
+
+### 2026-09-25 — Phase 11d3: prompt, classify, extract
+
+Started by the user ("pls start 11d3").
+
+- `crates/plugin-sdk` — `Transform::portable` takes the node's properties.
+- `crates/assistant` — `Server::base_url`.
+- `crates/connectors` — `ask.rs`: `xf.ai.prompt`, `xf.ai.classify`, `xf.ai.extract` on a shared
+  endpoint (base URL or the local model, bearer key, the web connectors' `Client`), the
+  guardrails, concurrency with answers in row order; `ask/tests.rs`, 16 against the fixture as
+  an OpenAI-compatible endpoint.
+- `crates/duckdb-engine` — lineage shows a transform's `base_url`; `Plan::unportable` asks per
+  node; a plan test (lineage by host, the key nowhere, portability); `tests/ai_ask.rs` (the
+  sample on the local model, 28.6 s).
+- `samples/pipelines/tickets_triaged.json`; `frontend/src/icons.ts` (message-square, tags,
+  list-tree).
+- **Tried**: the four tickets through all three on the local model: every label from the
+  list, every field typed, ~10 s a stage; a failing export labelled "billing" and a date taken
+  for an order number, which is the model's size, said in the docs.
+- **88 components, 1208 Rust tests**, **183 frontend**; fmt, clippy, `tsc` clean; six
+  mutations each caught in CI.
+- Docs: `docs/ai_transforms.md`, the plan's as-built notes, `learnings.md`, `assignments.md`
+  (A79–A80), `commands.md`.
+- **Not committed, not pushed, no CI** (decision 115).
+
+### 2026-09-25 — 11d1–11d3 committed and pushed, without CI
+
+The user: "pls commit and push all changes. do not run CI". One commit for 11d1–11d3 (their
+docs interleave), with `[skip ci]`. CI's first run since 11a is still owed: the assistant,
+the native transforms, the `xf.ai.*` tests (which skip without models) and `jsonschema` have
+never built on Linux.

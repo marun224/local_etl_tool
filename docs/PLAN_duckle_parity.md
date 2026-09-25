@@ -2432,6 +2432,162 @@ Scope decided when it starts (decision 98). The plan's six: three fully local (e
 chunk, PII redact) and three with the user's own OpenAI-compatible endpoint (`baseUrl`, the
 key a secret).
 
+**Planned in detail 2026-09-25; questions 24–33 answered all as recommended** (Settled
+decisions 106–115).
+
+**What planning found.** The six are two different kinds of work:
+
+- **Chunk and PII redact need no model.** Splitting text and replacing patterns are SQL
+  (`generate_series`, `substring`, `regexp_replace`), so they are ordinary builders on the
+  one-script path, as fast as any other transform.
+- **Embeddings and the three endpoint transforms call a model for every row, and the engine
+  cannot yet run Rust in the middle of a pipeline.** Native components are only sources
+  (run before DuckDB) and sinks (after it); everything between is one DuckDB script. The
+  driven path (`run_driven`, decision 6b) already sends one stage at a time and acts between
+  them, which is where a **native transform** fits: DuckDB `COPY`s the input to a JSON Lines
+  file, Rust reads it, calls the model per row, writes another, and the stage's view reads
+  that. Any pipeline with one runs on the driven path, as control nodes do.
+
+**Split into three** (decision 106), each a day, each built only when the user says:
+
+| Phase | What | Needs a model |
+|---|---|---|
+| 11d1 | `xf.ai.chunk` and `xf.ai.redact`, in SQL | no |
+| 11d2 | The native transform stage; `xf.ai.embed` with a small local embedding model | yes, local |
+| 11d3 | `xf.ai.prompt`, `xf.ai.classify`, `xf.ai.extract`, over any OpenAI-compatible endpoint | an endpoint, or the local one |
+
+##### Phase 11d1 — chunk and redact, in SQL
+
+**Files.** `crates/duckdb-engine/src/plan/specs.rs` and `builders.rs`; samples; docs.
+
+**Do.**
+1. **`xf.ai.chunk`** (decision 108): `column`, `size` (characters, default 1000),
+   `overlap` (default 100); one row per chunk, the input's other columns kept, plus
+   `chunk_index` and `chunk`. A chunk ends at the last whitespace before `size` when there
+   is one, so words are not cut.
+2. **`xf.ai.redact`** (decision 107): `columns`, `kinds` (any of `email`, `phone`,
+   `credit_card`, `ssn`, `ip`; all by default), `replacement` (`token`, giving `[EMAIL]`,
+   or `hash`, a SHA-256 prefix so equal values still join). Patterns, not a model: it finds
+   what has a shape, and says in its help that names and addresses are not found.
+
+**Verify.** Golden SQL; the engine suite on real DuckDB: chunk boundaries, overlap, an
+empty or null text, a text shorter than `size`; each kind redacted and a near miss left
+alone (an order number is not a card); `hash` equal for equal input.
+
+**As built (2026-09-25).** Done as planned, with these differences:
+
+- **Chunk is one recursive query** with two `LATERAL` steps a chunk (where the next starts,
+  then how long it is), each written once; blank windows are dropped and the index
+  renumbered, so no chunk is empty and the numbering has no gaps. An `output` property names
+  the chunk column (`<output>_index` beside it).
+- **Redact is one `SELECT * REPLACE` layer a kind**, in a fixed order (email, IP, card, SSN,
+  phone), so a column is read by name at each layer rather than the layer below repeated
+  inside the one above.
+- **Two kinds are judged after matching**, with DuckDB's list lambdas: a card must pass the
+  Luhn check, and a phone is a whole run of digit groups with 10 to 15 digits, a separator,
+  and not a date. A phone pattern alone took the first three groups of a failed card number
+  and of `10 000 000`, which the first test run showed.
+- **A hash is over what identifies the value** (a number's digits, an email in lower case).
+- **Sample**: `samples/data/tickets.jsonl` and `samples/pipelines/tickets_for_retrieval.json`
+  (redact, chunk, Parquet). **Verified**: 5 golden and refusal tests, 8 behaviour tests on
+  DuckDB 1.5.5 (`tests/ai_text.rs`), six mutations each caught by a named test.
+  `docs/ai_transforms.md`.
+
+##### Phase 11d2 — native transforms and `xf.ai.embed`
+
+**Files.** `crates/plugin-sdk` (a `Transform` trait beside `Source` and `Sink`);
+`crates/duckdb-engine` (`native.rs`, `exec.rs`: the stage between two statements);
+`crates/connectors` or a new `crates/ai` (the transforms); `scripts/fetch-model.ps1` (the
+embedding model); docs.
+
+**Do.**
+1. **A native transform stage**: `COPY (SELECT * FROM upstream) TO '<staging>.in.jsonl'`,
+   the transform over the records, `CREATE VIEW` over `<staging>.out.jsonl`. It makes its
+   pipeline take the driven path; retries, `continue_on_failure` and counts work as for any
+   stage; `preview` runs the stages up to it.
+2. **`xf.ai.embed`** (decisions 109, 110): `column`, `output` (default `embedding`), a
+   `FLOAT[n]` column DuckDB's `vss` can index. The model is **bge-small-en-v1.5** (about
+   35 MB, 384 dimensions), pinned and hash-checked, run by the same `llama-server` with
+   `--embedding`, started for the stage and stopped after. Batched, several texts a call.
+3. **`etl build` refuses a pipeline with `xf.ai.embed`**, naming the reason (decision 114).
+
+**Verify.** The stage machinery with a fake transform in CI (no model): rows in and out in
+order, a failure named by node, retries. With the model (skipping without it): the same
+text embeds to the same vector, similar texts sit closer than unrelated ones, and a `vss`
+query finds the nearest.
+
+**As built (2026-09-25).** Done as planned, with these differences:
+
+- **Only the columns the transform reads cross into Rust.** The feed numbers the input into a
+  temp table and writes the row key and those columns; the transform writes the key and what it
+  adds; the view `LEFT JOIN`s that back in row order. Every other column keeps its DuckDB type
+  (a date stays a `DATE`, a decimal a `DECIMAL`), and a row the transform skipped has nulls.
+  The SDK's `Transform` says what it `reads` and `adds`; `ROW_KEY` is `__etl_row`.
+- **The model**: llama.cpp's own conversion, `ggml-org/bge-small-en-v1.5-Q8_0-GGUF` (36.7 MB,
+  revision `f2068ed`, SHA256 checked), run with `--embeddings`, one slot of 512 tokens, 32
+  texts a request. Vectors come back L2-normalised. A text over 512 tokens fails the stage
+  with a message saying to chunk it.
+- **Preview goes stage by stage** when a transform is among its stages; otherwise it is the
+  one script it was.
+- **No `vss`**: it is not vendored, so nearest neighbours are checked with DuckDB's own
+  `array_cosine_similarity`. Parquet stores the vector as a list; cast it back to
+  `FLOAT[384]` to compare.
+- **`etl build` refuses** a pipeline with an unportable transform (`Plan::unportable`), naming
+  the node; MCP's `build_executable` with it.
+- **Verified**: the bridge with a stand-in transform on real DuckDB (3), the plan's SQL, feed,
+  session and portability (4), the component's configuration (3), with the model (3:
+  similarity, preview, a text too long), and `etl build` refusing (1). Five mutations each
+  caught; **the driver skipping the Rust half is caught only by the model tests**, which CI
+  does not run. `samples/pipelines/tickets_for_search.json`; `docs/ai_transforms.md`.
+
+##### Phase 11d3 — the endpoint transforms
+
+**Files.** As 11d2; a fixture OpenAI-compatible server for tests, as the connectors have
+fixtures.
+
+**Do.** Three components (decision 111), each with `base_url` (optional: unset is the
+vendored local model, decision 112), `model`, `api_key` (a secret reference), and the
+guardrails (decision 113): `max_rows` (default 1,000; more is refused before any call),
+`concurrency` (default 4), a timeout and retries per call.
+1. **`xf.ai.prompt`**: `prompt`, a template with `{column}` placeholders; the answer as a
+   text column.
+2. **`xf.ai.classify`**: `column`, `labels`; the answer is one of them, constrained by
+   `json_schema` where the endpoint takes it and checked either way.
+3. **`xf.ai.extract`**: `column`, `fields` (name to type); one column each, from a JSON
+   answer constrained the same way.
+
+A call that fails after its retries fails the stage (decision 113). The endpoint's host shows
+in lineage, never its key; rows leave the machine, and the component's help says so.
+
+**Verify.** Against the fixture in CI: templating, labels held to the list, fields typed,
+`max_rows` refused before a call, a failing endpoint named, the key never in a message or
+the plan. With the local model: each of the three on the sample orders.
+
+**As built (2026-09-25).** Done as planned, with these differences:
+
+- **`crates/connectors/src/ask.rs`**, the three as native transforms on 11d2's machinery, over
+  the web connectors' `Client` (bearer auth, retries on 429/5xx with `Retry-After`, never on
+  another 4xx, a timeout per call). All rows are read first, so `max_rows` refuses before any
+  call; then `concurrency` threads, one `Client` each, answers written back in row order; the
+  first failure stops the calls not yet made and names its row.
+- **`Transform::portable` takes the node's properties**: an endpoint travels in a built
+  executable, the local model does not.
+- **The local model** is `etl assist`'s, started with `--parallel <concurrency>` and 2048
+  tokens a slot, and called through `/v1/chat/completions` like any endpoint.
+- **`json_schema`** (default on) on classify and extract, to switch the schema off for an
+  endpoint that refuses `response_format`; the answer is checked either way.
+- **Lineage** shows a transform's `base_url` (scheme, host, path; no query, no credentials).
+- **Tried on the sample tickets with the local model**: every label from the list and every
+  field typed, about 10 s a stage for four rows; its judgement is a 1.5B model's (a failing
+  export labelled "billing"), which the docs say plainly.
+- **Verified**: 16 tests against the fixture as an OpenAI-compatible endpoint, a plan test
+  (lineage by host, the key nowhere in the plan, portability), and the sample
+  `tickets_triaged.json` with the local model (skipping without it). Six mutations each caught
+  by a test that runs in CI. `docs/ai_transforms.md`.
+
+**Done (all three).** The six `xf.ai.*` components are in the registry, the manifest and
+the canvas's palette, with samples that validate.
+
 ### Phase 12 — Benchmarks + parity audit
 
 **Goal.** Prove it, and know exactly where we stand against Duckle.

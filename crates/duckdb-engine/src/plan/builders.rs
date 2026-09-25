@@ -18,6 +18,7 @@ use super::{reject_relation, Control, CountProbe, Input, Materialize, StageKind}
 use crate::sql::{quote_identifier, quote_literal, quote_path};
 use crate::EngineError;
 use etl_metadata::{ControlKind, MAIN_PORT, REJECTED_PORT};
+use etl_plugin_sdk::ROW_KEY;
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
 /// What a builder needs to know about the node it is lowering.
@@ -875,6 +876,233 @@ pub(crate) fn transform_unpivot(node: &Lowering<'_>) -> Result<String, EngineErr
 }
 
 // ---------------------------------------------------------------------------
+// Transforms: text for AI
+// ---------------------------------------------------------------------------
+
+/// Split a text column into chunks that end at whitespace, overlapping by
+/// whole words where the overlap holds a word boundary.
+///
+/// A recursive query, one step per chunk: where the next chunk starts, then
+/// how long it is. Every step moves forward, because a chunk is always longer
+/// than the overlap: a whitespace cut that would leave it shorter is not taken,
+/// and a hard cut is `size`, which the builder has checked is larger.
+pub(crate) fn transform_ai_chunk(node: &Lowering<'_>) -> Result<String, EngineError> {
+    let upstream = exactly_one_input(node)?;
+    let column = quote_identifier(resolved_str(node, "column")?);
+    let size = non_negative(node, "size")?;
+    let overlap = non_negative(node, "overlap")?;
+    if size == 0 {
+        return Err(EngineError::InvalidProperty {
+            id: node.node_id.to_string(),
+            property: "size".to_string(),
+            reason: "must be at least 1".to_string(),
+        });
+    }
+    if overlap >= size {
+        return Err(EngineError::InvalidProperty {
+            id: node.node_id.to_string(),
+            property: "overlap".to_string(),
+            reason: format!("must be smaller than size ({size})"),
+        });
+    }
+    let output = resolved_str(node, "output")?;
+    let index = quote_identifier(&format!("{output}_index"));
+    let output = quote_identifier(output);
+
+    // Where the last whitespace in the `size` characters from `start` is,
+    // counted back from the end of that window: 0 when there is none.
+    let from_end = |text: &str, start: &str| {
+        format!("strpos(reverse(regexp_replace(substring({text}, {start}, {size}), '\\s', ' ', 'g')), ' ')")
+    };
+    // How long the chunk from `start` is: the rest of the text if it fits,
+    // else up to the last whitespace if that leaves more than the overlap,
+    // else `size`.
+    let cut = |text: &str, start: &str| {
+        let back = from_end(text, start);
+        format!(
+            "CASE WHEN {start} + {size} - 1 >= length({text}) THEN length({text}) - {start} + 1 \
+             WHEN {back} BETWEEN 1 AND {limit} THEN {size} - {back} \
+             ELSE {size} END",
+            limit = size - overlap - 1
+        )
+    };
+    // Where the chunk after one ends starts: `overlap` characters back, moved
+    // on to the next word's start within them when there is one.
+    let raw = format!("p.__etl_start + p.__etl_cut - {overlap}");
+    let next = format!(
+        "CASE WHEN regexp_matches(substring(p.__etl_text, {raw} - 1, 1), '\\s') THEN {raw} \
+         WHEN strpos(regexp_replace(substring(p.__etl_text, {raw}, {overlap}), '\\s', ' ', 'g'), ' ') > 0 \
+         THEN {raw} + strpos(regexp_replace(substring(p.__etl_text, {raw}, {overlap}), '\\s', ' ', 'g'), ' ') \
+         ELSE {raw} END"
+    );
+
+    let body = format!(
+        "WITH RECURSIVE \
+         __etl_rows AS (SELECT *, row_number() OVER () AS __etl_row, CAST({column} AS VARCHAR) AS __etl_text FROM {upstream}), \
+         __etl_chunks AS (\
+         SELECT r.__etl_row, r.__etl_text, CAST(1 AS BIGINT) AS __etl_start, CAST(0 AS BIGINT) AS __etl_step, c.__etl_cut \
+         FROM __etl_rows r, LATERAL (SELECT {first_cut} AS __etl_cut) c \
+         WHERE length(trim(r.__etl_text)) > 0 \
+         UNION ALL \
+         SELECT p.__etl_row, p.__etl_text, n.__etl_next, p.__etl_step + 1, c.__etl_cut \
+         FROM __etl_chunks p, LATERAL (SELECT {next} AS __etl_next) n, LATERAL (SELECT {next_cut} AS __etl_cut) c \
+         WHERE p.__etl_start + {size} - 1 < length(p.__etl_text)) \
+         SELECT r.* EXCLUDE (__etl_row, __etl_text, {column}), \
+         row_number() OVER (PARTITION BY c.__etl_row ORDER BY c.__etl_step) - 1 AS {index}, c.__etl_chunk AS {output} \
+         FROM (SELECT __etl_row, __etl_step, trim(substring(__etl_text, __etl_start, __etl_cut)) AS __etl_chunk FROM __etl_chunks) c \
+         JOIN __etl_rows r USING (__etl_row) \
+         WHERE c.__etl_chunk <> '' \
+         ORDER BY c.__etl_row, c.__etl_step",
+        upstream = quote_identifier(&upstream),
+        first_cut = cut("r.__etl_text", "1"),
+        next_cut = cut("p.__etl_text", "n.__etl_next"),
+    );
+
+    Ok(create_view(node, &body))
+}
+
+/// What `xf.ai.redact` can find, in the order it looks: an IP address before a
+/// phone number, whose pattern would otherwise take three of its groups.
+///
+/// Each is (name, pattern, token). RE2 syntax, as DuckDB's regular expressions
+/// are; `\b` is an ASCII word boundary.
+const REDACT_PATTERNS: [(&str, &str, &str); 5] = [
+    (
+        "email",
+        r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}",
+        "EMAIL",
+    ),
+    (
+        "ip",
+        r"\b(?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\b|\b(?:[0-9A-Fa-f]{1,4}:){7}[0-9A-Fa-f]{1,4}\b",
+        "IP",
+    ),
+    ("credit_card", r"\b(?:[0-9][ -]?){12,18}[0-9]\b", "CARD"),
+    ("ssn", r"\b[0-9]{3}-[0-9]{2}-[0-9]{4}\b", "SSN"),
+    // A whole run of digit groups, judged afterwards (`accepts`): a pattern
+    // alone would take the first three groups of a longer number.
+    (
+        "phone",
+        r"(?:\+[0-9]{1,3}[ .-]?)?(?:\([0-9]{1,4}\)[ .-]?)?\b[0-9]+(?:[ .-][0-9]+)*\b",
+        "PHONE",
+    ),
+];
+
+/// Every kind `xf.ai.redact` knows, which is also its default.
+pub(crate) const REDACT_KINDS: [&str; 5] = ["email", "phone", "credit_card", "ssn", "ip"];
+
+/// Replace personal data found by its shape, one kind at a time.
+///
+/// Each kind is one layer of `SELECT * REPLACE`, so a column is read by name at
+/// every layer rather than the expression for the layer below being repeated
+/// inside the one above. A card number must also pass the Luhn check, and a
+/// hash is over what identifies the value (digits for a number, lower case for
+/// an email), so `4111 1111 1111 1111` and `4111111111111111` hash alike.
+pub(crate) fn transform_ai_redact(node: &Lowering<'_>) -> Result<String, EngineError> {
+    let upstream = exactly_one_input(node)?;
+    let columns = checked_columns(node, "columns")?;
+    let hashed = resolved_str(node, "replacement")? == "hash";
+
+    let mut wanted = Vec::new();
+    for kind in required_array(node, "kinds")? {
+        let Some(kind) = kind.as_str().filter(|kind| REDACT_KINDS.contains(kind)) else {
+            return Err(EngineError::InvalidProperty {
+                id: node.node_id.to_string(),
+                property: "kinds".to_string(),
+                reason: format!("{kind} is not one of {}", REDACT_KINDS.join(", ")),
+            });
+        };
+        wanted.push(kind);
+    }
+    if wanted.is_empty() {
+        return Err(EngineError::InvalidProperty {
+            id: node.node_id.to_string(),
+            property: "kinds".to_string(),
+            reason: "must list at least one kind".to_string(),
+        });
+    }
+
+    let mut relation = quote_identifier(&upstream);
+    for (kind, pattern, token) in REDACT_PATTERNS
+        .iter()
+        .filter(|(kind, _, _)| wanted.contains(kind))
+    {
+        let replaced: Vec<String> = columns
+            .iter()
+            .map(|column| {
+                format!(
+                    "{} AS {column}",
+                    redact_expression(
+                        &format!("CAST({column} AS VARCHAR)"),
+                        kind,
+                        pattern,
+                        token,
+                        hashed
+                    )
+                )
+            })
+            .collect();
+        relation = format!(
+            "(SELECT * REPLACE ({}) FROM {relation})",
+            replaced.join(", ")
+        );
+    }
+
+    Ok(create_view(node, &format!("SELECT * FROM {relation}")))
+}
+
+/// What a match of this kind must also be, over `__etl_m`, when its pattern
+/// alone would take too much: a card number passes the Luhn check; a phone
+/// number has 10 to 15 digits and a separator, and is not a date.
+fn accepts(kind: &str) -> Option<String> {
+    let digits = "regexp_replace(__etl_m, '[^0-9]', '', 'g')";
+    match kind {
+        "credit_card" => {
+            let digit = format!("CAST(substring(reverse({digits}), __etl_i, 1) AS INTEGER)");
+            Some(format!(
+                "list_sum(list_transform(range(1, length({digits}) + 1), lambda __etl_i: \
+                 CASE WHEN __etl_i % 2 = 0 THEN {digit} * 2 - CASE WHEN {digit} * 2 > 9 THEN 9 ELSE 0 END \
+                 ELSE {digit} END)) % 10 = 0"
+            ))
+        }
+        "phone" => Some(format!(
+            "length({digits}) BETWEEN 10 AND 15 AND regexp_matches(__etl_m, '[ .()+-]') \
+             AND NOT regexp_matches(__etl_m, '^(?:19|20)[0-9]{{2}}-[0-9]{{2}}-[0-9]{{2}}')"
+        )),
+        _ => None,
+    }
+}
+
+/// One kind's replacement over one value.
+fn redact_expression(value: &str, kind: &str, pattern: &str, token: &str, hashed: bool) -> String {
+    let pattern = quote_literal(pattern);
+    let judged = accepts(kind);
+    if judged.is_none() && !hashed {
+        return format!("regexp_replace({value}, {pattern}, '[{token}]', 'g')");
+    }
+
+    // Each match found, kept if it really is one, then replaced one at a
+    // time, starting from the value itself.
+    let digits = "regexp_replace(__etl_m, '[^0-9]', '', 'g')";
+    let mut matches = format!("regexp_extract_all({value}, {pattern})");
+    if let Some(test) = judged {
+        matches = format!("list_filter({matches}, lambda __etl_m: {test})");
+    }
+    let replacement = if hashed {
+        let identity = match kind {
+            "email" | "ip" => "lower(__etl_m)".to_string(),
+            _ => digits.to_string(),
+        };
+        format!("'[{token}:' || left(sha256({identity}), 12) || ']'")
+    } else {
+        format!("'[{token}]'")
+    };
+    format!(
+        "list_reduce(list_prepend({value}, {matches}), lambda __etl_acc, __etl_m: replace(__etl_acc, __etl_m, {replacement}))"
+    )
+}
+
+// ---------------------------------------------------------------------------
 // Transforms: combining two inputs
 // ---------------------------------------------------------------------------
 
@@ -1055,6 +1283,81 @@ pub(crate) fn native_sink(node: &Lowering<'_>) -> Result<String, EngineError> {
     let staging = staging_path(node)?;
 
     Ok(copy_to(&upstream, staging, "FORMAT json"))
+}
+
+/// A transform written in Rust: its view joins what the connector wrote back
+/// onto the numbered input rows, so every column it did not touch keeps its
+/// DuckDB type, and a row it wrote nothing for has nulls in its columns.
+pub(crate) fn native_transform(node: &Lowering<'_>) -> Result<String, EngineError> {
+    let staging = staging_path(node)?;
+    let transform = registered_transform(node)?;
+    let added = transform.adds(node.properties);
+
+    let mut columns = vec![format!("{}: 'BIGINT'", quote_literal(ROW_KEY))];
+    columns.extend(
+        added.iter().map(|(name, sql_type)| {
+            format!("{}: {}", quote_literal(name), quote_literal(sql_type))
+        }),
+    );
+    let selected: Vec<String> = added
+        .iter()
+        .map(|(name, _)| format!("o.{}", quote_identifier(name)))
+        .collect();
+
+    let body = format!(
+        "SELECT i.* EXCLUDE ({ROW_KEY}), {} FROM {} i LEFT JOIN read_json({}, format='newline_delimited', columns={{{}}}) o USING ({ROW_KEY}) ORDER BY i.{ROW_KEY}",
+        selected.join(", "),
+        quote_identifier(&native_input_table(node.node_id)),
+        quote_path(staging),
+        columns.join(", ")
+    );
+
+    Ok(create_view(node, &body))
+}
+
+/// What runs before a transform: the input rows numbered into a table, and
+/// the columns the transform reads written to `file` for it.
+pub(crate) fn native_feed(node: &Lowering<'_>, file: &str) -> Result<String, EngineError> {
+    let upstream = exactly_one_input(node)?;
+    let transform = registered_transform(node)?;
+    let table = quote_identifier(&native_input_table(node.node_id));
+
+    let mut read = vec![ROW_KEY.to_string()];
+    read.extend(
+        transform
+            .reads(node.properties)
+            .iter()
+            .map(|column| quote_identifier(column)),
+    );
+
+    Ok(format!(
+        "CREATE OR REPLACE TEMP TABLE {table} AS SELECT row_number() OVER () AS {ROW_KEY}, * FROM {};\n\
+         COPY (SELECT {} FROM {table}) TO {} (FORMAT json);",
+        quote_identifier(&upstream),
+        read.join(", "),
+        quote_path(file)
+    ))
+}
+
+/// The numbered input a transform's view reads from.
+fn native_input_table(node_id: &str) -> String {
+    format!("{node_id}__native_in")
+}
+
+fn registered_transform(
+    node: &Lowering<'_>,
+) -> Result<&'static dyn etl_plugin_sdk::Transform, EngineError> {
+    match etl_connectors::find(node.component_id) {
+        Some(etl_plugin_sdk::Connector::Transform(transform)) => Ok(transform),
+        _ => Err(EngineError::InvalidProperty {
+            id: node.node_id.to_string(),
+            property: "componentId".to_string(),
+            reason: format!(
+                "'{}' is registered as a native transform but has no connector",
+                node.component_id
+            ),
+        }),
+    }
 }
 
 fn staging_path<'a>(node: &Lowering<'a>) -> Result<&'a str, EngineError> {

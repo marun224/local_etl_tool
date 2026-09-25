@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Fetch the assistant's local model and llama.cpp's server into tools/.
+    Fetch llama.cpp's server and the local models into tools/.
 
 .DESCRIPTION
     `etl assist` runs a small coding model on this machine through llama.cpp's
@@ -9,9 +9,10 @@
     project changes.
 
         tools/llama/llama-server[.exe]   and the libraries beside it
-        tools/models/<model>.gguf        about 1 GB
+        tools/models/<model>.gguf        about 1 GB, for etl assist
+        tools/models/<embedder>.gguf     about 37 MB, for xf.ai.embed
 
-    The model is checked against its pinned SHA256, since a truncated or
+    Each model is checked against its pinned SHA256, since a truncated or
     swapped 1 GB file would otherwise fail later and more confusingly.
 
     Point ETL_LLAMA_SERVER and ETL_ASSIST_MODEL (or `etl assist --llama-server
@@ -31,6 +32,12 @@ param(
     [string] $ModelRevision = 'f86cb2c1fa58255f8052cc32aeede1b7482d4361',
     [string] $ModelFile = 'qwen2.5-coder-1.5b-instruct-q4_k_m.gguf',
     [string] $ModelSha256 = 'cc324af070c2ecbfd324a30884d2f951a7ff756aba85cb811a6ec436933bb046',
+
+    # xf.ai.embed's model (Settled decision 109): llama.cpp's own conversion.
+    [string] $EmbedRepo = 'ggml-org/bge-small-en-v1.5-Q8_0-GGUF',
+    [string] $EmbedRevision = 'f2068edd9b54f2a369549ccc71f70ed273a2a801',
+    [string] $EmbedFile = 'bge-small-en-v1.5-q8_0.gguf',
+    [string] $EmbedSha256 = 'f046db1dc724cf4f6f0a0c5917e922823b73eb1d27b8f9a9c2797f7866974804',
 
     [switch] $Force
 )
@@ -106,37 +113,39 @@ if ($present -and -not $Force) {
     Write-Host "Installed llama-server at $server ($reported)"
 }
 
-# --- the model ---------------------------------------------------------------
+# --- the models --------------------------------------------------------------
 
 $modelDir = Join-Path $tools 'models'
-$model = Join-Path $modelDir $ModelFile
-
-function Test-Model {
-    (Test-Path $model) -and ((Get-FileHash -Algorithm SHA256 $model).Hash -eq $ModelSha256.ToUpper())
-}
-
-if ((Test-Path $model) -and -not $Force) {
-    Write-Host "Checking $ModelFile against its pinned SHA256..."
-    if (Test-Model) {
-        Write-Host "Model already present: $model"
-        exit 0
-    }
-    Write-Host 'It does not match; downloading it again.'
-}
-
 New-Item -ItemType Directory -Force $modelDir | Out-Null
-$url = "https://huggingface.co/$ModelRepo/resolve/$ModelRevision/$ModelFile"
-$partial = "$model.partial"
 
-Write-Host "Downloading $url (about 1 GB)"
-Invoke-WebRequest -Uri $url -OutFile $partial
-Move-Item -Force $partial $model
+function Get-Model([string] $Repo, [string] $Revision, [string] $File, [string] $Sha256) {
+    $path = Join-Path $modelDir $File
+    $verified = { (Test-Path $path) -and ((Get-FileHash -Algorithm SHA256 $path).Hash -eq $Sha256.ToUpper()) }
 
-if (-not (Test-Model)) {
-    $actual = (Get-FileHash -Algorithm SHA256 $model).Hash
-    Remove-Item $model
-    throw "The model's SHA256 is $actual, not the pinned $ModelSha256"
+    if ((Test-Path $path) -and -not $Force) {
+        Write-Host "Checking $File against its pinned SHA256..."
+        if (& $verified) {
+            Write-Host "Model already present: $path"
+            return
+        }
+        Write-Host 'It does not match; downloading it again.'
+    }
+
+    $url = "https://huggingface.co/$Repo/resolve/$Revision/$File"
+    $partial = "$path.partial"
+    Write-Host "Downloading $url"
+    Invoke-WebRequest -Uri $url -OutFile $partial
+    Move-Item -Force $partial $path
+
+    if (-not (& $verified)) {
+        $actual = (Get-FileHash -Algorithm SHA256 $path).Hash
+        Remove-Item $path
+        throw "$File's SHA256 is $actual, not the pinned $Sha256"
+    }
+
+    $size = [math]::Round((Get-Item $path).Length / 1MB, 1)
+    Write-Host "Installed $File at $path ($size MB, SHA256 verified)"
 }
 
-$size = [math]::Round((Get-Item $model).Length / 1GB, 2)
-Write-Host "Installed $ModelFile at $model ($size GB, SHA256 verified)"
+Get-Model $ModelRepo $ModelRevision $ModelFile $ModelSha256
+Get-Model $EmbedRepo $EmbedRevision $EmbedFile $EmbedSha256

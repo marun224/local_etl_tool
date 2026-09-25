@@ -12,7 +12,8 @@ pub mod prompt;
 pub mod server;
 
 pub use server::{
-    locate_model, locate_server, Server, DEFAULT_MODEL, MODEL_ENV, SERVER_ENV, STOPPED,
+    locate_embedder, locate_model, locate_server, Server, DEFAULT_EMBEDDER, DEFAULT_MODEL,
+    EMBED_MODEL_ENV, MODEL_ENV, SERVER_ENV, STOPPED,
 };
 
 use etl_metadata::ComponentSpec;

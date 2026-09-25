@@ -877,3 +877,82 @@ the fuller record. From Phase 10 on, a section is added at the end of each phase
 - **Python's `subprocess` on Windows decodes with cp1252** unless told otherwise; Vitest's
   output then kills the reader thread. Pass `encoding="utf-8"`, and set
   `PYTHONIOENCODING=utf-8` to print it.
+
+## Phase 11d1 — chunk and redact, in SQL (2026-09-25)
+
+**Concepts**
+- **A recursive CTE is a loop in SQL**: one row per step, each computed from the last. With
+  `LATERAL` subqueries a step can name a value (the next start) and use it in the next
+  expression (the cut) without writing it twice.
+- **A regular expression cannot see past its match**: RE2 has no lookaround, so "three digit
+  groups" also matches the start of "4111 1111 1111 1112". The cure is to match the whole run
+  and judge it afterwards, which DuckDB's `list_filter` over `regexp_extract_all` allows.
+- **Replace match by match with `list_reduce`**, starting from the value itself
+  (`list_prepend(value, matches)`), when the replacement depends on the match (a hash).
+
+**Decisions and why**
+- **One `SELECT * REPLACE` layer per kind**: nesting each kind's expression inside the next
+  would repeat the lower layers, doubling the SQL per kind.
+- **Luhn for cards, a digit count and a date test for phones**: the near misses (order numbers,
+  thousands, dates) are exactly what business text is full of.
+- **Hash over the identity, not the spelling**: a hash that changes with spacing or case
+  cannot be joined on, which is the only reason to hash rather than use a token.
+
+**Mistakes worth not repeating**
+- **A mutation that does not compile is not a caught mutation**: removing a branch left a
+  `format!` argument unused, which the compiler refused. Mutate behaviour, not structure,
+  and check which test failed.
+- **Backslashes through a shell heredoc into a Python patch script lose a level**. For Rust
+  source with regular expressions, use the Edit tool.
+
+## Phase 11d2 — native transforms and `xf.ai.embed` (2026-09-25)
+
+**Concepts**
+- **Send a transform only what it reads, and join its answer back.** A row number taken once
+  into a temp table is a key that survives the round trip; the columns the transform never
+  touches stay in DuckDB with their own types, where a JSON round trip would have turned a
+  `DECIMAL` into a `DOUBLE`.
+- **`row_number() OVER ()` is stable only once it is stored.** Over a view it could number the
+  rows differently each time the view is read, so the feed materialises it first.
+- **An embedding model is a different server mode**: `--embeddings`, and a batch as large as
+  the longest input, because a non-causal model reads the whole text at once.
+- **Parquet has lists, not fixed-length arrays**: a `FLOAT[384]` written out comes back as
+  `FLOAT[]`.
+
+**Decisions and why**
+- **The transform declares `reads` and `adds`** rather than taking and returning whole rows:
+  the engine can then write the feed and the join, and the SQL is shown in the plan.
+- **A transform forces the driven path** rather than the one script being split around it:
+  the driven path already runs stage by stage and knows how to fail one.
+- **Refuse at build, not at run**: an executable that fails on a machine without the model
+  would be found out far from anyone who could fix it.
+
+**Mistakes worth not repeating**
+- **`$matches` is an automatic variable in PowerShell** (set by `-match`); a script variable of
+  that name is overwritten. Name it something else.
+- **A mutation script must match the formatted source**: `cargo fmt` reflowed the code
+  between writing the target and running it.
+
+## Phase 11d3 — asking a model about each row (2026-09-25)
+
+**Concepts**
+- **Read everything before the first call** when a cap protects money: a limit checked while
+  streaming would already have sent the rows before it.
+- **Concurrency with order**: a shared index handed out atomically, one client per thread,
+  answers stored by row and written afterwards. Order comes from the storage, not the timing.
+- **A local server is just another endpoint**: the same client, retries and parsing serve
+  `api.openai.com` and `127.0.0.1`, which is what lets the offline default cost nothing extra.
+- **Constrain, then check anyway**: a JSON Schema in `response_format` is a request, not a
+  guarantee, on endpoints that ignore it; the answer is held to the labels regardless.
+
+**Decisions and why**
+- **Fail the stage on a call that still fails**, rather than a null and an error column: a
+  half-labelled table looks finished, and the rows without a label are the ones someone will
+  not notice.
+- **Coerce extracted values to their type, or null**, rather than fail: a model writing `"3"`
+  for 3 is common and harmless; a whole run failing over it is not.
+- **Temperature 0**: the same question the same way on a rerun.
+
+**Mistakes worth not repeating**
+- **The heredoc swallowed a backslash in `'\\'` again** (a Rust char literal). The Edit tool
+  for anything with backslashes, every time.

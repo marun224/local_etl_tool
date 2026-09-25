@@ -332,6 +332,107 @@ pub fn preview(
     // the staging file already has the rows the preview shows.
     native::stage_sources(stages.iter().copied(), options, &mut staging)?;
 
+    let limit_query = format!(
+        "SELECT * FROM {} LIMIT {};",
+        crate::sql::quote_identifier(node_id),
+        limit + 1
+    );
+
+    // A transform written in Rust has to run between its feed and its view,
+    // which one script cannot do: those previews go stage by stage.
+    let rows = if stages.iter().any(|stage| {
+        stage
+            .native
+            .as_ref()
+            .is_some_and(|step| step.is_transform())
+    }) {
+        preview_in_session(plan, &stages, &limit_query, options, &binary, &mut staging)?
+    } else {
+        preview_in_one_script(plan, &stages, &limit_query, options, &binary)?
+    };
+    let mut rows = rows;
+
+    let truncated = rows.len() > limit;
+    rows.truncate(limit);
+
+    let columns = rows
+        .first()
+        .and_then(JsonValue::as_object)
+        .map(|row| row.keys().cloned().collect())
+        .unwrap_or_default();
+
+    Ok(Preview {
+        node_id: node_id.to_string(),
+        columns,
+        rows,
+        truncated,
+    })
+}
+
+/// A preview's stages, one at a time in a session, a transform's Rust half
+/// between its feed and its view.
+fn preview_in_session(
+    plan: &Plan,
+    stages: &[&Stage],
+    limit_query: &str,
+    options: &RunOptions,
+    binary: &Path,
+    staging: &mut Staging,
+) -> Result<Vec<JsonValue>, ExecError> {
+    let extensions = plan.extensions();
+    let extension_dir = locate_extension_dir(options);
+    let mut session = Session::open(
+        binary,
+        options.working_dir.as_deref(),
+        extension_dir.as_deref(),
+        &extensions,
+    )
+    .map_err(|source| session_error(source, &extensions, options))?;
+
+    let failed = |stage: &Stage, message: String| ExecError::StageFailed {
+        node_id: stage.node_id.clone(),
+        label: stage.label.clone(),
+        message: redact(&message, &options.redact),
+    };
+
+    for stage in stages {
+        if stage
+            .native
+            .as_ref()
+            .is_some_and(|step| step.is_transform())
+        {
+            if let Err(message) = native::run_transform(&mut session, stage, options, staging)? {
+                return Err(failed(stage, message));
+            }
+        }
+        let answer = session.execute(&stage.sql).map_err(ExecError::Session)?;
+        if answer.has_message() {
+            return Err(failed(stage, answer.stderr.trim().to_string()));
+        }
+    }
+
+    let answer = session.execute(limit_query).map_err(ExecError::Session)?;
+    let _ = session.close();
+    let _ = clear_spills(plan, options);
+    if answer.has_message() {
+        return Err(ExecError::RunFailed {
+            message: redact(answer.stderr.trim(), &options.redact),
+        });
+    }
+    Ok(match answer.values.into_iter().last() {
+        Some(JsonValue::Array(rows)) => rows,
+        _ => Vec::new(),
+    })
+}
+
+/// A preview's stages as one script: the ordinary case.
+fn preview_in_one_script(
+    plan: &Plan,
+    stages: &[&Stage],
+    limit_query: &str,
+    options: &RunOptions,
+    binary: &Path,
+) -> Result<Vec<JsonValue>, ExecError> {
     let mut script = String::new();
 
     if let Some(directory) = locate_extension_dir(options) {
@@ -347,20 +448,17 @@ pub fn preview(
         script.push_str(&format!("LOAD {extension};\n"));
     }
 
-    for stage in &stages {
+    for stage in stages {
         script.push_str(&stage.sql);
         script.push('\n');
     }
 
     // One more than asked for, so "there is more" is answered by the same query
     // rather than by a second count over the same work.
-    script.push_str(&format!(
-        "SELECT * FROM {} LIMIT {};\n",
-        crate::sql::quote_identifier(node_id),
-        limit + 1
-    ));
+    script.push_str(limit_query);
+    script.push('\n');
 
-    let mut command = Command::new(&binary);
+    let mut command = Command::new(binary);
     command.arg("-json").arg("-c").arg(&script);
 
     if let Some(directory) = &options.working_dir {
@@ -394,25 +492,9 @@ pub fn preview(
         .last()
         .unwrap_or(JsonValue::Array(Vec::new()));
 
-    let mut rows = match last {
+    Ok(match last {
         JsonValue::Array(rows) => rows,
         _ => Vec::new(),
-    };
-
-    let truncated = rows.len() > limit;
-    rows.truncate(limit);
-
-    let columns = rows
-        .first()
-        .and_then(JsonValue::as_object)
-        .map(|row| row.keys().cloned().collect())
-        .unwrap_or_default();
-
-    Ok(Preview {
-        node_id: node_id.to_string(),
-        columns,
-        rows,
-        truncated,
     })
 }
 
@@ -1030,6 +1112,36 @@ fn run_driven(plan: &Plan, options: &RunOptions, binary: PathBuf) -> Result<RunR
                             node_id: stage.node_id.clone(),
                             label: stage.label.clone(),
                             message: redact(&message, &options.redact),
+                        });
+                    }
+                    continue;
+                }
+            }
+        }
+
+        // A transform written in Rust runs between its input and its view:
+        // the feed and the connector here, the view in `run_stage` below.
+        if stage
+            .native
+            .as_ref()
+            .is_some_and(|step| step.is_transform())
+        {
+            match native::run_transform(&mut session, stage, options, &mut staging)? {
+                Ok(note) => notes.push(note),
+                Err(message) => {
+                    unusable.insert(stage.node_id.clone());
+                    outcomes.push(skipped_outcome(stage, SkipReason::Failed));
+                    failures.push(StageFailure {
+                        node_id: stage.node_id.clone(),
+                        label: stage.label.clone(),
+                        message: message.clone(),
+                    });
+
+                    if !stage.policy.continue_on_failure {
+                        return Err(ExecError::StageFailed {
+                            node_id: stage.node_id.clone(),
+                            label: stage.label.clone(),
+                            message,
                         });
                     }
                     continue;

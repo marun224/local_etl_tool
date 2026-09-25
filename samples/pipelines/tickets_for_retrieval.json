@@ -1,0 +1,93 @@
+{
+  "formatVersion": 1,
+  "name": "tickets_for_retrieval",
+  "nodes": [
+    {
+      "id": "tickets",
+      "type": "source",
+      "position": {
+        "x": 0.0,
+        "y": 0.0
+      },
+      "data": {
+        "label": "Support tickets",
+        "componentId": "src.file.jsonl",
+        "properties": {
+          "path": "${workspace}/samples/data/tickets.jsonl"
+        }
+      }
+    },
+    {
+      "id": "redacted",
+      "type": "transform",
+      "position": {
+        "x": 280.0,
+        "y": 0.0
+      },
+      "data": {
+        "label": "Personal data out",
+        "componentId": "xf.ai.redact",
+        "properties": {
+          "columns": [
+            "body"
+          ]
+        }
+      }
+    },
+    {
+      "id": "chunked",
+      "type": "transform",
+      "position": {
+        "x": 560.0,
+        "y": 0.0
+      },
+      "data": {
+        "label": "Chunks for embedding",
+        "componentId": "xf.ai.chunk",
+        "properties": {
+          "column": "body",
+          "size": 120,
+          "overlap": 30
+        }
+      }
+    },
+    {
+      "id": "write_chunks",
+      "type": "sink",
+      "position": {
+        "x": 840.0,
+        "y": 0.0
+      },
+      "data": {
+        "label": "Ticket chunks",
+        "componentId": "snk.file.parquet",
+        "properties": {
+          "path": "${workspace}/samples/out/ticket_chunks.parquet"
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "source": "tickets",
+      "target": "redacted",
+      "sourceHandle": "main",
+      "targetHandle": "in"
+    },
+    {
+      "id": "e2",
+      "source": "redacted",
+      "target": "chunked",
+      "sourceHandle": "main",
+      "targetHandle": "in"
+    },
+    {
+      "id": "e3",
+      "source": "chunked",
+      "target": "write_chunks",
+      "sourceHandle": "main",
+      "targetHandle": "in"
+    }
+  ]
+}

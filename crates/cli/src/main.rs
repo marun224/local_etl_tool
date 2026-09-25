@@ -2643,6 +2643,22 @@ fn build_artifact(
         report_warnings(&plan);
     }
 
+    let local: Vec<String> = plan
+        .unportable()
+        .iter()
+        .map(|stage| format!("'{}' ({})", stage.node_id, stage.component_id))
+        .collect();
+    if !local.is_empty() {
+        return Err(refuse(
+            exit::USAGE,
+            format!(
+                "{} runs a model on this machine, which a built executable does not carry. \
+                 Run this pipeline with `etl run` here instead.",
+                local.join(", ")
+            ),
+        ));
+    }
+
     let mut notes = Vec::new();
 
     // An incremental source needs somewhere to keep its high-water mark, and

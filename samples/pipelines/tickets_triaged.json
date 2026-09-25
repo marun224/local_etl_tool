@@ -1,0 +1,124 @@
+{
+  "formatVersion": 1,
+  "name": "tickets_triaged",
+  "nodes": [
+    {
+      "id": "tickets",
+      "type": "source",
+      "position": {
+        "x": 0,
+        "y": 0
+      },
+      "data": {
+        "label": "Support tickets",
+        "componentId": "src.file.jsonl",
+        "properties": {
+          "path": "${workspace}/samples/data/tickets.jsonl"
+        }
+      }
+    },
+    {
+      "id": "topic",
+      "type": "transform",
+      "position": {
+        "x": 280,
+        "y": 0
+      },
+      "data": {
+        "label": "Topic",
+        "componentId": "xf.ai.classify",
+        "properties": {
+          "column": "body",
+          "labels": [
+            "billing",
+            "technical",
+            "thanks"
+          ],
+          "instructions": "billing is about payments, invoices or refunds; technical is about something not working; thanks is a thank-you with nothing to do."
+        }
+      }
+    },
+    {
+      "id": "facts",
+      "type": "transform",
+      "position": {
+        "x": 560,
+        "y": 0
+      },
+      "data": {
+        "label": "Facts",
+        "componentId": "xf.ai.extract",
+        "properties": {
+          "column": "body",
+          "fields": {
+            "order_number": "text",
+            "urgent": "boolean",
+            "email_given": "boolean"
+          }
+        }
+      }
+    },
+    {
+      "id": "gist",
+      "type": "transform",
+      "position": {
+        "x": 840,
+        "y": 0
+      },
+      "data": {
+        "label": "Gist",
+        "componentId": "xf.ai.prompt",
+        "properties": {
+          "prompt": "Summarise this support ticket in at most eight words: {body}",
+          "output": "gist",
+          "max_tokens": 40
+        }
+      }
+    },
+    {
+      "id": "out",
+      "type": "sink",
+      "position": {
+        "x": 1120,
+        "y": 0
+      },
+      "data": {
+        "label": "Triaged",
+        "componentId": "snk.file.jsonl",
+        "properties": {
+          "path": "${workspace}/samples/out/tickets_triaged.jsonl"
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "source": "tickets",
+      "target": "topic",
+      "sourceHandle": "main",
+      "targetHandle": "in"
+    },
+    {
+      "id": "e2",
+      "source": "topic",
+      "target": "facts",
+      "sourceHandle": "main",
+      "targetHandle": "in"
+    },
+    {
+      "id": "e3",
+      "source": "facts",
+      "target": "gist",
+      "sourceHandle": "main",
+      "targetHandle": "in"
+    },
+    {
+      "id": "e4",
+      "source": "gist",
+      "target": "out",
+      "sourceHandle": "main",
+      "targetHandle": "in"
+    }
+  ]
+}

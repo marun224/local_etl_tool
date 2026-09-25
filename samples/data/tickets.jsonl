@@ -1,0 +1,4 @@
+{"ticket_id": 101, "opened": "2026-09-20", "body": "Hi, my order 1234567890123 never arrived. Please email me at jane.doe@example.com or call 555-123-4567. I paid with card 4111 1111 1111 1111 and would like a refund if it cannot be found before the weekend."}
+{"ticket_id": 102, "opened": "2026-09-21", "body": "The export to Parquet fails with an out of memory error on the 10 000 000 row table. Our server is at 192.168.10.200 and the logs are attached. Contact ops-team@example.org for access."}
+{"ticket_id": 103, "opened": "2026-09-22", "body": "Thanks, all fixed."}
+{"ticket_id": 104, "opened": "2026-09-23", "body": "Calling from the UK office, +44 20 7946 0958. The invoice for 2026-09-25 lists the wrong tax number; please correct it and resend it to billing@example.co.uk. Our reference is SSN-free, as agreed."}

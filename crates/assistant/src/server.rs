@@ -10,6 +10,10 @@ use std::time::{Duration, Instant};
 
 pub const SERVER_ENV: &str = "ETL_LLAMA_SERVER";
 pub const MODEL_ENV: &str = "ETL_ASSIST_MODEL";
+pub const EMBED_MODEL_ENV: &str = "ETL_EMBED_MODEL";
+
+/// The embedding model `scripts/fetch-model.ps1` fetches (Settled decision 109).
+pub const DEFAULT_EMBEDDER: &str = "bge-small-en-v1.5-q8_0.gguf";
 
 /// The model `scripts/fetch-model.ps1` fetches (Settled decision 95).
 pub const DEFAULT_MODEL: &str = "qwen2.5-coder-1.5b-instruct-q4_k_m.gguf";
@@ -52,6 +56,18 @@ pub fn locate_model(explicit: Option<&Path>, start: &Path) -> Result<PathBuf, St
         start,
         &["models", DEFAULT_MODEL],
         "the model",
+    )
+}
+
+/// Find the embedding model `xf.ai.embed` runs: an explicit path, then
+/// `ETL_EMBED_MODEL`, then `tools/models/` searching upward from `start`.
+pub fn locate_embedder(explicit: Option<&Path>, start: &Path) -> Result<PathBuf, String> {
+    locate(
+        explicit,
+        EMBED_MODEL_ENV,
+        start,
+        &["models", DEFAULT_EMBEDDER],
+        "the embedding model",
     )
 }
 
@@ -120,6 +136,23 @@ impl Server {
     /// Start `server` without waiting for the model to load, so the caller
     /// can hold it (and stop it) while it does.
     pub fn spawn(server: &Path, model: &Path, log: &Path) -> Result<Server, String> {
+        // One slot, so the whole context is this request's.
+        Server::spawn_with(
+            server,
+            model,
+            log,
+            &["--ctx-size", CONTEXT, "--parallel", "1"],
+        )
+    }
+
+    /// [`Server::spawn`], with the model's own settings: `--embeddings` for an
+    /// embedding model, a context size.
+    pub fn spawn_with(
+        server: &Path,
+        model: &Path,
+        log: &Path,
+        settings: &[&str],
+    ) -> Result<Server, String> {
         let port = free_port().map_err(|error| format!("no free local port: {error}"))?;
         let output = File::create(log).map_err(|error| format!("{}: {error}", log.display()))?;
         let errors = output
@@ -129,9 +162,14 @@ impl Server {
         let child = Command::new(server)
             .arg("--model")
             .arg(model)
-            .args(["--host", "127.0.0.1", "--port", &port.to_string()])
-            // One slot, so the whole context is this request's.
-            .args(["--ctx-size", CONTEXT, "--parallel", "1", "--no-webui"])
+            .args([
+                "--host",
+                "127.0.0.1",
+                "--port",
+                &port.to_string(),
+                "--no-webui",
+            ])
+            .args(settings)
             .stdin(Stdio::null())
             .stdout(output)
             .stderr(errors)
@@ -151,6 +189,12 @@ impl Server {
             log: log.to_path_buf(),
             agent,
         })
+    }
+
+    /// Where it listens, e.g. `http://127.0.0.1:52011`: its OpenAI-compatible
+    /// API is under `/v1`.
+    pub fn base_url(&self) -> &str {
+        &self.base
     }
 
     /// Wait until the model has loaded, the server has died, or it was stopped.
@@ -207,9 +251,10 @@ impl Server {
         child.try_wait().ok().flatten()
     }
 
-    /// Send one chat completion and return the model's text.
-    pub fn complete(&self, body: &serde_json::Value) -> Result<String, String> {
-        let url = format!("{}/v1/chat/completions", self.base);
+    /// POST `body` to `path` and return the JSON answer. A refusal is an
+    /// error carrying the server's own message.
+    pub fn post(&self, path: &str, body: &serde_json::Value) -> Result<serde_json::Value, String> {
+        let url = format!("{}{path}", self.base);
         let mut response = self
             .agent
             .post(&url)
@@ -230,14 +275,23 @@ impl Server {
             .limit(64 * 1024 * 1024)
             .read_to_string()
             .map_err(|error| format!("llama-server's answer could not be read: {error}"))?;
+        let answer: Result<serde_json::Value, _> = serde_json::from_str(&text);
         if status != 200 {
+            let said = answer
+                .ok()
+                .and_then(|answer| answer["error"]["message"].as_str().map(str::to_string))
+                .unwrap_or(text);
             return Err(format!(
-                "llama-server refused the request ({status}): {text}"
+                "llama-server refused the request ({status}): {said}"
             ));
         }
+        answer.map_err(|error| format!("llama-server's answer is not JSON: {error}"))
+    }
 
-        let answer: serde_json::Value = serde_json::from_str(&text)
-            .map_err(|error| format!("llama-server's answer is not JSON: {error}"))?;
+    /// Send one chat completion and return the model's text.
+    pub fn complete(&self, body: &serde_json::Value) -> Result<String, String> {
+        let answer = self.post("/v1/chat/completions", body)?;
+        let text = answer.to_string();
         let choice = &answer["choices"][0];
         if choice["finish_reason"] == "length" {
             return Err(format!(

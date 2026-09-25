@@ -1933,3 +1933,217 @@ fn half_a_key_pair_is_refused_by_the_missing_half() {
 
     assert!(error.to_string().contains("property 'secret'"), "{error}");
 }
+
+// ---------------------------------------------------------------------------
+// Text for AI (Phase 11d1)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn chunk_is_a_recursive_query_that_ends_chunks_at_whitespace() {
+    assert_eq!(
+        from_source(
+            "xf.ai.chunk",
+            json!({ "column": "body", "size": 20, "overlap": 5 })
+        ),
+        r#"CREATE OR REPLACE TEMP VIEW "b" AS (WITH RECURSIVE __etl_rows AS (SELECT *, row_number() OVER () AS __etl_row, CAST("body" AS VARCHAR) AS __etl_text FROM "a"), __etl_chunks AS (SELECT r.__etl_row, r.__etl_text, CAST(1 AS BIGINT) AS __etl_start, CAST(0 AS BIGINT) AS __etl_step, c.__etl_cut FROM __etl_rows r, LATERAL (SELECT CASE WHEN 1 + 20 - 1 >= length(r.__etl_text) THEN length(r.__etl_text) - 1 + 1 WHEN strpos(reverse(regexp_replace(substring(r.__etl_text, 1, 20), '\s', ' ', 'g')), ' ') BETWEEN 1 AND 14 THEN 20 - strpos(reverse(regexp_replace(substring(r.__etl_text, 1, 20), '\s', ' ', 'g')), ' ') ELSE 20 END AS __etl_cut) c WHERE length(trim(r.__etl_text)) > 0 UNION ALL SELECT p.__etl_row, p.__etl_text, n.__etl_next, p.__etl_step + 1, c.__etl_cut FROM __etl_chunks p, LATERAL (SELECT CASE WHEN regexp_matches(substring(p.__etl_text, p.__etl_start + p.__etl_cut - 5 - 1, 1), '\s') THEN p.__etl_start + p.__etl_cut - 5 WHEN strpos(regexp_replace(substring(p.__etl_text, p.__etl_start + p.__etl_cut - 5, 5), '\s', ' ', 'g'), ' ') > 0 THEN p.__etl_start + p.__etl_cut - 5 + strpos(regexp_replace(substring(p.__etl_text, p.__etl_start + p.__etl_cut - 5, 5), '\s', ' ', 'g'), ' ') ELSE p.__etl_start + p.__etl_cut - 5 END AS __etl_next) n, LATERAL (SELECT CASE WHEN n.__etl_next + 20 - 1 >= length(p.__etl_text) THEN length(p.__etl_text) - n.__etl_next + 1 WHEN strpos(reverse(regexp_replace(substring(p.__etl_text, n.__etl_next, 20), '\s', ' ', 'g')), ' ') BETWEEN 1 AND 14 THEN 20 - strpos(reverse(regexp_replace(substring(p.__etl_text, n.__etl_next, 20), '\s', ' ', 'g')), ' ') ELSE 20 END AS __etl_cut) c WHERE p.__etl_start + 20 - 1 < length(p.__etl_text)) SELECT r.* EXCLUDE (__etl_row, __etl_text, "body"), row_number() OVER (PARTITION BY c.__etl_row ORDER BY c.__etl_step) - 1 AS "chunk_index", c.__etl_chunk AS "chunk" FROM (SELECT __etl_row, __etl_step, trim(substring(__etl_text, __etl_start, __etl_cut)) AS __etl_chunk FROM __etl_chunks) c JOIN __etl_rows r USING (__etl_row) WHERE c.__etl_chunk <> '' ORDER BY c.__etl_row, c.__etl_step);"#
+    );
+}
+
+#[test]
+fn a_chunk_must_be_longer_than_its_overlap() {
+    let error = compile_two_err(
+        ("src.file.csv", json!({ "path": "in.csv" })),
+        (
+            "xf.ai.chunk",
+            json!({ "column": "body", "size": 100, "overlap": 100 }),
+        ),
+    );
+    assert!(
+        error.to_string().contains("smaller than size (100)"),
+        "{error}"
+    );
+
+    let error = compile_two_err(
+        ("src.file.csv", json!({ "path": "in.csv" })),
+        (
+            "xf.ai.chunk",
+            json!({ "column": "body", "size": 0, "overlap": 0 }),
+        ),
+    );
+    assert!(error.to_string().contains("at least 1"), "{error}");
+}
+
+#[test]
+fn redact_is_one_layer_per_kind_in_a_fixed_order() {
+    // Asked for SSN first; email is still looked for first.
+    assert_eq!(
+        from_source(
+            "xf.ai.redact",
+            json!({ "columns": ["note"], "kinds": ["ssn", "email"] })
+        ),
+        r#"CREATE OR REPLACE TEMP VIEW "b" AS (SELECT * FROM (SELECT * REPLACE (regexp_replace(CAST("note" AS VARCHAR), '\b[0-9]{3}-[0-9]{2}-[0-9]{4}\b', '[SSN]', 'g') AS "note") FROM (SELECT * REPLACE (regexp_replace(CAST("note" AS VARCHAR), '[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}', '[EMAIL]', 'g') AS "note") FROM "a")));"#
+    );
+}
+
+#[test]
+fn a_card_is_judged_by_luhn_and_a_hash_is_over_its_digits() {
+    let sql = from_source(
+        "xf.ai.redact",
+        json!({ "columns": ["note"], "kinds": ["credit_card"], "replacement": "hash" }),
+    );
+
+    assert!(sql.contains("list_filter(regexp_extract_all("), "{sql}");
+    assert!(sql.contains("% 10 = 0"), "{sql}");
+    assert!(
+        sql.contains(
+            "'[CARD:' || left(sha256(regexp_replace(__etl_m, '[^0-9]', '', 'g')), 12) || ']'"
+        ),
+        "{sql}"
+    );
+}
+
+#[test]
+fn an_unknown_kind_or_none_at_all_is_refused_by_name() {
+    let error = compile_two_err(
+        ("src.file.csv", json!({ "path": "in.csv" })),
+        (
+            "xf.ai.redact",
+            json!({ "columns": ["note"], "kinds": ["passport"] }),
+        ),
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("\"passport\" is not one of email, phone"),
+        "{error}"
+    );
+
+    let error = compile_two_err(
+        ("src.file.csv", json!({ "path": "in.csv" })),
+        ("xf.ai.redact", json!({ "columns": ["note"], "kinds": [] })),
+    );
+    assert!(error.to_string().contains("at least one kind"), "{error}");
+}
+
+// ---------------------------------------------------------------------------
+// Native transforms (Phase 11d2)
+// ---------------------------------------------------------------------------
+
+fn embedded() -> Plan {
+    compile_two(
+        ("src.file.csv", json!({ "path": "in.csv" })),
+        (
+            "xf.ai.embed",
+            json!({ "column": "body", "output": "vec", "dimensions": 3 }),
+        ),
+    )
+}
+
+#[test]
+fn a_native_transform_joins_its_columns_back_onto_the_numbered_rows() {
+    assert_eq!(
+        sql_of(&embedded(), "b"),
+        r#"CREATE OR REPLACE TEMP VIEW "b" AS (SELECT i.* EXCLUDE (__etl_row), o."vec" FROM "b__native_in" i LEFT JOIN read_json('.etl/tmp/native/b.jsonl', format='newline_delimited', columns={'__etl_row': 'BIGINT', 'vec': 'FLOAT[3]'}) o USING (__etl_row) ORDER BY i.__etl_row);"#
+    );
+}
+
+#[test]
+fn its_feed_numbers_the_rows_and_writes_only_what_it_reads() {
+    let plan = embedded();
+    let step = plan.stage("b").unwrap().native.as_ref().expect("native");
+
+    assert_eq!(step.direction, crate::plan::Direction::Transform);
+    assert_eq!(step.input.as_deref(), Some(".etl/tmp/native/b.in.jsonl"));
+    assert_eq!(step.staging, ".etl/tmp/native/b.jsonl");
+    assert_eq!(
+        step.feed.as_deref(),
+        Some(
+            "CREATE OR REPLACE TEMP TABLE \"b__native_in\" AS SELECT row_number() OVER () AS __etl_row, * FROM \"a\";\n\
+             COPY (SELECT __etl_row, \"body\" FROM \"b__native_in\") TO '.etl/tmp/native/b.in.jsonl' (FORMAT json);"
+        )
+    );
+}
+
+#[test]
+fn a_native_transform_runs_in_a_session_does_its_work_there_and_stays_on_this_machine() {
+    let plan = embedded();
+    let stage = plan.stage("b").unwrap();
+
+    assert!(
+        stage.needs_session(),
+        "only a driven session can run Rust between stages"
+    );
+    assert!(plan.needs_session());
+    assert!(stage.work_happens_here(), "so its time is reported");
+    assert_eq!(
+        plan.unportable()
+            .iter()
+            .map(|s| s.node_id.as_str())
+            .collect::<Vec<_>>(),
+        ["b"],
+        "a built executable has no model"
+    );
+    let script = plan.script(false);
+    assert!(
+        script.contains("-- xf.ai.embed runs here, in Rust: .etl/tmp/native/b.in.jsonl to .etl/tmp/native/b.jsonl"),
+        "{script}"
+    );
+
+    // Nothing else is unportable.
+    assert!(compile_two(
+        ("src.file.csv", json!({ "path": "in.csv" })),
+        ("xf.ai.chunk", json!({ "column": "body" })),
+    )
+    .unportable()
+    .is_empty());
+}
+
+#[test]
+fn an_embedding_needs_a_dimension_and_its_own_column_name() {
+    let error = compile_two_err(
+        ("src.file.csv", json!({ "path": "in.csv" })),
+        ("xf.ai.embed", json!({ "column": "body", "dimensions": 0 })),
+    );
+    assert!(error.to_string().contains("dimensions"), "{error}");
+
+    let error = compile_two_err(
+        ("src.file.csv", json!({ "path": "in.csv" })),
+        (
+            "xf.ai.embed",
+            json!({ "column": "body", "output": "__etl_row" }),
+        ),
+    );
+    assert!(error.to_string().contains("engine's"), "{error}");
+}
+
+#[test]
+fn an_endpoint_shows_in_lineage_by_host_and_its_key_nowhere_in_the_plan() {
+    let plan = compile_two(
+        ("src.file.csv", json!({ "path": "in.csv" })),
+        (
+            "xf.ai.classify",
+            json!({ "column": "body", "labels": ["a", "b"], "model": "m",
+                    "base_url": "https://api.example.com/v1?tenant=9",
+                    "api_key": "sk-plain-key" }),
+        ),
+    );
+    let stage = plan.stage("b").unwrap();
+
+    assert_eq!(
+        stage.external.as_deref(),
+        Some("https://api.example.com/v1")
+    );
+    assert!(plan.unportable().is_empty(), "an endpoint travels");
+    assert!(!plan.script(true).contains("sk-plain-key"));
+    assert!(!stage.sql.contains("sk-plain-key"));
+
+    let local = compile_two(
+        ("src.file.csv", json!({ "path": "in.csv" })),
+        (
+            "xf.ai.classify",
+            json!({ "column": "body", "labels": ["a", "b"] }),
+        ),
+    );
+    assert_eq!(local.stage("b").unwrap().external, None);
+    assert_eq!(local.unportable().len(), 1, "the local model does not");
+}

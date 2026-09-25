@@ -10,6 +10,7 @@ rust-version.workspace = true
 amq-protocol-tcp = { version = "10.6", default-features = false, features = ["rustls-common", "rustls--ring", "tokio"] }
 async-nats = { version = "0.50", default-features = false, features = ["jetstream", "ring", "nkeys"] }
 async-rs = { version = "0.8", default-features = false, features = ["tokio"] }
+etl-assistant.workspace = true
 etl-metadata.workspace = true
 etl-plugin-sdk.workspace = true
 etl-state.workspace = true

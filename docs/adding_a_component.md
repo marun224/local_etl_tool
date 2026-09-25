@@ -305,3 +305,21 @@ Two rules that are easy to break:
   the Linux runner is built in a bare bookworm image and ships with no dependencies. An async
   runtime only if a family genuinely cannot avoid one, and then it is a decision recorded in
   the tracker, not a line in a `Cargo.toml`.
+
+## Native transforms (Rust between two stages)
+
+Added in Phase 11d2; `xf.ai.embed` in [`crates/connectors/src/embed.rs`](../crates/connectors/src/embed.rs)
+is the worked example. For a computation SQL cannot express, such as a model call per row.
+
+1. **Implement `Transform`** from `etl-plugin-sdk`: `spec()` in the `xf.*` namespace, `reads()`
+   (the input columns it needs), `adds()` (the columns it adds, each with a SQL type), and
+   `transform()`, which reads records carrying `ROW_KEY` and the columns it reads, and writes one
+   record per row it has an answer for: `ROW_KEY` and the added columns. A row it writes nothing
+   for gets nulls. Return `false` from `portable()` if it needs something only this machine has.
+2. **List it** in `etl_connectors::all()` as `Connector::Transform(&...)`, and in the inventory.
+
+The engine does the rest: the feed (`builders::native_feed`), the view that joins the added
+columns back (`builders::native_transform`), the driven path (a plan with one always takes
+it), preview, cleanup of both staging files, failures named by node with secrets masked, and
+`etl build`'s refusal of an unportable one. The bridge is tested once for everybody, with a
+stand-in transform, in `crates/duckdb-engine/src/native/tests.rs`.

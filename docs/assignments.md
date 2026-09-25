@@ -575,3 +575,48 @@ Copy-Item samples\pipelines\orders_enriched.json samples\out\scratch\
   loading); ask again and cancel after twenty (it is writing).
   *Check:* both say "Cancelled." and the next request still works. In Task Manager,
   `llama-server.exe` is gone after each cancel and after you close the app.
+
+## Phase 11d1 — chunk and redact
+
+- [ ] **A75. Find what redact misses.**
+  *Do:* write ten lines of text as a support ticket would, with personal data in forms of
+  your own (an email with a space before `@`, a phone number with dots, a card in groups of
+  4-6-5), and run them through `xf.ai.redact`.
+  *Check:* list what got through, and say for each whether the pattern should take it or
+  the help should warn about it. Add a case to `tests/ai_text.rs` for one of them.
+
+- [ ] **A76. Size chunks for a model.**
+  *Do:* run `samples/pipelines/tickets_for_retrieval.json` with `size` 60, 120 and 400, and
+  count the chunks and their average length with DuckDB.
+  *Check:* explain why the average is below `size`, and what `overlap` does to the count.
+
+## Phase 11d2 — native transforms and embeddings
+
+- [ ] **A77. Search your own text.**
+  *Do:* put twenty short paragraphs of your own into a JSON Lines file, run them through
+  `xf.ai.chunk` and `xf.ai.embed` to Parquet, then embed one question the same way and rank
+  the chunks by `array_cosine_similarity`.
+  *Check:* the top three answer the question. Find one question where they do not, and say
+  why (a word the model does not know, a chunk that cut the answer in two).
+
+- [ ] **A78. 🦀 Write a native transform.**
+  *Do:* following `docs/adding_a_component.md`, add `xf.text.stats` that reads one text column
+  and adds `words` (`INTEGER`) and `sentences` (`INTEGER`), with a test like the stand-in in
+  `src/native/tests.rs`.
+  *Check:* it appears in `etl components`, `etl plan --script` shows its feed, and its output
+  keeps the input's other column types.
+
+## Phase 11d3 — asking a model about each row
+
+- [ ] **A79. Triage with a bigger model.**
+  *Do:* run `samples/pipelines/tickets_triaged.json` as it is, then with `base_url`, `model`
+  and `api_key` (as `${SECRET:openai}`, set with `etl secret set`) on all three nodes pointing
+  at an endpoint you have.
+  *Check:* compare the labels and facts with the local model's. `etl lineage` shows the host
+  and `etl plan --script` does not show the key.
+
+- [ ] **A80. 🦀 Watch the guardrails.**
+  *Do:* in `crates/connectors/src/ask/tests.rs`, add a test where the fixture answers 429
+  with `Retry-After: 1` twice and then succeeds, with `retries` 1.
+  *Check:* it fails, saying 429, and the fixture saw exactly two requests. Raise `retries` to
+  2 and it succeeds after about two seconds.

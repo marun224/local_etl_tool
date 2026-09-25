@@ -250,11 +250,57 @@ pub trait Sink: Send + Sync {
     ) -> Result<Summary, ConnectorError>;
 }
 
-/// A native component, either way round.
+/// The field that keys each row between DuckDB and a [`Transform`].
+pub const ROW_KEY: &str = "__etl_row";
+
+/// A component that adds columns to each row in Rust, between two DuckDB
+/// stages: a model to call, a computation SQL cannot express.
+///
+/// The engine numbers the input rows and hands the transform only the columns
+/// it [`reads`](Transform::reads), each record carrying the [`ROW_KEY`]. The
+/// transform writes one record per row it has an answer for: the same key and
+/// the columns it [`adds`](Transform::adds). The engine joins those back onto
+/// the rows, so every other column keeps its DuckDB type, and a row the
+/// transform wrote nothing for has nulls in the added columns.
+pub trait Transform: Send + Sync {
+    /// The spec, in the `xf.*` namespace.
+    fn spec(&self) -> ComponentSpec;
+
+    /// Refuse a configuration that cannot work, before anything runs. The
+    /// same contract as [`Source::check`].
+    fn check(&self, _properties: &JsonValue) -> Result<(), ConnectorError> {
+        Ok(())
+    }
+
+    /// The input columns each record needs.
+    fn reads(&self, properties: &JsonValue) -> Vec<String>;
+
+    /// The columns it adds, each with its SQL type, in order.
+    fn adds(&self, properties: &JsonValue) -> Vec<(String, String)>;
+
+    /// Whether a built executable can carry what this node needs. False for
+    /// one that runs a local model, which `etl build` then refuses.
+    fn portable(&self, _properties: &JsonValue) -> bool {
+        true
+    }
+
+    /// Read every record from `input` and write the added columns to `out`,
+    /// keyed by [`ROW_KEY`].
+    fn transform(
+        &self,
+        properties: &JsonValue,
+        input: &mut dyn RecordReader,
+        out: &mut dyn RecordWriter,
+        context: &Context,
+    ) -> Result<Summary, ConnectorError>;
+}
+
+/// A native component: in, out, or in the middle.
 #[derive(Clone, Copy)]
 pub enum Connector {
     Source(&'static dyn Source),
     Sink(&'static dyn Sink),
+    Transform(&'static dyn Transform),
 }
 
 impl Connector {
@@ -262,6 +308,7 @@ impl Connector {
         match self {
             Connector::Source(source) => source.spec(),
             Connector::Sink(sink) => sink.spec(),
+            Connector::Transform(transform) => transform.spec(),
         }
     }
 
@@ -269,6 +316,7 @@ impl Connector {
         match self {
             Connector::Source(source) => source.check(properties),
             Connector::Sink(sink) => sink.check(properties),
+            Connector::Transform(transform) => transform.check(properties),
         }
     }
 }

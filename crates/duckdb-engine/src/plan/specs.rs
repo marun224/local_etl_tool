@@ -13,7 +13,7 @@
 //!
 //! See `docs/adding_a_component.md`.
 
-use super::builders::{self, Lowering};
+use super::builders::{self, Lowering, REDACT_KINDS};
 use crate::EngineError;
 use etl_metadata::{ComponentSpec, ControlKind, PortSpec, PropertySpec};
 use serde_json::{Map, Value as JsonValue};
@@ -473,6 +473,66 @@ fn all_components() -> Vec<(ComponentSpec, BuildFn)> {
                 ]),
             builders::transform_unpivot,
         ),
+        // -- Transforms: text for AI (plain SQL, no model) -----------------
+        (
+            ComponentSpec::new("xf.ai.chunk", "Chunk text")
+                .description(
+                    "Split a text column into overlapping chunks, one row each, for embedding \
+                     or retrieval.",
+                )
+                .icon("scissors")
+                .properties(vec![
+                    PropertySpec::text("column")
+                        .required()
+                        .help("The text to split. A row with no text gives no chunks."),
+                    PropertySpec::integer("size")
+                        .default(JsonValue::from(1000))
+                        .help(
+                            "Most characters in a chunk. A chunk ends at the last whitespace \
+                             before this, when there is one.",
+                        ),
+                    PropertySpec::integer("overlap")
+                        .default(JsonValue::from(100))
+                        .help(
+                            "Characters a chunk repeats from the end of the one before, \
+                             starting at a word where it can. Smaller than size.",
+                        ),
+                    PropertySpec::text("output")
+                        .default(JsonValue::String("chunk".into()))
+                        .help(
+                            "The chunk's column; its position is <output>_index, from 0. \
+                             The text column is replaced; the others are kept.",
+                        ),
+                ]),
+            builders::transform_ai_chunk,
+        ),
+        (
+            ComponentSpec::new("xf.ai.redact", "Redact PII")
+                .description(
+                    "Replace personal data found by its shape, such as emails and card numbers.",
+                )
+                .icon("eye-off")
+                .properties(vec![
+                    PropertySpec::string_list("columns")
+                        .required()
+                        .help("The text columns to redact."),
+                    PropertySpec::string_list("kinds")
+                        .default(JsonValue::from(REDACT_KINDS.to_vec()))
+                        .help(
+                            "Any of email, phone (with an area code), credit_card (passing \
+                             the Luhn check), ssn (123-45-6789), ip (IPv4, full IPv6). Found \
+                             by pattern: names and street addresses are not found.",
+                        ),
+                    PropertySpec::enumerated("replacement", &["token", "hash"])
+                        .default(JsonValue::String("token".into()))
+                        .help(
+                            "token writes [EMAIL]; hash writes [EMAIL:<12 hex>] from SHA-256, so \
+                             equal values still match. A hash is pseudonymous, not anonymous: \
+                             a known value can be hashed and compared.",
+                        ),
+                ]),
+            builders::transform_ai_redact,
+        ),
         // -- Transforms: combining two inputs ------------------------------
         (
             ComponentSpec::new("xf.union", "Union")
@@ -846,6 +906,7 @@ fn native_components() -> impl Iterator<Item = (ComponentSpec, BuildFn)> {
         let build: BuildFn = match connector {
             etl_plugin_sdk::Connector::Source(_) => builders::native_source,
             etl_plugin_sdk::Connector::Sink(_) => builders::native_sink,
+            etl_plugin_sdk::Connector::Transform(_) => builders::native_transform,
         };
         (connector.spec(), build)
     })

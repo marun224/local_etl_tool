@@ -24,6 +24,7 @@
 
 use crate::exec::{redact, resolve_against, Checkpoint, ExecError, RunOptions};
 use crate::plan::{Direction, NativeStep, Stage};
+use crate::session::Session;
 use etl_plugin_sdk::{
     Connector, ConnectorError, Context, Receipt, Record, RecordReader, RecordWriter,
 };
@@ -269,6 +270,96 @@ pub(crate) fn deliver_sinks<'a>(
     }
 
     Ok(notes)
+}
+
+/// Run a native transform's half of its stage, in the session its view will
+/// then be created in: the feed numbers the input rows and writes the columns
+/// the transform reads, the transform writes what it adds, and the stage's own
+/// SQL joins that back.
+///
+/// `Ok(Ok(line))` is a line for the report; `Ok(Err(message))` is the stage
+/// failing, which the caller treats as any stage failure (retries aside: a
+/// transform that calls out makes its own); `Err` is the session broken.
+pub(crate) fn run_transform(
+    session: &mut Session,
+    stage: &Stage,
+    options: &RunOptions,
+    staging: &mut Staging,
+) -> Result<Result<String, String>, ExecError> {
+    run_transform_using(session, stage, options, staging, etl_connectors::find)
+}
+
+/// [`run_transform`], with the registry lookup passed in, so the bridge can
+/// be tested with a transform that exists only in a test.
+pub(crate) fn run_transform_using(
+    session: &mut Session,
+    stage: &Stage,
+    options: &RunOptions,
+    staging: &mut Staging,
+    find: impl Fn(&str) -> Option<Connector>,
+) -> Result<Result<String, String>, ExecError> {
+    let Some(step) = native(stage, Direction::Transform) else {
+        return Ok(Ok(String::new()));
+    };
+    let Some(Connector::Transform(transform)) = find(&stage.component_id) else {
+        return Err(unregistered(stage));
+    };
+    let (Some(input), Some(feed)) = (&step.input, &step.feed) else {
+        return Err(unregistered(stage));
+    };
+
+    let input = track(input, options, staging)?;
+    let output = prepare(step, options, staging)?;
+
+    let answer = session.execute(feed).map_err(ExecError::Session)?;
+    if answer.has_message() {
+        return Ok(Err(redact(answer.stderr.trim(), &options.redact)));
+    }
+
+    let outcome = (|| {
+        let reader = File::open(&input).map_err(|error| ConnectorError::io(&input, error))?;
+        let writer = File::create(&output).map_err(|error| ConnectorError::io(&output, error))?;
+        let mut reader = JsonlReader {
+            lines: BufReader::new(reader),
+            line: 0,
+        };
+        let mut writer = JsonlWriter {
+            out: BufWriter::new(writer),
+        };
+        let summary = transform.transform(
+            &step.properties,
+            &mut reader,
+            &mut writer,
+            &context(options, None),
+        )?;
+        writer
+            .out
+            .flush()
+            .map_err(|error| ConnectorError::io(&output, error))?;
+        Ok::<_, ConnectorError>(summary)
+    })();
+
+    Ok(match outcome {
+        Ok(summary) => Ok(format!(
+            "{}: {}",
+            stage.label,
+            redact(&summary.detail, &options.redact)
+        )),
+        Err(error) => Err(redact(&error.to_string(), &options.redact)),
+    })
+}
+
+/// Make room for a staging file that is not the step's own, and track it.
+fn track(path: &str, options: &RunOptions, staging: &mut Staging) -> Result<PathBuf, ExecError> {
+    let path = resolve_against(path, options);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| ExecError::OutputDirectory {
+            path: parent.display().to_string(),
+            source,
+        })?;
+    }
+    staging.track(path.clone());
+    Ok(path)
 }
 
 /// What to say about the native sinks of a run that failed.

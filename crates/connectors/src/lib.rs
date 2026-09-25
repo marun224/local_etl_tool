@@ -16,9 +16,11 @@
 use etl_plugin_sdk::Connector;
 use std::sync::OnceLock;
 
+pub mod ask;
 mod aws;
 pub mod bigquery;
 pub mod clickhouse;
+pub mod embed;
 #[cfg(test)]
 mod fixture;
 mod gcp;
@@ -72,6 +74,10 @@ pub fn all() -> &'static [(String, Connector)] {
             Connector::Sink(&clickhouse::ClickhouseSink),
             Connector::Source(&sqlserver::SqlserverSource),
             Connector::Sink(&sqlserver::SqlserverSink),
+            Connector::Transform(&embed::EmbedTransform),
+            Connector::Transform(&ask::PromptTransform),
+            Connector::Transform(&ask::ClassifyTransform),
+            Connector::Transform(&ask::ExtractTransform),
         ]
         .into_iter()
         .map(|connector| (connector.spec().id, connector))
@@ -101,6 +107,7 @@ mod tests {
             match connector {
                 Connector::Source(_) => assert_eq!(namespace, Namespace::Source, "{id}"),
                 Connector::Sink(_) => assert_eq!(namespace, Namespace::Sink, "{id}"),
+                Connector::Transform(_) => assert_eq!(namespace, Namespace::Transform, "{id}"),
             }
         }
     }

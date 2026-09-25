@@ -443,3 +443,203 @@ fn stage_with_source(source: &'static dyn Source, plan: &crate::Plan) -> Staged 
     })
     .expect("stages")
 }
+
+// ---------------------------------------------------------------------------
+// Transforms: Rust between two stages (Phase 11d2)
+// ---------------------------------------------------------------------------
+
+use etl_plugin_sdk::{Transform, ROW_KEY};
+
+/// A transform that exists only here, standing in for `xf.ai.embed` so the
+/// bridge runs without a model: each text's vector is its length, its word
+/// count, and 1. A row with no text gets nothing, and an error is on request.
+struct Lengths {
+    fail: Option<&'static str>,
+}
+
+impl Transform for Lengths {
+    fn spec(&self) -> ComponentSpec {
+        ComponentSpec::new("xf.ai.embed", "Lengths")
+    }
+
+    fn reads(&self, _properties: &serde_json::Value) -> Vec<String> {
+        vec!["body".into()]
+    }
+
+    fn adds(&self, _properties: &serde_json::Value) -> Vec<(String, String)> {
+        vec![("embedding".into(), "FLOAT[3]".into())]
+    }
+
+    fn transform(
+        &self,
+        _properties: &serde_json::Value,
+        input: &mut dyn RecordReader,
+        out: &mut dyn RecordWriter,
+        _context: &Context,
+    ) -> Result<Summary, ConnectorError> {
+        if let Some(message) = self.fail {
+            return Err(ConnectorError::Data(message.to_string()));
+        }
+        let mut count = 0;
+        while let Some(record) = input.read()? {
+            let Some(text) = record.get("body").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            let words = text.split_whitespace().count();
+            out.write(self::record(json!({
+                ROW_KEY: record[ROW_KEY],
+                "embedding": [text.chars().count(), words, 1]
+            })))?;
+            count += 1;
+        }
+        Ok(Summary::new(count, format!("measured {count}")))
+    }
+}
+
+static LENGTHS: Lengths = Lengths { fail: None };
+static FAILING: Lengths = Lengths {
+    fail: Some("the model refused token-123"),
+};
+
+/// A JSON Lines source feeding `xf.ai.embed`, in a directory of its own, and a
+/// DuckDB session there. `None` without the vendored DuckDB.
+fn transform_setup(
+    name: &str,
+    embed: serde_json::Value,
+) -> Option<(crate::Plan, RunOptions, Session)> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .unwrap()
+        .to_path_buf();
+    let binary = crate::exec::locate_duckdb(&RunOptions {
+        working_dir: Some(root.clone()),
+        ..Default::default()
+    })
+    .ok()?;
+    let directory = root.join("target").join("test-out").join(name);
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        directory.join("rows.jsonl"),
+        "{\"id\": 1, \"body\": \"a b\", \"day\": \"2026-01-02\", \"amount\": 1.5}\n\
+         {\"id\": 2, \"body\": null, \"day\": \"2026-01-03\", \"amount\": 2.25}\n\
+         {\"id\": 3, \"body\": \"hello world again\", \"day\": \"2026-01-04\", \"amount\": 3}\n",
+    )
+    .unwrap();
+
+    let document = PipelineDoc::from_json(
+        &json!({ "formatVersion": 1, "nodes": [
+            { "id": "rows", "position": {"x": 0, "y": 0}, "data": {
+                "label": "Rows", "componentId": "src.file.jsonl",
+                "properties": { "path": "rows.jsonl" } } },
+            { "id": "vectors", "position": {"x": 1, "y": 0}, "data": {
+                "label": "Vectors", "componentId": "xf.ai.embed", "properties": embed } }
+          ], "edges": [ { "id": "e1", "source": "rows", "target": "vectors" } ] })
+        .to_string(),
+    )
+    .unwrap();
+    let plan = crate::plan::compile(&document).expect("compiles");
+    let options = RunOptions {
+        working_dir: Some(directory.clone()),
+        redact: vec!["token-123".to_string()],
+        ..Default::default()
+    };
+    let session = Session::open(&binary, Some(&directory), None, &[]).expect("a session");
+    Some((plan, options, session))
+}
+
+fn rows_of(session: &mut Session, sql: &str) -> Vec<serde_json::Value> {
+    let answer = session.execute(sql).unwrap();
+    assert!(!answer.has_message(), "{}", answer.stderr);
+    match answer.values.into_iter().last() {
+        Some(serde_json::Value::Array(rows)) => rows,
+        other => panic!("no rows: {other:?}"),
+    }
+}
+
+#[test]
+fn a_transform_adds_its_columns_and_every_other_column_keeps_its_type() {
+    let Some((plan, options, mut session)) = transform_setup(
+        "native_transform",
+        json!({ "column": "body", "dimensions": 3 }),
+    ) else {
+        return eprintln!("skipping: no DuckDB binary");
+    };
+    let mut staging = Staging::default();
+
+    session.execute(&plan.stages[0].sql).unwrap();
+    let vectors = &plan.stages[1];
+    let note = run_transform_using(&mut session, vectors, &options, &mut staging, |id| {
+        (id == "xf.ai.embed").then_some(Connector::Transform(&LENGTHS))
+    })
+    .expect("the session holds")
+    .expect("the transform runs");
+    assert_eq!(note, "Vectors: measured 2");
+    assert!(!session.execute(&vectors.sql).unwrap().has_message());
+
+    let rows = rows_of(&mut session, "SELECT id, body, embedding FROM vectors;");
+    assert_eq!(
+        rows,
+        [
+            json!({ "id": 1, "body": "a b", "embedding": [3.0, 2.0, 1.0] }),
+            json!({ "id": 2, "body": null, "embedding": null }),
+            json!({ "id": 3, "body": "hello world again", "embedding": [17.0, 3.0, 1.0] }),
+        ],
+        "in order, joined on the row, a row without text left null"
+    );
+    let types = rows_of(
+        &mut session,
+        "SELECT typeof(day) AS day, typeof(amount) AS amount, typeof(embedding) AS embedding \
+         FROM vectors LIMIT 1;",
+    );
+    assert_eq!(
+        types,
+        [json!({ "day": "DATE", "amount": "DOUBLE", "embedding": "FLOAT[3]" })],
+        "the untouched columns kept DuckDB's own types"
+    );
+}
+
+#[test]
+fn a_transform_that_fails_is_the_stage_failing_with_secrets_masked() {
+    let Some((plan, options, mut session)) = transform_setup(
+        "native_transform_fails",
+        json!({ "column": "body", "dimensions": 3 }),
+    ) else {
+        return eprintln!("skipping: no DuckDB binary");
+    };
+    let mut staging = Staging::default();
+    session.execute(&plan.stages[0].sql).unwrap();
+
+    let message = run_transform_using(
+        &mut session,
+        &plan.stages[1],
+        &options,
+        &mut staging,
+        |id| (id == "xf.ai.embed").then_some(Connector::Transform(&FAILING)),
+    )
+    .expect("the session holds")
+    .expect_err("the stage fails");
+
+    assert!(message.contains("the model refused"), "{message}");
+    assert!(!message.contains("token-123"), "{message}");
+}
+
+#[test]
+fn a_column_the_input_does_not_have_fails_the_feed_by_name() {
+    let Some((plan, options, mut session)) = transform_setup(
+        "native_transform_no_column",
+        json!({ "column": "nowhere", "dimensions": 3 }),
+    ) else {
+        return eprintln!("skipping: no DuckDB binary");
+    };
+    let mut staging = Staging::default();
+    session.execute(&plan.stages[0].sql).unwrap();
+
+    // The real transform reads what its properties say: `nowhere`.
+    let message = run_transform(&mut session, &plan.stages[1], &options, &mut staging)
+        .expect("the session holds")
+        .expect_err("the feed fails");
+
+    assert!(message.contains("nowhere"), "{message}");
+}

@@ -2520,3 +2520,77 @@ git add <the 11b and 11c files>; git status
 git commit -m "Phases 11b and 11c: etl assist, a local model; the chat panel [skip ci]"
 git push origin main                          # [skip ci]: no CI run, at the user's request
 ```
+
+## 2026-09-25 — Phase 11d planned
+
+```bash
+# read: crates/duckdb-engine/src/{native.rs,exec.rs (run_driven),plan/mod.rs,plan/builders.rs}, crates/plugin-sdk/src/lib.rs
+# read: docs/DECISION_execution_model.md, docs/ET_Local_Tool.md (the AI transforms)
+# docs: PLAN (11d in detail, 11d1-11d3), task_tracker (questions 24-33)
+```
+
+## 2026-09-25 — Phase 11d1: chunk and redact
+
+```bash
+./tools/duckdb/duckdb.exe -c ".read scratchpad/redact_probe.sql"    # Luhn, list_reduce, lambdas: work on 1.5.5
+./tools/duckdb/duckdb.exe -c ".read scratchpad/chunk_probe2.sql"    # recursive CTE with LATERAL: works
+cargo build -p etl-duckdb-engine
+./target/debug/etl.exe plan scratchpad/golden.json                  # the SQL, pinned in builder_tests.rs
+cargo test -p etl-duckdb-engine --test ai_text                      # 1 failed: a phone pattern took a failed card's groups
+cargo test -p etl-duckdb-engine --test ai_text                      # 8 passed, after judging phones
+cargo test -p etl-duckdb-engine --lib                               # 329 + the new golden tests
+./target/debug/etl.exe validate samples/pipelines/tickets_for_retrieval.json
+./target/debug/etl.exe run samples/pipelines/tickets_for_retrieval.json   # 4 tickets, 7 chunks
+npx tsc --noEmit; npx vitest run                                    # 177 (3 for the new sample)
+cargo fmt --all; cargo clippy --workspace --all-targets -- -D warnings   # clean
+python scratchpad/mutate_11d1.py                                    # six mutations, each caught
+cargo test --workspace                                              # services stopped
+```
+
+## 2026-09-25 — Phase 11d2: native transforms and xf.ai.embed
+
+```bash
+curl -s https://huggingface.co/api/models/ggml-org/bge-small-en-v1.5-Q8_0-GGUF/tree/main   # 36.7 MB, SHA256
+./scripts/fetch-model.ps1                     # first try: $matches is PowerShell's; renamed
+./scripts/fetch-model.ps1                     # bge-small-en-v1.5-q8_0.gguf, SHA256 verified
+tools/llama/llama-server.exe -m tools/models/bge-small-en-v1.5-q8_0.gguf --embeddings --port 8187   # probe
+curl -s http://127.0.0.1:8187/v1/embeddings -d '{"input":[...]}'   # 384 dims, norm 1, cat~kitten 0.78
+python: 900-token input                       # 500: too large, batch 512
+./tools/duckdb/duckdb.exe -c ".read scratchpad/join_probe.sql"    # feed, join back, types kept, empty file
+cargo build -p etl-duckdb-engine; cargo build -p etl-cli
+./target/debug/etl.exe plan scratchpad/embed_pipeline.json --script   # feed, "runs here", view
+./target/debug/etl.exe run scratchpad/embed_pipeline.json             # 7 embedded in 0.7s
+./tools/duckdb/duckdb.exe -c "... array_cosine_similarity(a.embedding::FLOAT[384], ...)"
+./target/debug/etl.exe build scratchpad/embed_pipeline.json --out x.exe   # refused, exit 1
+cargo test -p etl-duckdb-engine --lib         # 336
+cargo test -p etl-duckdb-engine --test ai_embed   # 3, with the model
+cargo test -p etl-cli --test assist           # build refusal
+./target/debug/etl.exe run samples/pipelines/tickets_for_search.json
+cargo fmt --all; cargo clippy --workspace --all-targets -- -D warnings   # clean
+npx tsc --noEmit; npx vitest run              # 180
+python scratchpad/mutate_11d2.py              # five, each caught
+cargo test --workspace
+```
+
+## 2026-09-25 — Phase 11d3: prompt, classify, extract
+
+```bash
+cargo build -p etl-duckdb-engine              # Transform::portable(properties), lineage by host
+cargo test -p etl-connectors --lib ask::      # 16 against the fixture as an OpenAI endpoint
+./target/debug/etl.exe run scratchpad/triage.json   # local model: 4 rows, ~10 s a stage
+./target/debug/etl.exe validate samples/pipelines/tickets_triaged.json
+cargo test -p etl-duckdb-engine --lib         # 337
+cargo test -p etl-duckdb-engine --test ai_ask # first: a backslash lost in a heredoc; then 1 passed, 28.6 s
+cargo fmt --all; cargo clippy --workspace --all-targets -- -D warnings   # clean
+npx tsc --noEmit; npx vitest run              # 183
+python scratchpad/mutate_11d3.py              # six, each caught in CI
+cargo test --workspace
+```
+
+## 2026-09-25 — 11d1–11d3 committed and pushed
+
+```bash
+git add -A; git status                        # reviewed: 11d's files only
+git -c user.name=... -c user.email=... commit -m "Phase 11d: the six xf.ai transforms ... [skip ci]"
+git push origin main                          # [skip ci], at the user's request
+```

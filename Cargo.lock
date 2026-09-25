@@ -1681,6 +1681,7 @@ dependencies = [
  "amq-protocol-tcp",
  "async-nats",
  "async-rs",
+ "etl-assistant",
  "etl-metadata",
  "etl-plugin-sdk",
  "etl-state",

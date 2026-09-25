@@ -106,3 +106,45 @@ fn a_request_becomes_a_pipeline_file_that_validates() {
     let validated = etl(&workspace, &["validate", out.to_str().unwrap()]);
     assert_eq!(validated.status.code(), Some(0), "{}", stderr(&validated));
 }
+
+#[test]
+fn a_pipeline_that_runs_a_local_model_is_not_built_into_an_executable() {
+    let root = workspace("build_local_model");
+    let pipeline = root.join("embedded.json");
+    std::fs::write(
+        &pipeline,
+        serde_json::json!({ "formatVersion": 1, "nodes": [
+            { "id": "texts", "type": "source", "position": {"x": 0, "y": 0}, "data": {
+                "label": "Texts", "componentId": "src.file.csv",
+                "properties": { "path": "texts.csv" } } },
+            { "id": "vectors", "type": "transform", "position": {"x": 1, "y": 0}, "data": {
+                "label": "Vectors", "componentId": "xf.ai.embed",
+                "properties": { "column": "body" } } },
+            { "id": "out", "type": "sink", "position": {"x": 2, "y": 0}, "data": {
+                "label": "Out", "componentId": "snk.file.parquet",
+                "properties": { "path": "out.parquet" } } }
+          ], "edges": [
+            { "id": "e1", "source": "texts", "target": "vectors" },
+            { "id": "e2", "source": "vectors", "target": "out" }
+          ] })
+        .to_string(),
+    )
+    .unwrap();
+    let out = root.join("embedded.exe");
+
+    let output = etl(
+        &root,
+        &[
+            "build",
+            pipeline.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let said = stderr(&output);
+    assert!(said.contains("'vectors' (xf.ai.embed)"), "{said}");
+    assert!(said.contains("etl run"), "{said}");
+    assert!(!out.exists(), "nothing written");
+}

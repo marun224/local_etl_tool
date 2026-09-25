@@ -160,6 +160,10 @@ pub enum Direction {
     /// A sink: DuckDB writes the staging file, and the connector delivers it
     /// after a run that succeeded.
     Egress,
+    /// A transform, between two stages: DuckDB writes its input
+    /// ([`NativeStep::input`]) with [`NativeStep::feed`], the connector reads
+    /// it and writes the staging file, and the stage's view joins that back.
+    Transform,
 }
 
 /// What the executor needs to run a native component's half of a stage.
@@ -179,6 +183,19 @@ pub struct NativeStep {
     /// watermark's literal, so that `compile` stays pure. Always `None` for a
     /// sink.
     pub checkpoint: Option<JsonValue>,
+    /// For a transform: the file its input is written to, relative to the
+    /// working directory.
+    pub input: Option<String>,
+    /// For a transform: the SQL that numbers the input rows into a table and
+    /// writes the columns the transform reads to [`NativeStep::input`]. Run
+    /// before the transform, which only a driven session can do.
+    pub feed: Option<String>,
+}
+
+impl NativeStep {
+    pub fn is_transform(&self) -> bool {
+        self.direction == Direction::Transform
+    }
 }
 
 /// One upstream connection into a stage.
@@ -430,6 +447,7 @@ impl Stage {
         self.kind == StageKind::Sink
             || self.kind == StageKind::Control
             || self.materialize.is_materialised()
+            || self.native.as_ref().is_some_and(NativeStep::is_transform)
     }
 
     /// The name of the relation this stage creates. Edge wiring and generated
@@ -441,7 +459,9 @@ impl Stage {
     /// Whether this stage has to be addressable on its own rather than batched
     /// into one script with the rest.
     pub fn needs_session(&self) -> bool {
-        self.control.is_some() || self.policy.needs_session()
+        self.control.is_some()
+            || self.policy.needs_session()
+            || self.native.as_ref().is_some_and(NativeStep::is_transform)
     }
 
     /// The dead-letter relation this stage creates, if it is one that splits.
@@ -561,6 +581,24 @@ impl Plan {
         self.stages.iter().any(Stage::needs_session)
     }
 
+    /// The stages that need something only this machine has, such as a local
+    /// model, which a built executable does not carry (Settled decision 114).
+    pub fn unportable(&self) -> Vec<&Stage> {
+        self.stages
+            .iter()
+            .filter(|stage| {
+                matches!(
+                    etl_connectors::find(&stage.component_id),
+                    Some(etl_plugin_sdk::Connector::Transform(transform))
+                        if !stage
+                            .native
+                            .as_ref()
+                            .is_some_and(|step| transform.portable(&step.properties))
+                )
+            })
+            .collect()
+    }
+
     /// The stages this plan would run one at a time, for a caller that wants to
     /// explain why a session was used.
     pub fn session_reasons(&self) -> Vec<&str> {
@@ -647,6 +685,18 @@ impl Plan {
 
         for stage in &self.stages {
             script.push_str(&format!("-- {} ({})\n", stage.node_id, stage.component_id));
+            if let Some(step) = stage.native.as_ref().filter(|step| step.is_transform()) {
+                if let Some(feed) = &step.feed {
+                    script.push_str(feed);
+                    script.push('\n');
+                }
+                script.push_str(&format!(
+                    "-- {} runs here, in Rust: {} to {}\n",
+                    stage.component_id,
+                    step.input.as_deref().unwrap_or_default(),
+                    step.staging
+                ));
+            }
             script.push_str(&stage.sql);
             script.push('\n');
 
@@ -1077,23 +1127,19 @@ fn build_stages(
                 })?;
             }
 
-            let native = connector.map(|connector| {
-                let direction = match connector {
-                    etl_plugin_sdk::Connector::Source(_) => Direction::Ingest,
-                    etl_plugin_sdk::Connector::Sink(_) => Direction::Egress,
-                };
-                NativeStep {
-                    checkpoint: match direction {
-                        Direction::Ingest => options.checkpoints.get(&node.id).cloned(),
-                        Direction::Egress => None,
-                    },
-                    direction,
-                    properties: properties.clone(),
-                    staging: format!("{NATIVE_DIR}/{}.jsonl", node.id),
-                }
+            let direction = connector.map(|connector| match connector {
+                etl_plugin_sdk::Connector::Source(_) => Direction::Ingest,
+                etl_plugin_sdk::Connector::Sink(_) => Direction::Egress,
+                etl_plugin_sdk::Connector::Transform(_) => Direction::Transform,
             });
+            // The file DuckDB reads back: what a source or a transform wrote,
+            // or what DuckDB writes for a sink.
+            let staging = direction.map(|_| format!("{NATIVE_DIR}/{}.jsonl", node.id));
+            // A transform's input, which DuckDB writes before it runs.
+            let feed_file = (direction == Some(Direction::Transform))
+                .then(|| format!("{NATIVE_DIR}/{}.in.jsonl", node.id));
 
-            let sql = (component.build)(&builders::Lowering {
+            let lowering = builders::Lowering {
                 node_id: &node.id,
                 component_id: &component_id,
                 properties: &properties,
@@ -1101,14 +1147,33 @@ fn build_stages(
                 alias: node.data.alias.as_deref(),
                 materialize,
                 spill_path: spill_path.as_deref(),
-                staging: native.as_ref().map(|step| step.staging.as_str()),
+                staging: staging.as_deref(),
                 incremental: incremental
                     .as_ref()
                     .map(|state| builders::IncrementalFilter {
                         column: &state.column,
                         since: state.since.as_deref(),
                     }),
-            })?;
+            };
+            let sql = (component.build)(&lowering)?;
+            let feed = match &feed_file {
+                Some(file) => Some(builders::native_feed(&lowering, file)?),
+                None => None,
+            };
+
+            let native = direction
+                .zip(staging.clone())
+                .map(|(direction, staging)| NativeStep {
+                    checkpoint: match direction {
+                        Direction::Ingest => options.checkpoints.get(&node.id).cloned(),
+                        Direction::Egress | Direction::Transform => None,
+                    },
+                    direction,
+                    properties: properties.clone(),
+                    staging,
+                    input: feed_file.clone(),
+                    feed: feed.clone(),
+                });
 
             let counts = builders::count_probes(&node.id, kind, splits, from.as_deref());
             let policy = StagePolicy::from_node(node.data.policy.as_ref());
@@ -1126,8 +1191,14 @@ fn build_stages(
 
             // Where this stage touches the world. Files name a path, databases
             // name a table; a transform names nothing, because everything it
-            // reads is another stage.
+            // reads is another stage -- except one that sends rows to a
+            // model's endpoint, which names that.
             let external = match kind {
+                StageKind::Transform if direction == Some(Direction::Transform) => properties
+                    .get("base_url")
+                    .and_then(JsonValue::as_str)
+                    .filter(|url| !url.trim().is_empty())
+                    .map(url_for_lineage),
                 StageKind::Source | StageKind::Sink => {
                     let read = |key: &str| properties.get(key).and_then(JsonValue::as_str);
 
