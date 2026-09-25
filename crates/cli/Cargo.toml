@@ -17,6 +17,7 @@ etl-secrets.workspace = true
 etl-state.workspace = true
 etl-console.workspace = true
 etl-mcp.workspace = true
+etl-assistant.workspace = true
 etl-scheduler.workspace = true
 etl-runner.workspace = true
 clap.workspace = true

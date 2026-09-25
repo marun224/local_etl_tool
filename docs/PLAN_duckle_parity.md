@@ -2329,6 +2329,26 @@ table, dedupe, write Parquet" passes `validate` on the first try in **9 of 10** 
 
 **Done.** `etl assist` writes pipelines that validate, locally, with no network.
 
+**As built (2026-09-25).** Done as planned, with these differences:
+
+- **Pinned**: llama.cpp `b11173` (the Windows CPU build, which picks its CPU variant at run
+  time) into `tools/llama/`; the model from Hugging Face revision `f86cb2c`, its SHA256
+  checked, into `tools/models/`. `--model`/`ETL_ASSIST_MODEL` and
+  `--llama-server`/`ETL_LLAMA_SERVER`; a path named either way must exist.
+- **`crates/assistant` knows the model and not the engine**, as `crates/mcp` does: the
+  picker, the prompt, the request, `llama-server` started on a free loopback port with one
+  slot and an 8192-token context, killed when dropped. The CLI checks the draft with
+  `check_document`, now shared with MCP's `validate_pipeline`.
+- **The grammar is narrowed to the picked components**: `pipeline_schema` over the picker's
+  choice (at most eight, always a source and a sink, never `ctl.*` or `code.*`), sent as
+  `response_format.json_schema`. The model cannot reach for a component the prompt did not
+  describe; the price is that one the picker misses cannot be used at all.
+- **Blank optional values are dropped** before the check: 7 of the first 10 runs wrote
+  `"schema": ""`, which validates but qualifies the table as `"db".""."orders"`.
+- **Verified**: 10 of 10 on the first try, as `etl assist` (about 55 s each) and as the
+  test with one server (3m47s for ten). CI checks the schema against all 20 samples and 12
+  broken documents, the picker over the real registry, and the prompt. `docs/assist.md`.
+
 ##### Phase 11c — the chat panel
 
 **Files.** `frontend/` (a panel beside the canvas), the console's API (`etl serve`) for the
@@ -2337,6 +2357,74 @@ desktop app and the browser alike.
 **Do.** Ask in words; the assistant's pipeline appears on the canvas as a draft to accept or
 discard; validation messages shown as the canvas shows them. Planned in detail when 11b is
 done.
+
+**Planned in detail 2026-09-25; questions 17–23 answered all as recommended** (Settled
+decisions 99–105).
+
+**What planning found.** The line above names "the console's API (`etl serve`) for the
+desktop app and the browser alike", but **the canvas does not run in a browser**: it reaches
+the engine only through Tauri's `invoke` (`frontend/src/ipc.ts`), and in a plain browser it
+says there is no engine. `etl serve` serves a separate one-file console (run history, a run
+button). Putting the canvas in a browser means an HTTP backend for every canvas command, which is a
+phase of its own (decision 99). And the desktop app's commands are synchronous, which Tauri
+runs on the main thread: a minute of model time there would freeze the window, so the
+assistant's command is `async` and does its work on a blocking thread.
+
+**Files.** `apps/desktop/src/main.rs` (`assist_pipeline`, `cancel_assist`, the running
+server kept in Tauri's managed state; `etl-assistant` as a dependency); `crates/assistant`
+(a server that can be stopped from another thread); `frontend/src/ipc.ts`,
+`frontend/src/AssistPanel.tsx` and its test, `App.tsx` (the draft), `ComponentNode.tsx` and
+`styles.css` (how a draft looks); `docs/assist.md`.
+
+**Do.**
+
+1. **`assist_pipeline(request, seed, settings)`**, a Tauri command: finds `llama-server` and
+   the model as `etl assist` does (the workspace, then beside the executable), starts the
+   server on the first request and keeps it while the app is open (decision 100), asks with
+   11b's `draft`, and returns the document's text, the components offered, the seed and the
+   canvas's usual `Validation` of it. A missing model is an error naming
+   `scripts/fetch-model.ps1`. One request at a time.
+2. **`cancel_assist`** stops the server mid-answer (decision 104); the next request starts a
+   fresh one.
+3. **The panel**, toggled from the header, on the right in place of the inspector while
+   open: the requests and what came of each (components, seed, time taken, valid or the
+   first error), a box to ask, the elapsed seconds while waiting, Cancel. Every message
+   (request or answer) goes in as text, never markup. Each message asks for a new pipeline;
+   **Try again** asks the same with a new seed (decision 101).
+4. **The draft on the canvas** (decision 102): shown in place of the current pipeline under a
+   banner (*Draft from the assistant: Accept, Discard, Try again*), its nodes drawn dashed.
+   Accept makes it the document (unsaved, as an edit is); Discard brings the previous one
+   back untouched. An invalid draft is shown too, with the canvas's red boxes and messages,
+   and can be accepted to fix by hand (decision 103).
+
+**Verify.** The command's surface without a window, as the other commands are tested: a
+missing model named with the script; with the model (skipping without it), one request
+returning a valid document, and a cancel ending a running one. Vitest, with `ipc` mocked:
+the panel asks, waits, shows an answer and an error as text; accept replaces the document
+and marks it unsaved; discard restores it exactly; an invalid draft's error lands on its
+node. **Clicking through the app is the user's** (the workflow's ground rules keep Claude
+off the machine's GUI): an assignment, as A68 is for MCP.
+
+**Done.** In the desktop app, a request in words becomes a draft on the canvas that can be
+accepted, discarded or tried again, with its validation shown as the canvas shows it, and
+nothing leaves the machine.
+
+**As built (2026-09-25).** Done as planned, with these differences:
+
+- **`Server` split into `spawn` and `wait_until_loaded`**, with `stop` and `is_alive`
+  usable from any thread, so the app holds the server before the model has loaded and
+  Cancel works while it loads as well as while it writes. A request stopped under it ends
+  with `STOPPED`, which the app reports as stage `cancelled`.
+- **The app stops the server on exit** (`RunEvent::Exit`): on Windows a child process
+  outlives its parent unless told to stop.
+- **`frontend/src/studio.ts`** holds the document, its unsaved flag and the draft as one
+  value, with `showDraft`, `acceptDraft`, `discardDraft` and `editShown` pure and tested:
+  the draft never touches the document, so Discard is exact by construction.
+- **Save, Open and Run wait for Accept or Discard**; Plan and Preview work on the draft.
+- **Verified**: the commands without a window (a missing model named, one request at a
+  time, a real draft with the model kept, Cancel ending a running request and the model),
+  16 Vitest tests, and three mutations each caught by the test meant to. Clicking through
+  the app is assignment A73.
 
 ##### Phase 11d — the `xf.ai.*` transforms
 

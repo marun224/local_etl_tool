@@ -786,3 +786,96 @@ button.link:hover {
 .node.is-skipped {
   opacity: 0.6;
 }
+
+/* --------------------------------------------------------------------- */
+/* Assistant                                                              */
+/* --------------------------------------------------------------------- */
+
+.body.assisting {
+  grid-template-columns: 240px 1fr 340px;
+}
+
+.canvas-column {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.canvas-column .canvas {
+  flex: 1;
+  min-height: 0;
+}
+
+.canvas.is-draft .node {
+  border-style: dashed;
+}
+
+.draft-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: var(--raised);
+  border-bottom: 1px solid var(--accent);
+}
+
+.bar button.on {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.assist {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.assist-head {
+  display: flex;
+  align-items: center;
+}
+
+.assist-head h3 {
+  margin: 0;
+}
+
+.assist-log {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.assist-log p {
+  margin: 2px 0;
+  overflow-wrap: anywhere;
+}
+
+.assist-request {
+  padding: 6px 8px;
+  background: var(--raised);
+  border-radius: 6px;
+  white-space: pre-wrap;
+}
+
+.assist-ask,
+.assist-waiting {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.assist-ask textarea {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font: inherit;
+  resize: vertical;
+}

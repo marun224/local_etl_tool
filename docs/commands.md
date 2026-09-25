@@ -2465,3 +2465,58 @@ target/test-out/mcp_round_trip/dist/latest.exe                           # 12, 6
 cargo fmt --all; cargo clippy --workspace --all-targets -- -D warnings   # clean
 cargo test --workspace                        # with the services' variables
 ```
+
+## 2026-09-24 — Paused after 11a
+
+```bash
+gh run view 36035301991                      # still running at the pause: frontend green
+./scripts/test-services.ps1 -Stop            # containers stopped
+# task_tracker.md: a PAUSED section at the top with the state, CI and how to resume
+```
+
+## 2026-09-25 — Phase 11b: the local model and grammar-constrained output
+
+```bash
+gh run view 36035301991                       # green: gates, artifacts, frontend
+gh release list -R ggml-org/llama.cpp --limit 3   # b11173; win-cpu-x64 asset
+curl -s https://huggingface.co/api/models/Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF/tree/main   # size, SHA256
+./scripts/fetch-model.ps1                     # tools/llama (b11173), tools/models (1.04 GB, SHA256 verified)
+cargo test -p etl-assistant --lib --test schema   # 13 + 8: picker, prompt, server lookup; schema vs samples
+./target/debug/etl assist "read this Postgres table, dedupe, write Parquet" --seed 1   # valid, 52 s
+for i in $(seq 10); do ./target/debug/etl assist "read this Postgres table, dedupe, write Parquet" --seed $((i*101)); done   # 10 of 10 valid; 7 wrote "schema": ""
+cargo test -p etl-assistant --test model -- --nocapture   # 10 of 10, one server, 3m47s
+cargo test -p etl-cli --test assist           # 3: no model, no overwrite, one real request
+./target/debug/etl assist "read orders.csv, keep orders over 100, sort by amount, write JSON" --seed 3
+cargo fmt --all; cargo clippy --workspace --all-targets -- -D warnings   # clean
+./scripts/test-services.ps1; cargo test --workspace   # with the services' variables
+```
+
+## 2026-09-25 — Phase 11c planned
+
+```bash
+# read: frontend/src/ipc.ts, App.tsx, PipelineCanvas.tsx, document.ts; apps/desktop/src/main.rs; crates/console/src/{routes,ui}.rs
+# docs: PLAN (11c in detail), task_tracker (questions 17-23), assignments (A70-A72)
+```
+
+## 2026-09-25 — Phase 11c: the chat panel
+
+```bash
+./scripts/test-services.ps1 -Stop             # at the user's request
+cargo build -p etl-assistant                  # Server: spawn, wait_until_loaded, stop, is_alive
+cargo build -p etl-desktop                    # assist_pipeline (async), cancel_assist
+cargo test -p etl-desktop                     # 14: 4 new, two with the model (34.9 s)
+Get-Process llama-server                      # none left running
+npx tsc --noEmit; npx vitest run              # frontend: 174 (16 new)
+npm run build                                 # frontend/dist
+cargo fmt --all; cargo clippy --workspace --all-targets -- -D warnings   # clean
+python scratchpad/mutate.py                   # 3 mutations, each caught by its test
+cargo test --workspace                        # services stopped: theirs skip
+```
+
+## 2026-09-25 — 11b and 11c committed and pushed
+
+```bash
+git add <the 11b and 11c files>; git status
+git commit -m "Phases 11b and 11c: etl assist, a local model; the chat panel [skip ci]"
+git push origin main                          # [skip ci]: no CI run, at the user's request
+```

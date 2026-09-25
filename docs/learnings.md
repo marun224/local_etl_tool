@@ -823,3 +823,57 @@ the fuller record. From Phase 10 on, a section is added at the end of each phase
 **Mistakes worth not repeating**
 - **Assuming what the mask looks like**: the engine masks with `********`; the test
   guessed `[REDACTED]`, which is what `resolved.used` says instead.
+
+## Phase 11b — the local model and grammar-constrained output (2026-09-25)
+
+**Concepts**
+- **The grammar makes a document well formed, not valid**: every one of the first ten runs
+  had the right shape, and seven would still have failed at run time (`"schema": ""`). The
+  engine's check after the model is not a formality.
+- **Narrowing the grammar is narrowing the model**: with the schema cut to the picked
+  components, the model cannot use a component the picker missed. It then writes a valid
+  pipeline that leaves the step out ("keep orders over 100" with no filter), which no check
+  catches. The picker decides what is possible.
+- **The server reads a repeated prompt once**: one `llama-server` for ten requests took about
+  23 s a request against about 55 s for a fresh server each time.
+
+**Decisions and why**
+- **A named path must exist**: `--model typo.gguf` falling back to the vendored model, as
+  DuckDB's lookup falls back, would run a model nobody chose.
+- **One slot, 8192 tokens**: `llama-server` splits its context across slots, and its default
+  slot count would leave each request a quarter.
+- **Blank optional values are dropped in the assistant, not refused by the schema**: a
+  `minLength` there would change MCP's contract and push the model to invent a value.
+
+**Mistakes worth not repeating**
+- **`uname` is not in Windows PowerShell**, and under `$ErrorActionPreference = 'Stop'` even
+  `2>$null` does not save the call; nor does it save a native program that writes to stderr
+  (`llama-server --version`). Ask the environment variable on Windows, and relax the
+  preference around a native call whose stderr is expected.
+
+## Phase 11c — the chat panel (2026-09-25)
+
+**Concepts**
+- **Tauri runs a synchronous command on the main thread.** Anything slow has to be an
+  `async` command that moves its work to `spawn_blocking`, or the window stops painting
+  until it returns.
+- **Cancel is stopping the process, not the request**: the HTTP call is blocking, so the
+  way to end it early is to kill `llama-server` under it and read the connection error as
+  "stopped". A flag set before the kill tells a cancel from a crash.
+- **A draft beside the document, not in it**: keeping the draft as a separate value makes
+  Discard exact by construction. There is nothing to undo, because nothing was changed.
+
+**Decisions and why**
+- **The server is held before it has loaded**, so Cancel during the few seconds of loading
+  works too; the lock on it is released before waiting, or Cancel could not take it.
+- **Stop the child on `RunEvent::Exit`**: on Windows a child process outlives its parent,
+  and a forgotten `llama-server` holds 1.2 GB until someone finds it in Task Manager.
+- **Save, Open and Run wait for Accept or Discard**: an unaccepted draft is not something to
+  write over a file or run against real systems.
+
+**Mistakes worth not repeating**
+- **A long heredoc through the Bash tool failed to parse** (an unmatched quote somewhere in
+  TSX) before anything ran. Write a patch script to a file with the Write tool, then run it.
+- **Python's `subprocess` on Windows decodes with cp1252** unless told otherwise; Vitest's
+  output then kills the reader thread. Pass `encoding="utf-8"`, and set
+  `PYTHONIOENCODING=utf-8` to print it.

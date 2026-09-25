@@ -26,6 +26,10 @@ use etl_metadata::PipelineDoc;
 use etl_secrets::SecretStore;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+use tauri::Manager;
 
 // ---------------------------------------------------------------------------
 // What crosses the wire
@@ -143,6 +147,22 @@ struct PreviewResult {
     truncated: bool,
 }
 
+/// What the assistant wrote, and how.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AssistResult {
+    /// The draft, as a document's text.
+    document: String,
+    /// The components the model was allowed to use.
+    offered: Vec<String>,
+    /// The sampling seed, so *Try again* can ask for a different one.
+    seed: u64,
+    elapsed_ms: u128,
+    /// The canvas's usual answer about the draft. An invalid draft is still
+    /// returned (decision 103): on the canvas it can be fixed by hand.
+    validation: Validation,
+}
+
 // ---------------------------------------------------------------------------
 // Shared setup
 // ---------------------------------------------------------------------------
@@ -152,7 +172,7 @@ struct PreviewResult {
 ///
 /// The same three knobs the CLI takes, named the same way, because the two have
 /// to mean the same thing on the same file.
-#[derive(Debug, Default, serde::Deserialize)]
+#[derive(Debug, Default, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Settings {
     workspace: Option<String>,
@@ -268,6 +288,158 @@ fn describe_warning(warning: &etl_duckdb_engine::Warning) -> String {
             format!("'{id}' asks for materialize '{value}', which is not a mode; using auto")
         }
         W::NoSink => "nothing in this pipeline writes anything".to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The assistant
+// ---------------------------------------------------------------------------
+
+/// What `assist_pipeline` ends with when *Cancel* stopped it.
+const CANCELLED: &str = "Cancelled.";
+
+/// The local model, started on the first request and kept while the app is
+/// open (decision 100), so a later request skips loading it and reading the
+/// same prompt again. One request at a time.
+#[derive(Default)]
+struct Assistant {
+    server: Mutex<Option<Arc<etl_assistant::Server>>>,
+    busy: AtomicBool,
+    cancelled: AtomicBool,
+}
+
+/// Clears the busy flag however a request ends.
+struct Idle<'a>(&'a AtomicBool);
+
+impl Drop for Idle<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Where `llama-server` and the model are: as `etl assist` finds them, under
+/// the first of `starts` that has them, or named by the environment.
+fn locate_tools(starts: &[PathBuf]) -> IpcResult<(PathBuf, PathBuf)> {
+    let find = |locate: fn(Option<&Path>, &Path) -> Result<PathBuf, String>| {
+        let mut first = None;
+        for start in starts {
+            match locate(None, start) {
+                Ok(found) => return Ok(found),
+                Err(message) => {
+                    first.get_or_insert(message);
+                }
+            }
+        }
+        Err(IpcError::new(
+            "assist",
+            first.unwrap_or_else(|| "nowhere to look for the model".to_string()),
+        ))
+    };
+    Ok((
+        find(etl_assistant::locate_server)?,
+        find(etl_assistant::locate_model)?,
+    ))
+}
+
+impl Assistant {
+    fn ask(
+        &self,
+        request: &str,
+        seed: Option<u64>,
+        settings: &Settings,
+        tools: &(PathBuf, PathBuf),
+    ) -> IpcResult<AssistResult> {
+        if self.busy.swap(true, Ordering::SeqCst) {
+            return Err(IpcError::new(
+                "assist",
+                "the assistant is already writing a pipeline",
+            ));
+        }
+        let _idle = Idle(&self.busy);
+        self.cancelled.store(false, Ordering::SeqCst);
+        let started = Instant::now();
+
+        let server = self.server(tools)?;
+        let specs: Vec<etl_metadata::ComponentSpec> = registry().specs().cloned().collect();
+        let seed = seed.unwrap_or_else(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos() as u64)
+                .unwrap_or_default()
+        });
+        let draft = etl_assistant::draft(&server, request, &specs, seed)
+            .map_err(|message| self.failure(message))?;
+
+        let document = serde_json::to_string_pretty(&draft.document)
+            .map_err(|error| IpcError::new("assist", error.to_string()))?;
+        let validation = validate_pipeline(document.clone(), settings.clone());
+        Ok(AssistResult {
+            document,
+            offered: draft.offered,
+            seed,
+            elapsed_ms: started.elapsed().as_millis(),
+            validation,
+        })
+    }
+
+    /// The running server, or a new one once it has loaded the model.
+    fn server(&self, tools: &(PathBuf, PathBuf)) -> IpcResult<Arc<etl_assistant::Server>> {
+        let mut slot = self.server.lock().unwrap_or_else(|held| held.into_inner());
+        if let Some(running) = slot.as_ref().filter(|running| running.is_alive()) {
+            return Ok(Arc::clone(running));
+        }
+
+        let log = std::env::temp_dir().join(format!(
+            "etl-desktop-llama-server-{}.log",
+            std::process::id()
+        ));
+        let spawned = Arc::new(
+            etl_assistant::Server::spawn(&tools.0, &tools.1, &log)
+                .map_err(|message| IpcError::new("assist", message))?,
+        );
+        // Held before it has loaded, so Cancel can stop it while it loads.
+        *slot = Some(Arc::clone(&spawned));
+        drop(slot);
+
+        spawned
+            .wait_until_loaded()
+            .map_err(|message| self.failure(message))?;
+        if self.cancelled.load(Ordering::SeqCst) {
+            spawned.stop();
+            return Err(IpcError::new("cancelled", CANCELLED));
+        }
+        Ok(spawned)
+    }
+
+    fn failure(&self, message: String) -> IpcError {
+        if self.cancelled.load(Ordering::SeqCst) || message == etl_assistant::STOPPED {
+            IpcError::new("cancelled", CANCELLED)
+        } else {
+            IpcError::new("assist", message)
+        }
+    }
+
+    /// Stop the request under way, if there is one (decision 104). The model
+    /// goes with it; the next request starts it again.
+    fn cancel(&self) {
+        if !self.busy.load(Ordering::SeqCst) {
+            return;
+        }
+        self.cancelled.store(true, Ordering::SeqCst);
+        self.shut_down();
+    }
+
+    /// Stop the server. On exit, since a child process outlives its parent on
+    /// Windows unless it is told to stop.
+    fn shut_down(&self) {
+        let running = self
+            .server
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .take();
+        if let Some(running) = running {
+            running.stop();
+        }
     }
 }
 
@@ -410,9 +582,45 @@ fn preview_node(
     })
 }
 
+/// Ask the local model for a pipeline doing `request`.
+///
+/// `async`, and the work on a blocking thread: Tauri runs a synchronous
+/// command on the main thread, and a minute of model time there would freeze
+/// the window.
+#[tauri::command]
+async fn assist_pipeline(
+    request: String,
+    seed: Option<u64>,
+    settings: Settings,
+    assistant: tauri::State<'_, Arc<Assistant>>,
+) -> IpcResult<AssistResult> {
+    let assistant = Arc::clone(&assistant);
+    let mut starts = vec![settings.workspace_dir()];
+    if let Some(beside) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+    {
+        starts.push(beside);
+    }
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let tools = locate_tools(&starts)?;
+        assistant.ask(&request, seed, &settings, &tools)
+    })
+    .await
+    .map_err(|error| IpcError::new("assist", error.to_string()))?
+}
+
+/// Stop the request under way, if any.
+#[tauri::command]
+fn cancel_assist(assistant: tauri::State<'_, Arc<Assistant>>) {
+    assistant.cancel();
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .manage(Arc::new(Assistant::default()))
         .invoke_handler(tauri::generate_handler![
             list_components,
             compile_pipeline,
@@ -421,9 +629,16 @@ fn main() {
             preview_node,
             read_pipeline,
             write_pipeline,
+            assist_pipeline,
+            cancel_assist,
         ])
-        .run(tauri::generate_context!())
-        .expect("the desktop shell failed to start");
+        .build(tauri::generate_context!())
+        .expect("the desktop shell failed to start")
+        .run(|app, event| {
+            if let tauri::RunEvent::Exit = event {
+                app.state::<Arc<Assistant>>().shut_down();
+            }
+        });
 }
 
 // ---------------------------------------------------------------------------
@@ -646,6 +861,112 @@ mod tests {
             .expect_err("there is no such node");
 
         assert!(error.message.contains("typo"), "{}", error.message);
+    }
+
+    #[test]
+    fn a_missing_model_is_named_with_the_script_that_fetches_it() {
+        let nowhere =
+            std::env::temp_dir().join(format!("etl-desktop-no-model-{}", std::process::id()));
+        std::fs::create_dir_all(&nowhere).unwrap();
+
+        let error = locate_tools(&[nowhere]).expect_err("nothing is there");
+
+        assert_eq!(error.stage, "assist");
+        assert!(
+            error.message.contains("fetch-model.ps1"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn one_request_at_a_time() {
+        let assistant = Assistant::default();
+        assistant.busy.store(true, Ordering::SeqCst);
+        let tools = (PathBuf::from("unused"), PathBuf::from("unused"));
+
+        let error = assistant
+            .ask("csv to parquet", Some(1), &settings(), &tools)
+            .expect_err("one is already under way");
+
+        assert!(error.message.contains("already"), "{}", error.message);
+        // Refusing did not clear the flag the other request holds.
+        assert!(assistant.busy.load(Ordering::SeqCst));
+    }
+
+    /// The vendored model, or `None` to skip.
+    fn model() -> Option<(PathBuf, PathBuf)> {
+        locate_tools(&[repo_root()]).ok()
+    }
+
+    #[test]
+    fn a_request_becomes_a_valid_draft_and_the_model_stays_up() {
+        let Some(tools) = model() else {
+            eprintln!("skipped: no model in tools/ (scripts/fetch-model.ps1)");
+            return;
+        };
+        let assistant = Assistant::default();
+
+        let answer = assistant
+            .ask(
+                "read this Postgres table, dedupe, write Parquet",
+                Some(1),
+                &settings(),
+                &tools,
+            )
+            .expect("answers");
+
+        assert!(answer.validation.valid, "{:?}", answer.validation.error);
+        assert!(PipelineDoc::from_json(&answer.document).is_ok());
+        assert!(
+            answer.offered.contains(&"xf.dedup".to_string()),
+            "{:?}",
+            answer.offered
+        );
+        assert_eq!(answer.seed, 1);
+        assert!(
+            !assistant.busy.load(Ordering::SeqCst),
+            "free for the next one"
+        );
+
+        // Kept for the next request (decision 100), then stopped.
+        let kept = assistant.server.lock().unwrap().clone().expect("kept");
+        assert!(kept.is_alive());
+        assistant.shut_down();
+        assert!(!kept.is_alive());
+    }
+
+    #[test]
+    fn cancel_ends_a_running_request_and_the_model_with_it() {
+        let Some(tools) = model() else {
+            eprintln!("skipped: no model in tools/ (scripts/fetch-model.ps1)");
+            return;
+        };
+        let assistant = Arc::new(Assistant::default());
+
+        let asking = {
+            let assistant = Arc::clone(&assistant);
+            std::thread::spawn(move || {
+                assistant.ask(
+                    "read this Postgres table, dedupe, write Parquet",
+                    Some(2),
+                    &settings(),
+                    &tools,
+                )
+            })
+        };
+        // Long enough to be loading the model or writing, not yet done.
+        std::thread::sleep(std::time::Duration::from_secs(4));
+        assistant.cancel();
+
+        let error = asking.join().unwrap().expect_err("cancelled");
+        assert_eq!(error.stage, "cancelled");
+        assert_eq!(error.message, CANCELLED);
+        assert!(
+            assistant.server.lock().unwrap().is_none(),
+            "the model went too"
+        );
+        assert!(!assistant.busy.load(Ordering::SeqCst));
     }
 
     #[test]

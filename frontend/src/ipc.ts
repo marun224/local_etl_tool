@@ -19,7 +19,7 @@ import { invoke } from "@tauri-apps/api/core";
 // ---------------------------------------------------------------------------
 
 /** Which step failed, so the UI can say what kind of problem this is. */
-export type ErrorStage = "read" | "resolve" | "compile" | "run";
+export type ErrorStage = "read" | "resolve" | "compile" | "run" | "assist" | "cancelled";
 
 export interface IpcError {
   message: string;
@@ -92,6 +92,18 @@ export interface PreviewResult {
   columns: string[];
   rows: Record<string, unknown>[];
   truncated: boolean;
+}
+
+/** What the local model wrote, and how. */
+export interface AssistResult {
+  /** The draft, as a document's text. */
+  document: string;
+  /** The components the model was allowed to use. */
+  offered: string[];
+  seed: number;
+  elapsedMs: number;
+  /** The canvas's usual answer about the draft; an invalid draft still comes back. */
+  validation: Validation;
 }
 
 export interface PortSpec {
@@ -236,4 +248,21 @@ export function previewNode(
   settings: Settings = {},
 ): Promise<PreviewResult> {
   return call<PreviewResult>("preview_node", { document, nodeId, limit, settings });
+}
+
+/**
+ * Ask the local model for a pipeline. Takes a minute or so on a CPU; rejects
+ * with stage `cancelled` when `cancelAssist` stopped it.
+ */
+export function assistPipeline(
+  request: string,
+  seed: number | null = null,
+  settings: Settings = {},
+): Promise<AssistResult> {
+  return call<AssistResult>("assist_pipeline", { request, seed, settings });
+}
+
+/** Stop the request under way, if there is one. */
+export function cancelAssist(): Promise<void> {
+  return call<void>("cancel_assist", {});
 }

@@ -412,6 +412,44 @@ enum Command {
         #[command(flatten)]
         settings: Settings,
     },
+
+    /// Ask a local model for a pipeline, in words.
+    ///
+    /// Runs llama.cpp's llama-server and a small coding model on this machine
+    /// (fetch both with scripts/fetch-model.ps1); nothing leaves it. What the
+    /// model writes is checked as `validate` checks a file before it is shown
+    /// or written. A minute or two on a laptop's CPU.
+    Assist {
+        /// What the pipeline should do, e.g. "read the orders table from
+        /// Postgres, dedupe on id, write Parquet".
+        request: String,
+
+        /// Write the pipeline here rather than to standard output.
+        #[arg(long, short = 'o', value_name = "FILE")]
+        out: Option<PathBuf>,
+
+        /// Replace --out if it already exists.
+        #[arg(long)]
+        overwrite: bool,
+
+        /// The GGUF model to run. Defaults to ETL_ASSIST_MODEL, then the
+        /// vendored copy in tools/models.
+        #[arg(long, value_name = "FILE")]
+        model: Option<PathBuf>,
+
+        /// llama.cpp's server. Defaults to ETL_LLAMA_SERVER, then the
+        /// vendored copy in tools/llama.
+        #[arg(long, value_name = "FILE")]
+        llama_server: Option<PathBuf>,
+
+        /// Sampling seed, for an answer that can be had again. Random unless
+        /// given.
+        #[arg(long)]
+        seed: Option<u64>,
+
+        #[command(flatten)]
+        settings: Settings,
+    },
 }
 
 fn main() -> ExitCode {
@@ -488,6 +526,24 @@ fn main() -> ExitCode {
             no_counts,
             settings,
         } => command_mcp(duckdb, !no_counts, settings),
+
+        Command::Assist {
+            request,
+            out,
+            overwrite,
+            model,
+            llama_server,
+            seed,
+            settings,
+        } => command_assist(
+            &request,
+            out.as_deref(),
+            overwrite,
+            model.as_deref(),
+            llama_server.as_deref(),
+            seed,
+            &settings,
+        ),
     };
 
     ExitCode::from(code)
@@ -969,6 +1025,140 @@ impl console::Workspace for ConsoleWorkspace {
 }
 
 // ---------------------------------------------------------------------------
+// Assist
+// ---------------------------------------------------------------------------
+
+/// `etl assist` — a local model writes the pipeline; the engine checks it.
+fn command_assist(
+    request: &str,
+    out: Option<&Path>,
+    overwrite: bool,
+    model: Option<&Path>,
+    llama_server: Option<&Path>,
+    seed: Option<u64>,
+    settings: &Settings,
+) -> u8 {
+    if let Some(out) = out {
+        if out.exists() && !overwrite {
+            eprintln!(
+                "error: {} already exists; pass --overwrite to replace it",
+                out.display()
+            );
+            return exit::USAGE;
+        }
+    }
+
+    // From the workspace, then from beside this `etl`, so a checkout's
+    // vendored tools/ is found wherever the workspace is.
+    let beside = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf));
+    let find = |locate: fn(Option<&Path>, &Path) -> Result<PathBuf, String>,
+                explicit: Option<&Path>| {
+        locate(explicit, &settings.workspace_root()).or_else(|error| match &beside {
+            Some(directory) => locate(explicit, directory).map_err(|_| error),
+            None => Err(error),
+        })
+    };
+    let located = find(etl_assistant::locate_server, llama_server)
+        .and_then(|server| Ok((server, find(etl_assistant::locate_model, model)?)));
+    let (server, model) = match located {
+        Ok(found) => found,
+        Err(message) => {
+            eprintln!("error: {message}");
+            return exit::USAGE;
+        }
+    };
+
+    let log = std::env::temp_dir().join(format!("etl-llama-server-{}.log", std::process::id()));
+    eprintln!(
+        "Starting llama-server with {}...",
+        model.file_name().unwrap_or_default().to_string_lossy()
+    );
+    let running = match etl_assistant::Server::start(&server, &model, &log) {
+        Ok(running) => running,
+        Err(message) => {
+            eprintln!("error: {message}");
+            return exit::USAGE;
+        }
+    };
+
+    let seed = seed.unwrap_or_else(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos() as u64)
+            .unwrap_or_default()
+    });
+    eprintln!("Writing the pipeline (a minute or two on a CPU)...");
+    let specs: Vec<etl_metadata::ComponentSpec> = registry().specs().cloned().collect();
+    let drafted = etl_assistant::draft(&running, request, &specs, seed);
+    drop(running);
+    let draft = match drafted {
+        Ok(draft) => draft,
+        Err(message) => {
+            eprintln!("error: {message}");
+            eprintln!("  (llama-server's log: {})", log.display());
+            return exit::FAILED;
+        }
+    };
+    let _ = std::fs::remove_file(&log);
+
+    let text = serde_json::to_string_pretty(&draft.document).unwrap_or_default();
+    let checked = match check_document(&text, settings) {
+        Ok(checked) => checked,
+        Err(message) => {
+            eprintln!("error: {message}");
+            return exit::USAGE;
+        }
+    };
+    let listed = |key: &str| -> Vec<String> {
+        checked[key]
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    if checked["valid"] != true {
+        eprintln!("The model's pipeline does not validate (seed {seed}):");
+        for error in listed("errors") {
+            eprintln!("  error: {error}");
+        }
+        eprintln!("It wrote:\n{text}");
+        return exit::INVALID;
+    }
+    for warning in listed("warnings") {
+        eprintln!("warning: {warning}");
+    }
+
+    match out {
+        None => println!("{text}"),
+        Some(out) => {
+            if let Some(parent) = out.parent().filter(|p| !p.as_os_str().is_empty()) {
+                if let Err(error) = std::fs::create_dir_all(parent) {
+                    eprintln!("error: {}: {error}", parent.display());
+                    return exit::USAGE;
+                }
+            }
+            if let Err(error) = std::fs::write(out, format!("{text}\n")) {
+                eprintln!("error: {}: {error}", out.display());
+                return exit::USAGE;
+            }
+            eprintln!(
+                "Wrote {} ({} stages, valid; seed {seed})",
+                out.display(),
+                checked["stages"]
+            );
+        }
+    }
+    exit::OK
+}
+
+// ---------------------------------------------------------------------------
 // MCP
 // ---------------------------------------------------------------------------
 
@@ -1042,43 +1232,7 @@ impl etl_mcp::Workspace for McpWorkspace {
         document: &str,
         bindings: &etl_mcp::Bindings,
     ) -> Result<serde_json::Value, String> {
-        let invalid = |errors: Vec<String>, warnings: Vec<String>| serde_json::json!({ "valid": false, "errors": errors, "warnings": warnings });
-
-        let document = match PipelineDoc::from_json(document) {
-            Ok(document) => document,
-            Err(error) => {
-                return Ok(invalid(
-                    vec![format!("not a pipeline document: {error}")],
-                    Vec::new(),
-                ))
-            }
-        };
-        // A resolver that cannot be built is the workspace's problem, not the
-        // document's, so it is an error rather than an invalid result.
-        let resolver = self.settings().with(bindings).try_resolver()?;
-        let resolved = match params::resolve(&document, &resolver) {
-            Ok(resolved) => resolved,
-            Err(error) => return Ok(invalid(vec![error.to_string()], Vec::new())),
-        };
-
-        let mut warnings: Vec<String> = resolved.warnings.iter().map(param_warning_text).collect();
-        match compile_with(&resolved.document, &CompileOptions::default()) {
-            Err(error) => Ok(invalid(vec![resolved.redact(&error.to_string())], warnings)),
-            Ok(plan) => {
-                warnings.extend(plan.warnings.iter().map(warning_text));
-                Ok(serde_json::json!({
-                    "valid": true,
-                    "stages": plan.stages.len(),
-                    "sinks": plan.sinks().count(),
-                    "warnings": warnings
-                        .iter()
-                        .map(|warning| resolved.redact(warning))
-                        .collect::<Vec<_>>(),
-                    // A secret's entry reads [REDACTED] here, never its value.
-                    "resolved": resolved.used,
-                }))
-            }
-        }
+        check_document(document, &self.settings().with(bindings))
     }
 
     fn plan(
@@ -1285,6 +1439,48 @@ impl etl_mcp::Workspace for McpWorkspace {
         };
 
         Ok(serde_json::json!({ "contexts": listed, "secrets": secrets }))
+    }
+}
+
+/// Check a document's text as `etl validate` checks a file: parsed, its
+/// parameters resolved, compiled. `{"valid": false, "errors": [...]}` is a
+/// document at fault; `Err` is a workspace whose contexts or secrets cannot be
+/// read. Shared by MCP's `validate_pipeline` and `etl assist`.
+fn check_document(document: &str, settings: &Settings) -> Result<serde_json::Value, String> {
+    let invalid = |errors: Vec<String>, warnings: Vec<String>| serde_json::json!({ "valid": false, "errors": errors, "warnings": warnings });
+
+    let document = match PipelineDoc::from_json(document) {
+        Ok(document) => document,
+        Err(error) => {
+            return Ok(invalid(
+                vec![format!("not a pipeline document: {error}")],
+                Vec::new(),
+            ))
+        }
+    };
+    let resolver = settings.try_resolver()?;
+    let resolved = match params::resolve(&document, &resolver) {
+        Ok(resolved) => resolved,
+        Err(error) => return Ok(invalid(vec![error.to_string()], Vec::new())),
+    };
+
+    let mut warnings: Vec<String> = resolved.warnings.iter().map(param_warning_text).collect();
+    match compile_with(&resolved.document, &CompileOptions::default()) {
+        Err(error) => Ok(invalid(vec![resolved.redact(&error.to_string())], warnings)),
+        Ok(plan) => {
+            warnings.extend(plan.warnings.iter().map(warning_text));
+            Ok(serde_json::json!({
+                "valid": true,
+                "stages": plan.stages.len(),
+                "sinks": plan.sinks().count(),
+                "warnings": warnings
+                    .iter()
+                    .map(|warning| resolved.redact(warning))
+                    .collect::<Vec<_>>(),
+                // A secret's entry reads [REDACTED] here, never its value.
+                "resolved": resolved.used,
+            }))
+        }
     }
 }
 

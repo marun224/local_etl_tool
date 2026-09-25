@@ -12,6 +12,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 
+import { AssistPanel, DraftBanner, useAssistant } from "./AssistPanel";
 import { Inspector } from "./Inspector";
 import { Palette } from "./Palette";
 import { DataTab, PlanTab, StatusTab } from "./RunView";
@@ -25,6 +26,15 @@ import {
   specsById,
   type PipelineDoc,
 } from "./document";
+import {
+  acceptDraft,
+  discardDraft,
+  editShown,
+  problemsOf,
+  showDraft,
+  shown,
+  type Studio,
+} from "./studio";
 import {
   asIpcError,
   compilePipeline,
@@ -48,9 +58,17 @@ type Tab = "status" | "plan" | "data";
 
 export default function App() {
   const [manifest, setManifest] = useState<Manifest | null>(null);
-  const [document, setDocument] = useState<PipelineDoc>(emptyDocument);
+  const [studio, setStudio] = useState<Studio>(() => ({
+    document: emptyDocument(),
+    dirty: false,
+    draft: null,
+  }));
   const [path, setPath] = useState<string | null>(null);
-  const [dirty, setDirty] = useState(false);
+  const [assistOpen, setAssistOpen] = useState(false);
+  // What the canvas draws: the assistant's draft while there is one.
+  const document = shown(studio);
+  const dirty = studio.dirty;
+  const drafting = studio.draft !== null;
 
   const [selected, setSelected] = useState<string | null>(null);
   const [validation, setValidation] = useState<Validation | null>(null);
@@ -70,8 +88,7 @@ export default function App() {
   }, []);
 
   const edit = useCallback((next: PipelineDoc) => {
-    setDocument(next);
-    setDirty(true);
+    setStudio((was) => editShown(was, next));
   }, []);
 
   // Validation follows editing, debounced. A canvas that only tells you
@@ -94,24 +111,21 @@ export default function App() {
   }, [document]);
 
   /** Node id → what the engine said about it, for the red boxes. */
-  const problems = useMemo(() => {
-    const found = new Map<string, string>();
-
-    const blamed = validation?.error;
-    if (blamed?.nodeId) found.set(blamed.nodeId, blamed.message);
-
-    for (const stage of run?.stages ?? []) {
-      if (stage.skipped) found.set(stage.nodeId, stage.skipped);
-    }
-
-    return found;
-  }, [validation, run]);
+  const problems = useMemo(() => problemsOf(validation, run?.stages), [validation, run]);
 
   const results = useMemo(() => {
     const found = new Map<string, StageResult>();
     for (const stage of run?.stages ?? []) found.set(stage.nodeId, stage);
     return found;
   }, [run]);
+
+  const assistant = useAssistant((draft, request) => {
+    setStudio((was) => showDraft(was, { document: draft, request }));
+    setSelected(null);
+    setRun(null);
+    setPreview(null);
+    setPlan(null);
+  });
 
   const act = useCallback(
     async (what: string, work: () => Promise<void>) => {
@@ -138,9 +152,8 @@ export default function App() {
       if (typeof picked !== "string") return;
 
       const text = await readPipeline(picked);
-      setDocument(parseDocument(text));
+      setStudio({ document: parseDocument(text), dirty: false, draft: null });
       setPath(picked);
-      setDirty(false);
       setRun(null);
       setPreview(null);
       setPlan(null);
@@ -160,9 +173,9 @@ export default function App() {
         target = picked;
       }
 
-      await writePipeline(target, serializeDocument(document));
+      await writePipeline(target, serializeDocument(studio.document));
       setPath(target);
-      setDirty(false);
+      setStudio((was) => ({ ...was, dirty: false }));
       setToast(`Saved to ${target}`);
     });
 
@@ -212,9 +225,19 @@ export default function App() {
 
         <span className="grow" />
 
-        <button onClick={onOpen}>Open</button>
-        <button onClick={() => onSave(false)}>Save</button>
-        <button onClick={() => onSave(true)}>Save as…</button>
+        <button className={assistOpen ? "on" : ""} onClick={() => setAssistOpen((was) => !was)}>
+          Assistant
+        </button>
+        <span className="sep" />
+        <button onClick={onOpen} disabled={drafting}>
+          Open
+        </button>
+        <button onClick={() => onSave(false)} disabled={drafting}>
+          Save
+        </button>
+        <button onClick={() => onSave(true)} disabled={drafting}>
+          Save as…
+        </button>
         <span className="sep" />
         <button onClick={onCompile} disabled={document.nodes.length === 0}>
           Plan
@@ -222,12 +245,17 @@ export default function App() {
         <button onClick={onPreview} disabled={!selected}>
           Preview
         </button>
-        <button className="primary" onClick={onRun} disabled={document.nodes.length === 0}>
+        <button
+          className="primary"
+          onClick={onRun}
+          disabled={document.nodes.length === 0 || drafting}
+          title={drafting ? "Accept the draft to run it" : undefined}
+        >
           Run
         </button>
       </header>
 
-      <div className="body">
+      <div className={assistOpen ? "body assisting" : "body"}>
         <Palette
           manifest={manifest}
           onAdd={(componentId) => {
@@ -245,25 +273,49 @@ export default function App() {
           }}
         />
 
-        <PipelineCanvas
-          document={document}
-          specs={specs}
-          problems={problems}
-          results={results}
-          selected={selected}
-          onChange={edit}
-          onSelect={setSelected}
-          onRefused={setToast}
-        />
+        <div className="canvas-column">
+          {studio.draft && (
+            <DraftBanner
+              request={studio.draft.request}
+              valid={validation?.valid ?? null}
+              busy={assistant.waitingSince !== null}
+              onAccept={() => setStudio(acceptDraft)}
+              onDiscard={() => {
+                setStudio(discardDraft);
+                setSelected(null);
+              }}
+              onRetry={() => {
+                if (studio.draft) assistant.ask(studio.draft.request);
+                setAssistOpen(true);
+              }}
+            />
+          )}
 
-        <Inspector
-          document={document}
-          node={selectedNode}
-          specs={specs}
-          onChange={edit}
-          onRenamed={setSelected}
-          onError={setToast}
-        />
+          <PipelineCanvas
+            document={document}
+            specs={specs}
+            problems={problems}
+            results={results}
+            selected={selected}
+            draft={drafting}
+            onChange={edit}
+            onSelect={setSelected}
+            onRefused={setToast}
+          />
+        </div>
+
+        {assistOpen ? (
+          <AssistPanel assistant={assistant} onClose={() => setAssistOpen(false)} />
+        ) : (
+          <Inspector
+            document={document}
+            node={selectedNode}
+            specs={specs}
+            onChange={edit}
+            onRenamed={setSelected}
+            onError={setToast}
+          />
+        )}
       </div>
 
       <section className="panel">

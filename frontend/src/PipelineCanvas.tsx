@@ -49,6 +49,8 @@ export interface CanvasProps {
   /** What the last run reported, so the boxes can show it. */
   results: Map<string, StageResult>;
   selected: string | null;
+  /** The assistant's draft is shown, not the pipeline: its nodes are drawn dashed. */
+  draft?: boolean;
   onChange: (next: PipelineDoc) => void;
   onSelect: (nodeId: string | null) => void;
   onRefused: (why: string) => void;
@@ -84,6 +86,7 @@ function Canvas({
   problems,
   results,
   selected,
+  draft = false,
   onChange,
   onSelect,
   onRefused,
@@ -251,7 +254,7 @@ function Canvas({
   );
 
   return (
-    <div className="canvas" ref={wrapper}>
+    <div className={draft ? "canvas is-draft" : "canvas"} ref={wrapper}>
       <ReactFlow
         nodes={nodes}
         edges={edges}

@@ -3,6 +3,46 @@
 **State only.** Design lives in [PLAN_duckle_parity.md](PLAN_duckle_parity.md). Read this file
 first when picking the project back up.
 
+> ## ✅ Phase 11c (the chat panel) — built 2026-09-25, green locally, pushed with `[skip ci]`
+>
+> **What 11c built:** in the desktop app, **Assistant** in the header opens a panel where a
+> request in words becomes a **draft on the canvas**, in place of the pipeline under a banner
+> (Accept, Discard, Try again), its nodes dashed; an invalid draft shows the canvas's red
+> boxes and can be accepted to fix by hand. The model starts on the first request and stays
+> up while the app is open; **Cancel** stops it mid-answer; closing the app stops it.
+> `assist_pipeline` is `async` on a blocking thread, so the window never freezes
+> (decisions 99–105; `docs/assist.md`). **1163 Rust tests** (4 new; the test services were
+> stopped at the user's request, so theirs returned early this run) and **174 frontend**
+> (16 new); fmt, clippy, `tsc` and the frontend build clean; three mutations each caught.
+>
+> **Committed and pushed with 11b, with `[skip ci]`** (the user: "pls commit and push 11b
+> and 11c, do not run git CI"). **Clicking through the app is the user's check** (A73,
+> A74): the workflow keeps Claude off the machine's GUI.
+>
+> **Test services: stopped** (`./scripts/test-services.ps1 -Stop`, the user's request).
+> Start them before the next full run: `./scripts/test-services.ps1`.
+
+> ## ✅ Phase 11b (the local model) — built 2026-09-25, green locally, pushed with `[skip ci]`
+>
+> **What 11b built:** `etl assist "<request>"`: llama.cpp's `llama-server` (`b11173`) and
+> Qwen2.5-Coder-1.5B-Instruct Q4_K_M, fetched by `scripts/fetch-model.ps1` into `tools/`,
+> run on this machine for the one request. The request's words pick at most eight
+> components; the manifest's JSON Schema over those is the grammar; blank optional values
+> are dropped; the draft is checked as `etl validate` does before it is printed or written
+> (`crates/assistant`, `docs/assist.md`). **The verify request validated on the first try
+> in 10 of 10 runs, twice** (the plan asked for 9). **1159 Rust tests** (25 new) with every
+> server up and the model present, none skipped; fmt and clippy clean; 82 components.
+>
+> **Committed and pushed with 11c, with `[skip ci]`**, when the user asked (2026-09-25);
+> CI has not run on 11b or 11c. CI for 11a (run 36035301991) was
+> **green**, the Ubuntu artifact job's disk fix included.
+>
+> **Open for the user:** assignment A68, Claude Code driving `etl mcp`; the
+> website's redeploy. BigQuery, Snowflake and SQL Server wait for checks against the real
+> services (A62, A67).
+>
+> **11c (the chat panel) is built too; see its section above.**
+
 > ## ✅ Phase 11a (the MCP server) — built 2026-09-24, green locally
 >
 > **What 11a built:** `etl mcp`, an MCP server on stdin and stdout (`crates/mcp`, `rmcp`
@@ -334,9 +374,10 @@ first when picking the project back up.
 
 ## Where things stand
 
-- **Next phase:** **11b, the local model and grammar-constrained output**, planned in
-  [PLAN_duckle_parity.md](PLAN_duckle_parity.md) under *Phases 11a–11d*; it starts when the
-  user says "start 11b". **11a is done** (`etl mcp`). **Phases 10m–10u are finished**; Phase 10's later families (the
+- **Next phase:** **11d, the `xf.ai.*` transforms**, whose scope is decided when it starts
+  (decision 98); it starts when the user says so. **11a, 11b and 11c are done** (`etl mcp`,
+  `etl assist`, the chat panel); **11b and 11c are pushed with `[skip ci]`**, so CI has not
+  run on them yet. **Phases 10m–10u are finished**; Phase 10's later families (the
   plan's *Later families*) wait until the user chooses one. **10n (Redis), 10s (Cassandra) and 10t (Neo4j) are not
   built** (decisions 82 and 86).
 - **In progress:** nothing. **Phases 0–9, 10a–10m, 10o–10r and 10u are done** (10a–10f on
@@ -367,7 +408,7 @@ pass), `ctl.throttle` (nothing to throttle until Phase 10 has a row cursor).
 **a scheduler that runs them**, and **a console to watch it from**. From the repo root:
 
 ```powershell
-cargo test --workspace        # 1134 tests: 324 engine, 321 connectors, 113 scheduler, 65 console, 51 e2e, 51 cli, 48 state, 48 verified, 26 runner, 23 secrets, 19 metadata, 17 native e2e, 10 desktop, 9 mcp, 5 plugin-sdk, 4 mcp e2e
+cargo test --workspace        # 1163 tests (with the model in tools/): 13 + 8 + 1 assistant, 3 assist e2e, 14 desktop, 324 engine, 321 connectors, 113 scheduler, 65 console, 51 e2e, 51 cli, 48 state, 48 verified, 26 runner, 23 secrets, 19 metadata, 17 native e2e, 9 mcp, 5 plugin-sdk, 4 mcp e2e
 .\target\debug\etl.exe run samples\pipelines\orders_enriched.json
 .\target\debug\etl.exe validate samples\pipelines\orders_enriched.json
 .\target\debug\etl.exe plan samples\pipelines\orders_enriched.json --script
@@ -836,9 +877,9 @@ fail the run. That is `ctl.fail`'s shape and it needs 6b's execution-model decis
 | 10u | — SQL Server | **done** (against the local TDS fixture only; not checked against real SQL Server) | 2026-09-24 |
 | 11 | AI assistant + MCP server | **planned** in four sub-phases (decisions 91–98) | |
 | 11a | — the MCP server (`etl mcp`, stdio) | **done** (thirteen tools; `docs/mcp.md`) | 2026-09-24 |
-| 11b | — the local model and grammar-constrained output | **next** | |
-| 11c | — the chat panel | planned | |
-| 11d | — the `xf.ai.*` transforms | scope decided when it starts | |
+| 11b | — the local model and grammar-constrained output (`etl assist`) | **done** (10 of 10 on this machine; `docs/assist.md`; pushed, CI not run) | 2026-09-25 |
+| 11c | — the chat panel (desktop app) | **done** (decisions 99–105; pushed, CI not run; clicking through is A73) | 2026-09-25 |
+| 11d | — the `xf.ai.*` transforms | **next**; scope decided when it starts | |
 | 12 | Benchmarks + parity audit | not started | |
 
 ## Settled decisions
@@ -1157,9 +1198,27 @@ Decisions 91–98 are Phase 11's, agreed 2026-09-24, all as recommended:
     schema, the grammar's input and the prompt without one.
 98. **The `xf.ai.*` transforms' scope is decided when 11d starts.**
 
+Decisions 99–105 are Phase 11c's, agreed 2026-09-25 ("pls go with recommended"):
+
+99. **The chat panel is the desktop app's only**, through a Tauri command. The canvas in a
+    browser (an HTTP API for every canvas command behind `etl serve`) is a phase of its own.
+100. **The model starts on the first request and runs while the app is open** (about 1.2 GB;
+    a later request about 25 s, not 55).
+101. **Each message asks for a new pipeline**; *Try again* re-asks with a new seed. Refining a
+    draft by follow-up is not built.
+102. **The draft replaces the canvas's pipeline under a banner**: Accept makes it the document,
+    Discard restores the previous one.
+103. **An invalid draft is shown**, with the canvas's red boxes, and can be accepted and fixed
+    by hand.
+104. **Cancel stops the model mid-answer.**
+105. **Git as for 11b**: no commit, push or CI until the user says; 11b and 11c stay in the
+    working tree.
+
 ## Open decisions
 
-None open. (15, SQL Server's test server, was answered 2026-09-24: a fixture only, decision 87.)
+None open. Questions 17–23 (Phase 11c) were answered 2026-09-25, all as recommended: Settled decisions 99–105.
+
+(15, SQL Server's test server, was answered 2026-09-24: a fixture only, decision 87.)
 
 Resolved 2026-09-23, all as recommended: (1) the session's stderr race is fixed by
 framing stderr with an `error()` marker, not by softening the test; (2) the failed Ubuntu job
@@ -3269,3 +3328,70 @@ plan ride in this commit.
   Running the Kinesis tests alone also meets kinesis-mock's limit on streams being created
   at once; the full suite spreads them out. Then **1134 Rust tests with every server up,
   twice, none skipped**; 158 frontend.
+
+### 2026-09-25 — Resumed; Phase 11b: the local model
+
+Started by the user ("pls start 11b, do not comit and push, aslo do not run CI").
+
+- **Resumed**: CI for `97ab26c` (run 36035301991) green throughout, the Ubuntu artifact job
+  included; Docker Desktop started, the test services up.
+- `scripts/fetch-model.ps1` — `llama-server` `b11173` into `tools/llama/`, the model
+  (Hugging Face revision `f86cb2c`, SHA256 checked) into `tools/models/`.
+- `crates/assistant` — `pick` (the request's words to at most eight components), `prompt`
+  (the description, one example, the request with the narrowed schema as
+  `response_format.json_schema`), `server` (found, started on a free loopback port, killed
+  when dropped), `draft` (blank optional values dropped); 13 unit tests;
+  `tests/schema.rs` (8: all 20 samples accepted, 12 broken documents refused, the picker and
+  prompt over the real registry); `tests/model.rs` (the 9-of-10 check, skipping without the
+  model).
+- `crates/cli` — `etl assist`; `check_document`, shared with MCP's `validate_pipeline`;
+  `tests/assist.rs` (3).
+- **Found on the way**: 7 of the first 10 drafts wrote `"schema": ""` (valid, broken SQL at
+  run time), so blank optional values are dropped; "keep orders over 100" was not offered the
+  filter, so comparisons are now filter's synonyms; `--model` pointing nowhere had fallen back
+  to the vendored model, so a named path must now exist.
+- **10 of 10 on the first try, twice**: `etl assist` ten times (about 55 s each), and the
+  test with one server (3m47s). **1159 Rust tests** with every server up, none skipped; fmt
+  and clippy clean. Frontend untouched (158).
+- Docs: `docs/assist.md`, the plan's as-built notes, `learnings.md`, `commands.md`.
+- **Not committed, not pushed, no CI**, as asked.
+
+### 2026-09-25 — Phase 11c planned; questions 17–23
+
+Started by the user ("pls start 11c"). Under the workflow's rules (questions, then an agreed
+plan, then build), this session planned 11c and asked; nothing of 11c is built.
+
+- **Read**: `frontend/src/ipc.ts` and `App.tsx` (the canvas reaches the engine only through
+  Tauri), `apps/desktop/src/main.rs` (synchronous commands, on the main thread),
+  `crates/console` (its own one-file page, no canvas).
+- The plan's 11c section written in detail; questions 17–23 in *Open decisions*.
+- `assignments.md`: A70–A72 for 11b, missed at the end of 11b.
+
+### 2026-09-25 — Phase 11c: the chat panel
+
+Questions 17–23 answered by the user, all as recommended ("pls go with recommended"):
+decisions 99–105. The test services stopped at the user's request.
+
+- `crates/assistant` — `Server` split into `spawn` and `wait_until_loaded`, with `stop` and
+  `is_alive` from any thread; `STOPPED`.
+- `apps/desktop` — `Assistant` (the server kept, one request at a time, cancel, shut down
+  on exit), `locate_tools`, `assist_pipeline` (`async`, on a blocking thread),
+  `cancel_assist`; `Settings` is `Clone`; 4 tests (2 with the model, 34.9 s).
+- `frontend` — `ipc.ts` (`assistPipeline`, `cancelAssist`, stages `assist` and
+  `cancelled`), `studio.ts` (the document, unsaved flag and draft; `problemsOf` moved here
+  from `App`), `AssistPanel.tsx` (`useAssistant`, the panel, the banner), `App.tsx`,
+  `PipelineCanvas.tsx` (`draft`), `styles.css`; 16 Vitest tests.
+- **Mutations**, each caught by the test meant to: Discard marking the document saved;
+  Shift+Enter asking; a cancel reported as a failure.
+- **1163 Rust tests** (services stopped, theirs returning early), **174 frontend**; fmt,
+  clippy, `tsc`, `npm run build` clean; no `llama-server` left running after the tests.
+- Docs: `docs/assist.md` (the desktop section), the plan's as-built notes, `learnings.md`,
+  `assignments.md` (A73–A74), `commands.md`.
+- **Not committed, not pushed, no CI** (decision 105).
+
+### 2026-09-25 — 11b and 11c committed and pushed, without CI
+
+The user: "pls commit and push 11b and 11c, do not run git CI". One commit for both (their
+docs interleave), with `[skip ci]` in the message, as for 10r. CI's first run on them is
+still owed: the new `etl-assistant` tests and the `jsonschema` dev-dependency have never
+built on Linux.

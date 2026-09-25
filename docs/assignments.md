@@ -539,3 +539,39 @@ Copy-Item samples\pipelines\orders_enriched.json samples\out\scratch\
   might return the value (an error message, a lineage path).
   *Check:* the test still passes, and you can name the line in `main.rs` that masks what you
   tried.
+
+## Phase 11b — the local model
+
+- [ ] **A70. Watch the grammar hold.**
+  *Do:* start `tools/llama/llama-server.exe -m tools/models/qwen2.5-coder-1.5b-instruct-q4_k_m.gguf
+  --port 8099`, and send the same chat request twice with `curl`: once with no
+  `response_format`, once with `{"type": "json_object"}`.
+  *Check:* the first answer is prose around a code block; the second is JSON but invents
+  keys. What does `etl assist`'s `json_schema` add that `json_object` does not?
+
+- [ ] **A71. 🦀 Find a request the picker gets wrong.**
+  *Do:* try `etl assist` with requests of your own ("join orders to customers", "top 10
+  customers by revenue") and read what `pick::pick` offers (a `dbg!` in `draft` will do).
+  *Check:* you have one request whose pipeline leaves a step out because its component was
+  not offered, and a synonym or test in `pick.rs` that fixes it.
+
+- [ ] **A72. Point it at another model.**
+  *Do:* download a different small GGUF chat model and run `etl assist ... --model it.gguf`
+  ten times with different `--seed`s.
+  *Check:* count how many validate. Does the grammar alone make a weaker model good enough?
+
+## Phase 11c — the chat panel
+
+- [ ] **A73. Click through it.**
+  *Do:* `npm --prefix frontend run dev`, then `cargo run -p etl-desktop` from the repo root.
+  Open **Assistant**, ask "read this Postgres table, dedupe, write Parquet", and wait.
+  *Check:* the draft appears dashed under a banner; Discard brings back what you had;
+  Try again gives another; Accept makes it the pipeline with the unsaved dot; Save writes a
+  file `etl validate` passes. Ask again and time it: the second should be about half the
+  first. This is the check 11c leaves to you.
+
+- [ ] **A74. Cancel at each moment.**
+  *Do:* close and reopen the app, ask, and press Cancel within two seconds (the model is
+  loading); ask again and cancel after twenty (it is writing).
+  *Check:* both say "Cancelled." and the next request still works. In Task Manager,
+  `llama-server.exe` is gone after each cancel and after you close the app.
