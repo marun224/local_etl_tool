@@ -2630,3 +2630,20 @@ npm --prefix frontend run typecheck
   and 10 are the long tail. Phase 3's registry decides whether that tail is tractable.
 - **Windows-first.** Path escaping, `\\?\` long paths, and CRLF will bite in Phase 2 escaping and
   Phase 9 cross-builds. Test on Windows from the start.
+
+
+### Phase R1 — the first Windows installer (added 2026-09-25)
+
+**Goal.** A Windows installer of the desktop app that runs pipelines on a machine with nothing
+else installed, linked from the website's download page (Settled decisions 116–124).
+
+**Files.** `apps/desktop/tauri.conf.json` (Headrace, `0.1.0-preview.1`),
+`apps/desktop/tauri.windows.conf.json` (NSIS, the bundled DuckDB and seven extensions),
+`apps/desktop/src/main.rs` (the bundled DuckDB found at start; `Documents\Headrace` for an
+installed build), `scripts/publish-release.ps1`, `docs/releasing.md`; in the website,
+`src/config/release.ts`, `src/pages/download.astro` and the GitHub links.
+
+**Done (2026-09-25).** The installer builds (65.9 MB); its bundled DuckDB loads its extensions
+and runs a sample; the download page renders the release when `published` is set. **Publishing
+it and redeploying the site are the user's steps** (decision 124), and installing it is
+assignment A81. See `docs/releasing.md`.

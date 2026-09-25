@@ -956,3 +956,25 @@ the fuller record. From Phase 10 on, a section is added at the end of each phase
 **Mistakes worth not repeating**
 - **The heredoc swallowed a backslash in `'\\'` again** (a Rust char literal). The Edit tool
   for anything with backslashes, every time.
+
+## Phase R1 — the first Windows installer (2026-09-25)
+
+**Concepts**
+- **An app that shells out needs its tools shipped beside it.** In a checkout the engine finds
+  DuckDB by walking up to `tools/`; an installed app has no checkout, so the installer carries
+  DuckDB as a Tauri resource and the app passes its path on every run.
+- **Where an installed app works matters**: its install folder may be read-only and goes on
+  uninstall, so an installed build works in `Documents\Headrace`.
+- **Ship what is used**: two vendored extensions no component needs were 46 MB of the bundle.
+
+**Decisions and why**
+- **Build and prepare everything, publish nothing**: a public repository and a release are
+  immediate and visible; the script packages by default and publishes only with `-Publish`.
+- **The site's link waits for the file**: `published: false` until the release is live, so the
+  page never offers a download that 404s.
+
+**Mistakes worth not repeating**
+- **Tauri runs `beforeBuildCommand` from the parent of the app folder** (`apps/`), not from the
+  app folder or the repo root: `../frontend`, not `../../frontend` or `frontend`.
+- **Check which shell's directory a PowerShell call runs in** when the session moves between two
+  repos.

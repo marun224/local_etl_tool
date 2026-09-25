@@ -2594,3 +2594,27 @@ git add -A; git status                        # reviewed: 11d's files only
 git -c user.name=... -c user.email=... commit -m "Phase 11d: the six xf.ai transforms ... [skip ci]"
 git push origin main                          # [skip ci], at the user's request
 ```
+
+## 2026-09-25 — Phase R1: the first Windows installer
+
+```bash
+gh repo view marun224/local_etl_tool --json visibility        # PRIVATE
+du -sh tools/duckdb/duckdb.exe tools/duckdb/extensions/v1.5.5/windows_amd64/   # 36M, 247M
+cargo test -p etl-desktop                                     # 16
+cd apps/desktop && ../../frontend/node_modules/.bin/tauri build   # 1: ../../frontend wrong
+#   2: frontend wrong; 3: files vanished from target/release; 4: built, 65.9 MB
+./scripts/publish-release.ps1                                 # packaged, nothing published
+target/release/duckdb/duckdb.exe -c "SET extension_directory=...; LOAD ... x7"   # 7 loaded
+cargo build --release -p etl-cli                              # target/debug had disappeared
+ETL_DUCKDB_BIN=... ETL_DUCKDB_EXTENSIONS=... target/release/etl.exe run samples/pipelines/orders_enriched.json
+# website: npm run build (published off, on, off)            # 0 errors, CSP and external checks pass
+cargo fmt --all; cargo clippy -p etl-desktop --all-targets -- -D warnings   # clean
+npx vitest run                                                # 183
+```
+
+## 2026-09-25 — R1 committed and pushed
+
+```bash
+git add -A; git commit; git push origin main   # engine: CI runs (no [skip ci])
+git add -A; git commit; git push origin main   # website (ETL_Local_WebApp): verify workflow
+```

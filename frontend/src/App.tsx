@@ -202,7 +202,7 @@ export default function App() {
   if (!inDesktopShell()) {
     return (
       <main className="outside">
-        <h1>ETL Local Tool</h1>
+        <h1>Headrace</h1>
         <p>
           This page is open in a plain browser, so there is no engine behind it. Start the
           desktop shell instead:
@@ -217,7 +217,7 @@ export default function App() {
   return (
     <div className="studio">
       <header className="bar">
-        <strong>ETL Local Tool</strong>
+        <strong>Headrace</strong>
         <span className="file">
           {path ?? "untitled"}
           {dirty && <span className="dot" title="unsaved changes" />}

@@ -232,11 +232,46 @@ fn prepare(document: &str, settings: &Settings) -> IpcResult<(Plan, Vec<String>)
 }
 
 fn run_options(settings: &Settings, redact: Vec<String>) -> RunOptions {
+    let bundled = BUNDLED.get();
     RunOptions {
         working_dir: Some(settings.workspace_dir()),
         redact,
+        duckdb_bin: bundled.and_then(|found| found.duckdb.clone()),
+        extension_dir: bundled.and_then(|found| found.extensions.clone()),
         ..Default::default()
     }
+}
+
+/// The DuckDB an installed app carries in its resources (Settled decision
+/// 117), found once at start. In a checkout there is none, and the engine's
+/// own search finds `tools/duckdb/` as it always has.
+struct Bundled {
+    duckdb: Option<PathBuf>,
+    extensions: Option<PathBuf>,
+}
+
+static BUNDLED: std::sync::OnceLock<Bundled> = std::sync::OnceLock::new();
+
+fn bundled_in(resources: &Path) -> Bundled {
+    let duckdb = resources.join("duckdb").join(if cfg!(windows) {
+        "duckdb.exe"
+    } else {
+        "duckdb"
+    });
+    let extensions = resources.join("duckdb").join("extensions");
+    Bundled {
+        duckdb: duckdb.is_file().then_some(duckdb),
+        extensions: extensions.is_dir().then_some(extensions),
+    }
+}
+
+/// Where an installed app keeps its work: `Documents/Headrace`, made if it is
+/// not there. Not the install folder, which may not be writable and is removed
+/// on uninstall along with any run history kept in it.
+fn installed_workspace(documents: &Path) -> std::io::Result<PathBuf> {
+    let workspace = documents.join("Headrace");
+    std::fs::create_dir_all(&workspace)?;
+    Ok(workspace)
 }
 
 fn plan_view(plan: &Plan) -> PlanView {
@@ -621,6 +656,27 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(Arc::new(Assistant::default()))
+        .setup(|app| {
+            let bundled = app
+                .path()
+                .resource_dir()
+                .map(|resources| bundled_in(&resources))
+                .unwrap_or(Bundled {
+                    duckdb: None,
+                    extensions: None,
+                });
+            // An installed build works in Documents/Headrace; a checkout keeps
+            // the directory it was started in, which `cargo run` makes the repo.
+            if bundled.duckdb.is_some() && !cfg!(debug_assertions) {
+                if let Ok(documents) = app.path().document_dir() {
+                    if let Ok(workspace) = installed_workspace(&documents) {
+                        let _ = std::env::set_current_dir(workspace);
+                    }
+                }
+            }
+            let _ = BUNDLED.set(bundled);
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             list_components,
             compile_pipeline,
@@ -861,6 +917,47 @@ mod tests {
             .expect_err("there is no such node");
 
         assert!(error.message.contains("typo"), "{}", error.message);
+    }
+
+    #[test]
+    fn an_installed_apps_duckdb_is_found_in_its_resources_and_nothing_else_is_assumed() {
+        let resources =
+            std::env::temp_dir().join(format!("etl-desktop-resources-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&resources);
+
+        let nothing = bundled_in(&resources);
+        assert!(nothing.duckdb.is_none() && nothing.extensions.is_none());
+
+        let exe = if cfg!(windows) {
+            "duckdb.exe"
+        } else {
+            "duckdb"
+        };
+        std::fs::create_dir_all(resources.join("duckdb/extensions/v1.5.5")).unwrap();
+        std::fs::write(resources.join("duckdb").join(exe), b"binary").unwrap();
+        let found = bundled_in(&resources);
+        assert_eq!(found.duckdb, Some(resources.join("duckdb").join(exe)));
+        assert_eq!(
+            found.extensions,
+            Some(resources.join("duckdb").join("extensions"))
+        );
+    }
+
+    #[test]
+    fn an_installed_app_works_in_a_folder_of_its_own_under_documents() {
+        let documents =
+            std::env::temp_dir().join(format!("etl-desktop-documents-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&documents);
+
+        let workspace = installed_workspace(&documents).unwrap();
+
+        assert_eq!(workspace, documents.join("Headrace"));
+        assert!(workspace.is_dir());
+        assert_eq!(
+            installed_workspace(&documents).unwrap(),
+            workspace,
+            "and again"
+        );
     }
 
     #[test]

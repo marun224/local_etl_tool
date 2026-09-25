@@ -1,0 +1,30 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "bundle": {
+    "targets": [
+      "nsis"
+    ],
+    "resources": {
+      "../../tools/duckdb/duckdb.exe": "duckdb/duckdb.exe",
+      "../../tools/duckdb/extensions/v1.5.5/windows_amd64/delta.duckdb_extension": "duckdb/extensions/v1.5.5/windows_amd64/delta.duckdb_extension",
+      "../../tools/duckdb/extensions/v1.5.5/windows_amd64/delta.duckdb_extension.info": "duckdb/extensions/v1.5.5/windows_amd64/delta.duckdb_extension.info",
+      "../../tools/duckdb/extensions/v1.5.5/windows_amd64/excel.duckdb_extension": "duckdb/extensions/v1.5.5/windows_amd64/excel.duckdb_extension",
+      "../../tools/duckdb/extensions/v1.5.5/windows_amd64/excel.duckdb_extension.info": "duckdb/extensions/v1.5.5/windows_amd64/excel.duckdb_extension.info",
+      "../../tools/duckdb/extensions/v1.5.5/windows_amd64/httpfs.duckdb_extension": "duckdb/extensions/v1.5.5/windows_amd64/httpfs.duckdb_extension",
+      "../../tools/duckdb/extensions/v1.5.5/windows_amd64/httpfs.duckdb_extension.info": "duckdb/extensions/v1.5.5/windows_amd64/httpfs.duckdb_extension.info",
+      "../../tools/duckdb/extensions/v1.5.5/windows_amd64/iceberg.duckdb_extension": "duckdb/extensions/v1.5.5/windows_amd64/iceberg.duckdb_extension",
+      "../../tools/duckdb/extensions/v1.5.5/windows_amd64/iceberg.duckdb_extension.info": "duckdb/extensions/v1.5.5/windows_amd64/iceberg.duckdb_extension.info",
+      "../../tools/duckdb/extensions/v1.5.5/windows_amd64/mysql_scanner.duckdb_extension": "duckdb/extensions/v1.5.5/windows_amd64/mysql_scanner.duckdb_extension",
+      "../../tools/duckdb/extensions/v1.5.5/windows_amd64/mysql_scanner.duckdb_extension.info": "duckdb/extensions/v1.5.5/windows_amd64/mysql_scanner.duckdb_extension.info",
+      "../../tools/duckdb/extensions/v1.5.5/windows_amd64/postgres_scanner.duckdb_extension": "duckdb/extensions/v1.5.5/windows_amd64/postgres_scanner.duckdb_extension",
+      "../../tools/duckdb/extensions/v1.5.5/windows_amd64/postgres_scanner.duckdb_extension.info": "duckdb/extensions/v1.5.5/windows_amd64/postgres_scanner.duckdb_extension.info",
+      "../../tools/duckdb/extensions/v1.5.5/windows_amd64/sqlite_scanner.duckdb_extension": "duckdb/extensions/v1.5.5/windows_amd64/sqlite_scanner.duckdb_extension",
+      "../../tools/duckdb/extensions/v1.5.5/windows_amd64/sqlite_scanner.duckdb_extension.info": "duckdb/extensions/v1.5.5/windows_amd64/sqlite_scanner.duckdb_extension.info"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
+  }
+}

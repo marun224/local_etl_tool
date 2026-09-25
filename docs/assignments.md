@@ -620,3 +620,13 @@ Copy-Item samples\pipelines\orders_enriched.json samples\out\scratch\
   with `Retry-After: 1` twice and then succeeds, with `retries` 1.
   *Check:* it fails, saying 429, and the fixture saw exactly two requests. Raise `retries` to
   2 and it succeeds after about two seconds.
+
+## Phase R1 — the first Windows installer
+
+- [ ] **A81. Install it as a user would.**
+  *Do:* check `target/release-out/v0.1.0-preview.1/Headrace-0.1.0-preview.1-windows-x64-setup.exe`
+  with `Get-FileHash` against SHA256SUMS.txt, run it, and open Headrace from the Start menu.
+  Save a pipeline built from `src.file.csv` on a CSV of your own, then run it.
+  *Check:* it runs with nothing else installed; `Documents\Headrace\.etl\` holds its run
+  history; uninstalling from Settings leaves `Documents\Headrace` alone. This is the check R1
+  leaves to you.

@@ -3,6 +3,27 @@
 **State only.** Design lives in [PLAN_duckle_parity.md](PLAN_duckle_parity.md). Read this file
 first when picking the project back up.
 
+> ## ✅ Phase R1 (the first Windows installer) — built 2026-09-25, pushed, **not published**
+>
+> **What R1 built:** `Headrace-0.1.0-preview.1-windows-x64-setup.exe` (65.9 MB, SHA-256
+> `9c466541…29ad`), an NSIS installer carrying the app, DuckDB 1.5.5 and the seven extensions
+> the components use; an installed app finds them in its resources and works in
+> `Documents\Headrace`. The app is renamed **Headrace** to match the site. In
+> `target/release-out/v0.1.0-preview.1/` with SHA256SUMS.txt and RELEASE_NOTES.md, made by
+> `scripts/publish-release.ps1`. The website's download page shows it as a real Windows download
+> once `published` is set in `src/config/release.ts` (it is **false**); its GitHub links now
+> point at the releases repository. `docs/releasing.md`.
+>
+> **The user's steps, in this order:** `./scripts/publish-release.ps1 -Publish` (creates the
+> public `marun224/headrace-releases` and the pre-release), then `published: true` in the
+> website and its redeploy. **Not checked:** installing it (A81), which writes outside the
+> project. **Both repos committed and pushed** (the user: "pls commit and push all changes"),
+> the engine's without `[skip ci]`, so CI runs for the first time since 11a.
+>
+> **`target/debug` disappeared during this session** (and `target/release` lost files mid-build,
+> failing a build with "path not found"): not something this session ran. The next `cargo
+> test --workspace` rebuilds it from scratch.
+
 > ## ✅ Phase 11d3 (prompt, classify, extract) — built 2026-09-25, green locally, pushed with `[skip ci]`
 >
 > **What 11d3 built:** three components that ask a model about each row, as native
@@ -931,6 +952,7 @@ fail the run. That is `ctl.fail`'s shape and it needs 6b's execution-model decis
 | 11d2 | — the native transform stage; `xf.ai.embed` | **done** (pushed, CI not run; `docs/ai_transforms.md`) | 2026-09-25 |
 | 11d3 | — `xf.ai.prompt`, `xf.ai.classify`, `xf.ai.extract` | **done** (pushed, CI not run; `docs/ai_transforms.md`) | 2026-09-25 |
 | 12 | Benchmarks + parity audit | **next**; not planned in detail | |
+| R1 | The first Windows installer | **built** (pushed; not published; `docs/releasing.md`) | 2026-09-25 |
 
 ## Settled decisions
 
@@ -1281,6 +1303,25 @@ Decisions 106–115 are Phase 11d's, agreed 2026-09-25 ("all as recommended"):
 114. **`etl build` refuses the local models**; the endpoint transforms build, their key a
     secret as today.
 115. **Git as for 11b and 11c**: no commit, push or CI until the user says.
+
+Decisions 116–124 are the first installer's (Phase R1), agreed 2026-09-25 ("go with
+recommended for all"):
+
+116. **Installers are published on GitHub Releases in a new public repo that holds only
+    installers** (`marun224/headrace-releases`); the engine repo stays private.
+117. **The installer carries the app, DuckDB and its extensions.** `llama-server` and the
+    models (about 1.2 GB) are fetched separately, only if wanted.
+118. **Windows x64 only** for the first release, built and tested on this machine.
+119. **Unsigned for now**; the download page says so, with the SHA-256 and SmartScreen's
+    "More info, then Run anyway".
+120. **Only the site's Windows card becomes a real download** ("preview", with version, size
+    and SHA-256); Linux and macOS stay planned.
+121. **Version `0.1.0-preview.1`.**
+122. **The app is renamed Headrace** to match the site (the CLI stays `etl`).
+123. **The site's GitHub links point at the releases repo.**
+124. **Git as before**: no commit, push or CI until the user says; publishing the release and
+    redeploying the site are the user's steps (the site's link must not go live before the file
+    it points at).
 
 ## Open decisions
 
@@ -3554,3 +3595,33 @@ The user: "pls commit and push all changes. do not run CI". One commit for 11d1�
 docs interleave), with `[skip ci]`. CI's first run since 11a is still owed: the assistant,
 the native transforms, the `xf.ai.*` tests (which skip without models) and `jsonschema` have
 never built on Linux.
+
+### 2026-09-25 — Phase R1: the first Windows installer
+
+Asked by the user ("can we embed this ETL Local Tool installer in the download section of web
+app"); questions 34–42 answered all as recommended: decisions 116–124.
+
+- Found first: the engine repo is private; an installed app would not find DuckDB; nothing is
+  signed; the site is deliberately pre-launch.
+- `apps/desktop` — renamed Headrace, `0.1.0-preview.1`, identifier `ai.headrace.desktop`;
+  `tauri.windows.conf.json` (NSIS, DuckDB and seven extensions as resources); `bundled_in`,
+  `installed_workspace`, and a `setup` hook in `main.rs`; 2 tests. The before-commands' paths
+  fixed (Tauri runs them from `apps/`).
+- `tauri build`: failed twice on the before-command's path, once on files vanishing from
+  `target/release` ("path not found"), then built: 65.9 MB.
+- `scripts/publish-release.ps1` (packages; publishes only with `-Publish`); `docs/releasing.md`.
+- Checked: the bundled DuckDB loads its seven extensions and runs `orders_enriched.json`
+  through the release `etl`.
+- Website (`ETL_Local_WebApp`): `src/config/release.ts`, the download page's Windows card and
+  notices, `InstallPaths`' note, GitHub links to the releases repository ("Releases on
+  GitHub"), and the integrations page's "Contribute one" now "Ask for one" at /contact (a
+  releases-only repository takes no contributions). Built with `published` on and off; all
+  its checks pass.
+- **Not committed, not published** (decision 124).
+
+### 2026-09-25 — R1 committed and pushed, with CI
+
+The user: "pls commit and push all changes", without the earlier "do not run CI", so the
+engine's push carries no `[skip ci]`: CI's first run since 11a (11b to R1). The website's push
+runs its verify workflow; its GitHub Pages job is off (`ENABLE_GITHUB_PAGES` unset). The
+installer is **not published**: that is still `./scripts/publish-release.ps1 -Publish`.
